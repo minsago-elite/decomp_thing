@@ -178,6 +178,31 @@ internal class WebRedactionPolicy private constructor(
     /** True when any configured literal or redactable span is present; canary and preview checks. */
     fun leaks(value: String): Boolean = value.isNotEmpty() && (leaksLiteral(value) || redactOnce(value) != value)
 
+    /**
+     * True when [json] publishes [value] byte-for-byte in a closed-syntax (opaque) field such as an identity or
+     * selector. Producers use it to choose a public identity before the final pass would rewrite one field of a
+     * record while leaving a related field, or another view of the same record, unchanged.
+     */
+    fun preservesOpaque(value: String): Boolean {
+        opaqueChecks.incrementAndGet()
+        return if (OPAQUE_SYNTAX.matches(value)) !leaksLiteral(value) else text(value) == value
+    }
+
+    /** Opaque-field checks made by this policy; request paths that must not scan a supplied selector are measured by it. */
+    internal val opaqueChecks = java.util.concurrent.atomic.AtomicLong()
+
+    /**
+     * Identifies which addressable identities this policy publishes unchanged. Those depend only on the configured
+     * values, so equally configured policies share one scope and a cached projection can key derived lookups by it.
+     */
+    internal val selectorScope: String = java.security.MessageDigest.getInstance("SHA-256").let { digest ->
+        for (literal in literals.sorted()) {
+            val bytes = literal.toByteArray(Charsets.UTF_8)
+            digest.update(java.nio.ByteBuffer.allocate(Int.SIZE_BYTES).putInt(bytes.size).array()); digest.update(bytes)
+        }
+        java.util.HexFormat.of().formatHex(digest.digest())
+    }
+
     private fun leaksLiteral(value: String): Boolean = literals.any { value.contains(it) }
 
     private fun json(value: JsonElement, opaque: Boolean, routing: Boolean = false): JsonElement = when (value) {
@@ -459,4 +484,5 @@ private fun routingKey(key: String): Boolean = key == "basePath" || key.endsWith
 
 /** Closed-syntax protocol fields whose exact bytes are load-bearing. */
 private fun opaqueKey(key: String): Boolean = key == "id" || key == "version" ||
-    key == "selector" || key == "moduleSelector" || opaqueKeySuffixes.any(key::endsWith)
+    // A neighborhood's focus and an inventory's module filter are selectors and must publish identically to them.
+    key == "selector" || key == "moduleSelector" || key == "focus" || key == "module" || opaqueKeySuffixes.any(key::endsWith)

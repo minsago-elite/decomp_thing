@@ -123,6 +123,16 @@ class WebRouteMatrixTest {
             Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.ROUTE_SPECIFIC),
         "$R/revisions/{revisionId}/types/{entityId}" to
             Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.ROUTE_SPECIFIC),
+        "$R/revisions/{revisionId}/graph" to Live(setOf("GET", "HEAD"), Outcome(422, "VALIDATION_FAILED"), Query.ROUTE_SPECIFIC),
+        "$R/revisions/{revisionId}/scorecard" to Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.PAGED),
+        "$R/revisions/{revisionId}/scorecard-comparison?baselineRunId=&baselineRevisionId=" to
+            Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.PAGED),
+        "$R/revisions/{revisionId}/records/program-model?structureVersion=" to
+            Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.ROUTE_SPECIFIC, media = OCTETS),
+        "$R/revisions/{revisionId}/records/module-plan?structureVersion=" to
+            Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.ROUTE_SPECIFIC, media = OCTETS),
+        "$R/revisions/{revisionId}/records/confidence?structureVersion=" to
+            Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.ROUTE_SPECIFIC, media = OCTETS),
         "$R/revisions/{revisionId}/source-diff" to Live(setOf("GET", "HEAD"), Outcome(422, "VALIDATION_FAILED"), Query.ROUTE_SPECIFIC),
         "$R/revisions/{revisionId}/source-diff/file" to
             Live(setOf("GET", "HEAD"), Outcome(422, "VALIDATION_FAILED"), Query.ROUTE_SPECIFIC),
@@ -394,6 +404,8 @@ class WebRouteMatrixTest {
             .replace("{directoryId}", "root").replace("{repositoryId}", "repository_missing")
             .replace("{worktreeId}", "worktree_missing").replace("{operationId}", "operation_missing")
             .replace("{moduleId}", "module_missing").replace("{entityId}", "entity_missing")
+            .replace("?structureVersion=", "?structureVersion=" + "0".repeat(64))
+            .replace("?baselineRunId=&baselineRevisionId=", "?baselineRunId=$runId&baselineRevisionId=baseline_missing")
     }
 
     private class Session(val cookie: Map<String, String>, private val csrf: String) {

@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { assertAudit, connectedSessionText, connectionAxSummary, connectionNoticeFailures, connectionNoticeNames, connectionNoticeShots, measureConnectionState, qualifyConnectionNotice, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, compactJobFilterAuditEvidence, compactTimedAuditEvidence, focusTrajectoryFrames, focusTrajectoryMs, fileOpenChunkQuery, fileOpenContract, fileOpenEvidenceContract, fileOpenFailures, fileOpenMetadataPhase, fileOpenPin, fileOpenPreviewPhase, renderedPreviewDigest, sourceResponseIdentity, timedPhaseScript, filterElementVisible, focusFilterSubmitForTiming, jobFilterContract, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit, applyAuditProfile, auditProfileEvidence, chromiumSupplementalInteractionContexts, engineSupplementalInteractionContexts, preparedFocusInteractionContexts,
+import { assertAudit, clickJourneyLink, graphJourneyContract, graphJourneyFailures, measureGraphDrawing, runGraphJourney, connectedSessionText, connectionAxSummary, connectionNoticeFailures, connectionNoticeNames, connectionNoticeShots, measureConnectionState, qualifyConnectionNotice, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, compactJobFilterAuditEvidence, compactTimedAuditEvidence, focusTrajectoryFrames, focusTrajectoryMs, fileOpenChunkQuery, fileOpenContract, fileOpenEvidenceContract, fileOpenFailures, fileOpenMetadataPhase, fileOpenPin, fileOpenPreviewPhase, renderedPreviewDigest, sourceResponseIdentity, timedPhaseScript, filterElementVisible, focusFilterSubmitForTiming, jobFilterContract, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit, applyAuditProfile, auditProfileEvidence, chromiumSupplementalInteractionContexts, engineSupplementalInteractionContexts, preparedFocusInteractionContexts,
   captureOutputSignatureChart, chartCaptureFailures, chartCaptureSets, measureChartCaptureTile, measureOutputSignatureChart, pngDimensions, prepareChartCaptureTile } from './packaged-browser-audit.mjs';
 
 // Controls for the packaged audit's own verdict: each injected defect must be reported, so a
@@ -14,8 +14,17 @@ const origin = 'http://127.0.0.1:1';
 const interactionPages = auditFixtures(repo, 'b'.repeat(64)).pages;
 const base = `${origin}/nested/assets/ui/`;
 const manifest = { buildId: 'b'.repeat(64), files: [{ path: 'index.html' }, { path: 'assets/index-a.js' }, { path: 'assets/index-a.css' },
-  { path: 'assets/Home-a.js' }, { path: 'assets/highlight.worker-a.js' }, { path: 'assets/mark-a.svg' }] };
-const responses = ['assets/index-a.js', 'assets/index-a.css', 'assets/Home-a.js'].map((path) => ({ url: base + path, status: 200 }));
+  { path: 'assets/Home-a.js' }, { path: 'assets/highlight.worker-a.js' }, { path: 'assets/mark-a.svg' },
+  { path: 'assets/GraphRoute-a.js' }, { path: 'assets/Scorecard-a.js' }, { path: 'assets/layout.worker-a.js' }] };
+const responses = ['assets/index-a.js', 'assets/index-a.css', 'assets/Home-a.js', 'assets/GraphRoute-a.js', 'assets/Scorecard-a.js']
+  .map((path) => ({ url: base + path, status: 200 }));
+const workerTarget = (name, purpose) => ({ url: `${base}assets/${name}`, purpose, responses: [{ url: `${base}assets/${name}`, status: 200 }] });
+function graphEvidence() {
+  const steps = auditFixtures(repo, manifest.buildId).graphJourney.map(step => ({ action: step.navigate ? 'navigate' : step.link,
+    reads: (step.reads ?? []).map(path => ({ path, ok: true })), elapsedMs: 30 }));
+  const { x, y, width, height, edges } = graphJourneyContract.layout;
+  return { steps, drawing: { title: graphJourneyContract.graphTitle, width, height, nodes: x.map((value, index) => [value, y[index]]), edges, focusNodes: 1 } };
+}
 const stop = { key: 1, heading: false, target: 'button "Refresh"', focusVisible: true, outlineStyle: 'solid', outlineWidth: 3, contrast: 5.1, inViewport: true, unobscured: true };
 function timingEvidence(cold = 400, feedback = 40, data = 90) {
   return { coldLoad: { samples: 20, median: cold, p95: cold }, routeFeedback: { samples: 50, median: feedback, p95: feedback },
@@ -145,7 +154,8 @@ function clean(captures = cleanCaptures) {
     fulfilled: [...filterRequests, ...opened.fulfilled],
     jobFilter: jobFilterEvidence(),
     fileOpen: opened.fileOpen,
-    workers: { highlightedTokens: 12, targets: [{ url: `${base}assets/highlight.worker-a.js`, responses: [{ url: `${base}assets/highlight.worker-a.js`, status: 200 }] }] },
+    workers: { highlightedTokens: 12, targets: [workerTarget('highlight.worker-a.js', 'highlight'), workerTarget('layout.worker-a.js', 'graph-layout')] },
+    graph: graphEvidence(),
     timing: { ...timing, interactions: { samples: interactions.length, median: 20, p95: 20 },
       raw: { ...timing.raw, interactions: interactions.map(entry => entry.elapsedMs) } },
     connectionNotice: connectionEvidence(),
@@ -659,6 +669,129 @@ test('requires every declared script/style and the worker to resolve under the b
   const foreign = clean();
   foreign.workers.targets[0] = { url: 'blob:http://127.0.0.1:1/x', responses: [] };
   assert.match(verdict(foreign).join('\n'), /worker outside the asset base/);
+});
+
+// #644 / hosted run 46049372146: the nested-prefix audit opened only the function inventory, so the lazy
+// scorecard and graph chunks and the layout worker were never loaded, and highlighting stood in for every worker.
+test('hosted regression: highlighting-only evidence cannot account for the lazy graph chunks or layout worker', () => {
+  const hosted = clean();
+  delete hosted.graph;
+  hosted.workers.targets = [workerTarget('highlight.worker-a.js', 'highlight')];
+  const failures = verdict(hosted, responses.filter(entry => !/GraphRoute|Scorecard/.test(entry.url))).join('\n');
+  assert.match(failures, /graph journey: evidence missing/);
+  assert.match(failures, /not loaded under .*assets\/GraphRoute-a\.js, assets\/Scorecard-a\.js, assets\/layout\.worker-a\.js/);
+  assert.doesNotMatch(failures, /highlight\.worker-a\.js/);
+});
+
+test('a layout worker counts only with the deterministic drawing from its own journey', () => {
+  const wrong = clean();
+  wrong.graph.drawing.nodes[1] = [16, 16];
+  assert.match(verdict(wrong).join('\n'), /drawing differs from the deterministic layout/);
+  assert.match(verdict(wrong).join('\n'), /not loaded under .*assets\/layout\.worker-a\.js/);
+  const none = clean();
+  none.graph.drawing = null;
+  assert.match(verdict(none).join('\n'), /graph journey: no drawing[\s\S]*layout\.worker-a\.js/);
+  // Highlighting is not a graph result: a layout worker tagged by the highlight step, or untagged, is not counted.
+  for (const purpose of ['highlight', undefined, 'other']) {
+    const mislabeled = clean();
+    mislabeled.workers.targets[1] = workerTarget('layout.worker-a.js', purpose);
+    assert.match(verdict(mislabeled).join('\n'), /layout\.worker-a\.js/, String(purpose));
+  }
+  // The graph step's worker must be the packaged layout worker, not the highlighter started again.
+  const swapped = clean();
+  swapped.workers.targets[1] = workerTarget('highlight.worker-a.js', 'graph-layout');
+  assert.match(verdict(swapped).join('\n'), /graph-layout worker has another identity/);
+  const undeclared = clean();
+  undeclared.workers.targets[1] = workerTarget('layout.worker-z.js', 'graph-layout');
+  assert.match(verdict(undeclared).join('\n'), /not loaded under .*layout\.worker-a\.js/);
+  const failedScript = clean();
+  failedScript.workers.targets[1].responses[0].status = 404;
+  assert.match(verdict(failedScript).join('\n'), /worker script status 404/);
+});
+
+test('an ordinary script response cannot replace evidence that the worker ran during its step', () => {
+  const audit = clean();
+  audit.workers.targets = [];
+  const downloads = [...responses, ...['highlight.worker-a.js', 'layout.worker-a.js'].map(name =>
+    ({ url: base + 'assets/' + name, status: 200 }))];
+  const failures = verdict(audit, downloads).join('\n');
+  assert.match(failures, /not loaded under .*assets\/highlight\.worker-a\.js, assets\/layout\.worker-a\.js/);
+});
+
+test('the graph journey must follow every reader link and read every structure record', () => {
+  const skipped = clean();
+  skipped.graph.steps = skipped.graph.steps.filter(step => step.action !== graphJourneyContract.links.scorecard);
+  assert.match(verdict(skipped).join('\n'), /graph journey: links/);
+  const unread = clean();
+  unread.graph.steps.find(step => step.action === graphJourneyContract.links.calls).reads[0].ok = false;
+  assert.match(verdict(unread).join('\n'), /did not read .*\/graph/);
+  assert.deepEqual(graphJourneyFailures(graphEvidence()), []);
+});
+
+test('the pinned drawing is the layout.ts result for the fixture neighborhood', async () => {
+  const { layoutGraph } = await import(resolve(repo, 'frontend/src/graph/layout.ts'));
+  const fixtures = auditFixtures(repo, manifest.buildId);
+  const pathFor = suffix => fixtures.graphJourney.flatMap(step => step.reads ?? []).find(path => path.endsWith(suffix));
+  const { document } = fixtures.respond('GET', pathFor('/graph'), 'application/json');
+  const { nodes, edges } = document.data.neighborhood;
+  const layout = layoutGraph(nodes.map(({ index, depth }) => ({ index, depth })), edges.map(({ source, target }) => ({ source, target })));
+  const pinned = graphJourneyContract.layout;
+  assert.deepEqual({ x: layout.x, y: layout.y, width: layout.width, height: layout.height, edges: edges.length }, { ...pinned });
+});
+
+test('structure journey fixtures are rebound to the audit revision and the pinned function version', () => {
+  const fixtures = auditFixtures(repo, manifest.buildId);
+  const reads = fixtures.graphJourney.flatMap(step => step.reads ?? []);
+  const documents = reads.map(path => fixtures.respond('GET', path, 'application/json'));
+  assert.ok(documents.every(response => response.status === 200), JSON.stringify(reads));
+  const [scorecard, , inventory, detail, graph] = documents.map(response => response.document.data);
+  for (const data of [scorecard, inventory, detail, graph]) assert.deepEqual(data.binding, inventory.binding);
+  assert.equal(graph.structureVersion, detail.structureVersion);
+  assert.equal(detail.entity.selector, graphJourneyContract.focus);
+  assert.equal(graph.neighborhood.nodes[0].selector, graphJourneyContract.focus);
+  assert.equal(fixtures.respond('GET', reads.at(-1).replace('/graph', '/functions/fn_0000000000401100'), '').status, 404);
+});
+
+test('runGraphJourney drives links and records only reads made by each step', async () => {
+  const fixtures = auditFixtures(repo, manifest.buildId);
+  const fulfilled = []; const actions = [];
+  const evidence = await runGraphJourney({ steps: fixtures.graphJourney, fulfilled,
+    navigate: async path => { actions.push(['navigate', path]); },
+    click: async text => { actions.push(['click', text]);
+      const step = fixtures.graphJourney.find(candidate => candidate.link === text);
+      // The calls link "forgets" its graph read, which must surface as a failed read.
+      for (const path of step.reads) if (text !== graphJourneyContract.links.calls) fulfilled.push({ method: 'GET', path, status: 200 });
+      return true; },
+    ready: async () => true, evaluate: async expression => (assert.equal(expression, measureGraphDrawing), graphEvidence().drawing) });
+  assert.deepEqual(actions.filter(([kind]) => kind === 'click').map(([, text]) => text),
+    [graphJourneyContract.links.scorecard, graphJourneyContract.links.functions, graphJourneyContract.functionLink, graphJourneyContract.links.calls]);
+  assert.deepEqual(graphJourneyFailures(evidence).map(failure => failure.replace(/ \/jobs.*/, '')),
+    [`graph journey: ${graphJourneyContract.links.calls} did not read`]);
+  await assert.rejects(runGraphJourney({ steps: fixtures.graphJourney, fulfilled: [], navigate: async () => {}, click: async () => false,
+    ready: async () => true, evaluate: async () => null }), /missing single link Read the recorded scorecard/);
+});
+
+test('journey scripts click one exact visible link and read the drawn node translations', () => {
+  const link = (text, rects = 1) => ({ textContent: ` ${text} `, getClientRects: () => ({ length: rects }), clicked: 0, click() { this.clicked += 1; } });
+  const one = link('main'); const hidden = link('main', 0); const other = link('mainly');
+  const run = (links) => runInNewContext(clickJourneyLink('main'), { document: { querySelectorAll: () => links } });
+  assert.equal(run([one, hidden, other]), true); assert.equal(one.clicked, 1);
+  assert.equal(run([link('main'), link('main')]), false);
+  assert.equal(run([other]), false);
+  const nodes = [['248', '40'], ['480', '16']].map(([x, y], index) => ({ getAttribute: () => `translate(${x} ${y})`, index }));
+  const svg = { getAttribute: name => ({ width: '672', height: '114' })[name],
+    querySelectorAll: selector => selector === 'g.graph-node' ? nodes : selector === 'path.graph-edge' ? { length: 5 } : { length: 1 } };
+  const measured = runInNewContext(measureGraphDrawing, { document: { querySelector: selector => selector === 'main h1' ? { textContent: 'Recorded relationships' } : svg } });
+  assert.deepEqual(JSON.parse(JSON.stringify(measured)), { title: 'Recorded relationships', width: 672, height: 114, nodes: [[248, 40], [480, 16]], edges: 5, focusNodes: 1 });
+});
+
+test('both audit drivers run the same graph journey with step-tagged workers', async () => {
+  const { readFile } = await import('node:fs/promises');
+  for (const file of ['packaged-browser-audit.mjs', 'packaged-browser-engines.mjs']) {
+    const source = await readFile(resolve(repo, 'scripts', file), 'utf8');
+    assert.match(source, /runGraphJourney\(\{ steps: fixtures\.graphJourney/, file);
+    assert.match(source, /purpose: (?:workerPurpose|record\.workerPurpose \?\? null)/, file);
+  }
 });
 
 test('enforces the documented loopback timing budgets', () => {
@@ -1899,4 +2032,31 @@ test('timed phases require the same signal and details on consecutive frames and
   assert.ok(previewProbe.includes(JSON.stringify(fileOpenContract.files[0].firstRow)));
   assert.ok(!previewProbe.includes(`${JSON.stringify(fileOpenContract.files[0].firstRow)}\\n#include`),
     'the preview probe embeds boundary rows only, not the complete source text');
+});
+
+test('the attempt view links its result revision to the audited structure revision', () => {
+  const fixtures = auditFixtures(repo, manifest.buildId);
+  const run = fixtures.respond('GET', fixtures.graphJourney.find(step => step.link === graphJourneyContract.links.scorecard).reads[1], '').document.data;
+  assert.ok(fixtures.graphJourney.flatMap(step => step.reads ?? []).every(path => !path.includes('/revisions/') || path.includes(`/revisions/${run.resultRevisionId}/`)));
+});
+
+test('the scorecard fixture page is admitted by the client page rule', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const SCORECARD_PAGE_LIMIT = Number(/export const SCORECARD_PAGE_LIMIT = (\d+);/.exec(await readFile(resolve(repo, 'frontend/src/structure/scorecardQuery.ts'), 'utf8'))[1]);
+  const fixtures = auditFixtures(repo, manifest.buildId);
+  const path = fixtures.graphJourney.find(step => step.link === graphJourneyContract.links.scorecard).reads[0];
+  const { modules } = fixtures.respond('GET', path, '').document.data.scorecard;
+  assert.equal(graphJourneyContract.scorecardPageLimit, SCORECARD_PAGE_LIMIT);
+  assert.deepEqual([modules.page.limit, modules.page.nextCursor, modules.items.length], [graphJourneyContract.scorecardPageLimit, null, 0]);
+  assert.ok(JSON.stringify(fixtures.respond('GET', path, '').document.data.scorecard.metrics).includes(graphJourneyContract.scorecardValue));
+});
+
+test('the neighborhood fixture echoes the graph defaults of a reader first link', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(resolve(repo, 'frontend/src/graph/query.ts'), 'utf8');
+  const defaults = Function(`return (${/export const GRAPH_DEFAULTS = (\{[^}]+\})/.exec(source)[1]})`)();
+  const fixtures = auditFixtures(repo, manifest.buildId);
+  const path = fixtures.graphJourney.find(step => step.link === graphJourneyContract.links.calls).reads[0];
+  const { query } = fixtures.respond('GET', path, '').document.data;
+  assert.deepEqual(query, { view: 'calls', focus: graphJourneyContract.focus, ...defaults });
 });

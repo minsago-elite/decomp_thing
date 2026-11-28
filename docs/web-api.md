@@ -175,11 +175,15 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET`, `HEAD R/revisions/{revisionId}/source-directories/{directoryId}` | `200 revisionDirectory` | Lazy immediate children of canonical input prefixes; use `root` for the first directory; #188 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}` | `200 revisionFile` | Recorded file metadata and opaque parent directory, without requesting its body; #188 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}/chunk` | `200 sourceChunk` | Digest-verified bounded UTF-8 or hex ranges of a committed input; #490, #545 |
-| `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}/content` | `200 application/octet-stream` | Complete authorized input download, at most 8 MiB; #491, #545 |
-| `GET`, `HEAD R/revisions/{revisionId}/functions` | `200 functionInventory` | Bounded, signed, filtered/sorted pages of the manifest-committed program model; explicit model/plan states; [program structure](web-program-structure.md); #534, #536 |
+| `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}/content` | `200 application/octet-stream` | Complete authorized input download, at most 8 MiB; a request with a body is `413 BODY_TOO_LARGE` before any delivery guard; #491, #545 |
+| `GET`, `HEAD R/revisions/{revisionId}/functions` | `200 functionInventory` | Bounded, signed, filtered/sorted pages of the manifest-committed program model; explicit model/plan states; a `module` filter naming no recorded or publishable module is `404 MODULE_NOT_FOUND`; [program structure](web-program-structure.md); #534, #536 |
 | `GET`, `HEAD R/revisions/{revisionId}/modules` | `200 moduleInventory` | Recorded totals/diagnostics and module pages; #535 |
 | `GET`, `HEAD R/revisions/{revisionId}/modules/{moduleId}` | `200 moduleDetail` | One recorded module with owned-entity pages and revision source links; #535 |
 | `GET`, `HEAD R/revisions/{revisionId}/{functions,globals,types}/{entityId}` | `200 entityDetail` | Bounded entity facts, cross-links and unrecorded fact families; optional `structureVersion` pin; #539, #540 |
+| `GET`, `HEAD R/revisions/{revisionId}/graph` | `200 structureNeighborhood` | Call or module-dependency neighborhood around one recorded focus with explicit depth (≤3), node (≤200) and edge (≤400) limits, exact or unknown omitted counts and relationship families; a focus that is not recorded, not publishable or has no model/plan to resolve against is `404 ENTITY_NOT_FOUND`/`MODULE_NOT_FOUND`; [program structure](web-program-structure.md#graph-neighborhoods); #537, #538 |
+| `GET`, `HEAD R/revisions/{revisionId}/scorecard` | `200 structureScorecard` | Recorded confidence-report metrics with numerators, denominators, recorded and reproduced values, explicit unmeasured/unknown/partial/failed states, reconciliation and a signed module page; #541 |
+| `GET`, `HEAD R/revisions/{revisionId}/records/{program-model,module-plan,confidence}?structureVersion=` | `200 application/octet-stream` | Exact digest-checked bytes of one cited, manifest-committed structure record, pinned to the displayed structure version; `X-Decomp-Content-SHA256`; exact committed evidence, not subject to view-level redaction (raw evidence policy: #2040); a request with a body is `413 BODY_TOO_LARGE`; #538, #541 |
+| `GET`, `HEAD R/revisions/{revisionId}/scorecard-comparison?baselineRunId=&baselineRevisionId=` | `200 scorecardComparison` | Two attempts of one job side by side; exact deltas only when blocking report, schema and scope identities match; #542 |
 | `GET J/revisions`, `GET V` | `200 revisions`, `200 revision` | Immutable source/acceptance bindings; #165/#199 |
 | `GET V/sources`, `GET V/sources/{fileId}` | `200 files`, `200 file` | Bounded tree/page/read; #165/#188/#189 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-diff` | `200 sourceDiff` | Changed files against an explicit `baseRunId`/`baseRevisionId` of the same job, from recorded digests; #550 |
@@ -188,7 +192,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET`, `HEAD R/revisions/{revisionId}/source-search` | `200 sourceSearch` | Explicit revision and query/byte/result/deadline bounds over canonical inputs; replaces the reserved `V/search`; #547, #548 |
 | `GET`, `HEAD J/artifacts` | `200 artifacts` | Fixed attempt families; optional `runId`, with `revisionId` only together with `runId`; #551 |
 | `GET`, `HEAD J/artifacts/{artifactId}` | `200 artifact` | One cataloged artifact descriptor; #551 |
-| `GET`/`HEAD J/artifacts/{artifactId}/content` | `200`, `206`, `304` bytes | Digest-bound pinned stream, single byte range, strong ETag preconditions; #552 |
+| `GET`/`HEAD J/artifacts/{artifactId}/content` | `200`, `206`, `304` bytes | Digest-bound pinned stream, single byte range, strong ETag preconditions; a request with a body is `413 BODY_TOO_LARGE` before any delivery guard; #552 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-archive` | `200 sourceArchive` | Revision, recorded build, acceptance, archive digest, verification state and Git mapping before download; #554, #556 |
 | `POST R/revisions/{revisionId}/archive-verifications` | `202 operation`, `Location` | Strict `archiveVerificationRequest` with the displayed digest, session/Origin/CSRF, `Idempotency-Key`; no binary execution; replaces the reserved `V/archive-verifications`; #555 |
 | `GET`, `HEAD R/revisions/{revisionId}/archive-verifications/{operationId}` | `200 operation` | `archive.verify` operation state for this listener; #555 |
@@ -332,11 +336,14 @@ job's current accepted revision. A different expected input is 409
 `INPUT_UNVERIFIED`, so recovery never silently starts from an unverified
 workspace. `retry` always publishes a new queued attempt linked through
 `previousRunId`, with `recovery.mode: retry` and no restored state. `resume`
-requires the registered adapter's trusted checkpoint policy, the exact recorded
-harness identity and a verified checkpoint; the new attempt records
-`recovery.restores` (`agent-session` or `project-evidence`) and the checkpoint
-digest, and the adapter receives the predecessor's workflow-owned report
-directory. Unsupported or unsafe resume is 409 with a specific code
+requires the exact recorded harness identity and an adapter that can both
+verify and consume a checkpoint. The successor records the admitted restoration
+mode in `recovery.restores` (`agent-session` or `project-evidence`) and the
+checkpoint digest. At dispatch the service rechecks both attempts, the digest
+of the captured bytes, and the restoration mode. The continuation receives
+a detached capture of at most 1 MiB. A changed checkpoint leaves the
+successor `failed` with reason `refused` and no candidate. Replaying the
+same command returns that successor. Unsupported or unsafe resume at admission is 409 with a specific code
 (`RESUME_UNSUPPORTED`, `HARNESS_CHANGED`, `CHECKPOINT_MISSING`,
 `CHECKPOINT_MISMATCH`, `CHECKPOINT_UNVERIFIED`, `WORKSPACE_UNVERIFIED`,
 `SESSION_QUARANTINED`, `CLEANUP_UNVERIFIED`). A newer attempt is 409
@@ -2017,8 +2024,29 @@ requested or displayed (the activity view shows "Not reported").
 finishes, including refused and failed requests: `session.start`, `session.end`, `job.upload`, `job.update`,
 `job.delete`, `run.start`, `run.cancel`, `run.recover`, `run.progress-pin`, `agent.preflight`,
 `operator.auth-inspection` and `operator.auth-inspection-cancel` (legacy), `support.export`, and
-`git.repository-mutate` for managed repository creation/attachment. This Git mutation entry is
-scoped to the validated job ID from `POST /api/v1/jobs/{jobId}/repositories`. An entry records a
+`git.repository-mutate` for managed repository creation/attachment, and `revision.archive-verify` for
+`POST J/runs/{runId}/revisions/{revisionId}/archive-verifications`. This Git mutation entry is
+scoped to the validated job ID from `POST /api/v1/jobs/{jobId}/repositories`. Revision-bound actions also carry
+`target.revisionId`: the revision the server confirmed in the operation `Location` it sent, otherwise (refusals,
+or a configured-sensitive value) a `requested_revision_`-prefixed domain-separated SHA-256 commitment to the requested
+route value. Managed `git.init` entries carry the requested source as `target.runId` and `target.revisionId` with the
+same rule: the raw IDs once the server admitted the request (or replayed the operation it admitted), commitments for
+refusals or configured-sensitive values. Run and revision commitments, like the `If-Match` commitment, are unkeyed
+domain-separated SHA-256 hashes for correlating entries, not secrecy: anyone holding the log can confirm a guessed
+value offline, so low-entropy IDs stay guessable. The field is additive and present only on revision-bound entries;
+other entries keep their earlier shape. The idempotency key and request body are never recorded.
+
+**Audit log compatibility.** Audit log v1 entries written by this version may contain a new action
+(`revision.archive-verify`) and a new field (`target.revisionId`). An older version ignores `target.revisionId` on
+actions it already knows, so those entries stay readable there without their revision target. It rejects any segment
+that contains `revision.archive-verify`: it hides every entry in that segment from exports, reports the audit
+incomplete, and refuses new appends whenever startup must read such a segment. This version reads segments that mix
+older and newer entries and keeps appending to them, but no downgrade is supported. To downgrade after the first
+`revision.archive-verify` write, stop the server and move the whole `<store>/.web-audit/` directory aside, keeping it
+intact, before starting the older version. The older version then writes a separate, new audit log. To return to this
+or a later version, stop the server, move the rollback-era `<store>/.web-audit/` aside as well (preserve it: it holds
+the records written during the rollback), then restore the original directory. Both logs remain readable by this or a
+later version; they are not merged automatically. An entry records a
 sequence, time, the response request ID, the actor (`browser_session` with a domain-separated SHA-256 digest of the authorization-owned session
 identity, or `unauthenticated`), the action, the target job/run, an `ifmatch_`-prefixed, domain-separated SHA-256
 commitment to a bounded strong `If-Match` value (never the caller's header bytes), and the server version the

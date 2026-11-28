@@ -1,0 +1,206 @@
+{
+  "apiVersion": 1,
+  "kind": "structureNeighborhood",
+  "requestId": "request_fixture_structureNeighborhood",
+  "data": {
+    "binding": {
+      "jobId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runId": "run_1",
+      "revisionId": "revision_1"
+    },
+    "authority": "recorded-program-model",
+    "state": "available",
+    "stateReason": null,
+    "structureVersion": "dbfe49ea3931085458a4eda22356dc54053320a8a1aeb43b286478aebbaafaf0",
+    "sourceSha256": "45bacb100aad5d511b5aee2b9e7581e1a1204c112d0e76f8ef1fb8f1017b08e0",
+    "metadataVersion": "3b8b492406b5541072a8be3d77d219a694f62edcea39a6836afd4dbd7677db1d",
+    "manifestSha256": "7872d8ab64c77c4ce5232596073725cdabac9a93283c3732e090570d581a267e",
+    "model": {
+      "state": "available",
+      "stateReason": null,
+      "path": "reports/program_model.json",
+      "sha256": "85a3e1bbfb1ad739d0bdf3521765273aef7e7a519c6ccdaab8d488f3598598b3",
+      "sizeBytes": "1526",
+      "schemaVersion": 2
+    },
+    "plan": {
+      "state": "available",
+      "stateReason": null,
+      "path": "reports/module_plan.json",
+      "sha256": "b055a06f81aea8ef49b85b1c02f40784ca817d6cb1823b10ee3677f07c2a06c8",
+      "sizeBytes": "586",
+      "schemaVersion": 2
+    },
+    "recoveryAssessment": "unassessed",
+    "capabilities": [
+      {
+        "id": "function-inventory",
+        "state": "available",
+        "reason": null
+      },
+      {
+        "id": "recorded-prototypes",
+        "state": "available",
+        "reason": "PROTOTYPE_TEXT_NOT_ABI_CHECKED"
+      },
+      {
+        "id": "module-ownership",
+        "state": "available",
+        "reason": null
+      },
+      {
+        "id": "generated-headers",
+        "state": "available",
+        "reason": null
+      },
+      {
+        "id": "global-byte-evidence",
+        "state": "not-recorded",
+        "reason": "MODEL_SCHEMA_BEFORE_3"
+      },
+      {
+        "id": "recovery-assessment",
+        "state": "not-recorded",
+        "reason": "EXTRACTION_LABELS_ARE_UNASSESSED"
+      },
+      {
+        "id": "type-references",
+        "state": "not-recorded",
+        "reason": "MODEL_RECORDS_DECLARATION_TEXT_ONLY"
+      },
+      {
+        "id": "type-layouts",
+        "state": "not-recorded",
+        "reason": "A_SERIES_LAYOUT_FACTS_NOT_RECORDED"
+      },
+      {
+        "id": "abi-interfaces",
+        "state": "not-recorded",
+        "reason": "A_SERIES_ABI_FACTS_NOT_RECORDED"
+      },
+      {
+        "id": "cpp-object-model",
+        "state": "not-recorded",
+        "reason": "A_SERIES_CPP_FACTS_NOT_RECORDED"
+      }
+    ],
+    "query": {
+      "view": "calls",
+      "focus": "fn_0000000000401000",
+      "direction": "both",
+      "depth": 2,
+      "nodeLimit": 2,
+      "edgeLimit": 1,
+      "unresolved": "show"
+    },
+    "graphState": "available",
+    "graphReason": null,
+    "relationships": [
+      {
+        "id": "recorded-call",
+        "state": "available",
+        "reason": "MODEL_RECORDS_CALL_TARGETS"
+      },
+      {
+        "id": "unrecorded-call-target",
+        "state": "available",
+        "reason": "CALL_TARGET_HAS_NO_MODEL_RECORD"
+      },
+      {
+        "id": "inferred-endpoint",
+        "state": "available",
+        "reason": "PARTIAL_OR_SYNTHETIC_EXTRACTION"
+      },
+      {
+        "id": "call-kind",
+        "state": "not-recorded",
+        "reason": "MODEL_DOES_NOT_RECORD_DIRECT_OR_INDIRECT_CALLS"
+      },
+      {
+        "id": "external-call",
+        "state": "not-recorded",
+        "reason": "MODEL_DOES_NOT_RECORD_EXTERNAL_TARGETS"
+      }
+    ],
+    "neighborhood": {
+      "nodes": [
+        {
+          "index": 0,
+          "depth": 0,
+          "outgoing": {
+            "total": 2,
+            "shown": 1
+          },
+          "incoming": {
+            "total": 2,
+            "shown": 0
+          },
+          "kind": "function",
+          "entityId": "fn_0000000000401000",
+          "selector": "fn_0000000000401000",
+          "name": "main",
+          "address": "0x401000",
+          "extractionStatus": "recovered",
+          "evidenceState": "recovered",
+          "ownership": "owned",
+          "moduleId": "core",
+          "moduleSelector": "core",
+          "implementationUnresolved": false,
+          "reportedUnresolved": true,
+          "nameCollision": false,
+          "implementationPath": "src/modules/core.c",
+          "implementationFileId": "file_4_50c41d7759e5243285a81b76219c7d4457d30f412c096202f4823d95adb32ac5"
+        },
+        {
+          "index": 1,
+          "depth": 1,
+          "outgoing": {
+            "total": 1,
+            "shown": 0
+          },
+          "incoming": {
+            "total": 1,
+            "shown": 1
+          },
+          "kind": "function",
+          "entityId": "fn_0000000000401010",
+          "selector": "fn_0000000000401010",
+          "name": "helper",
+          "address": "0x401010",
+          "extractionStatus": "partial",
+          "evidenceState": "inferred",
+          "ownership": "owned",
+          "moduleId": "core",
+          "moduleSelector": "core",
+          "implementationUnresolved": false,
+          "reportedUnresolved": true,
+          "nameCollision": false,
+          "implementationPath": "src/modules/core.c",
+          "implementationFileId": "file_4_50c41d7759e5243285a81b76219c7d4457d30f412c096202f4823d95adb32ac5"
+        }
+      ],
+      "edges": [
+        {
+          "source": 0,
+          "target": 1,
+          "relationship": "call",
+          "resolution": "recorded",
+          "references": 1,
+          "recordedCycle": false
+        }
+      ],
+      "completeness": {
+        "state": "truncated",
+        "reasons": [
+          "NODE_LIMIT"
+        ],
+        "reachableNodes": 5,
+        "reachableEdges": 5,
+        "omittedNodes": 3,
+        "omittedEdges": 4,
+        "edgesBeyondDepth": 0,
+        "filteredEdges": 0
+      }
+    }
+  }
+}

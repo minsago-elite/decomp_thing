@@ -5,9 +5,10 @@ import { promises as fs, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { assertAudit, auditFixtures, auditProfileEvidence, auditViewports, captureOutputSignatureChart, chartCaptureSets, engineSupplementalInteractionContexts, measureContrast, measureFocus, measureOutputSignatureChart, measurePage } from './packaged-browser-audit.mjs';
+import { assertAudit, auditFixtures, clickJourneyLink, runGraphJourney, auditProfileEvidence, auditViewports, captureOutputSignatureChart, chartCaptureSets, engineSupplementalInteractionContexts, measureContrast, measureFocus, measureOutputSignatureChart, measurePage } from './packaged-browser-audit.mjs';
 import { createEngineDiagnostics, diagnosticOverflowFailure } from './packaged-browser-engine-diagnostics.mjs';
-import { isPlaywrightScreenshotCspViolation, openEngineAuditPage, serveEngineAuditFixtures } from './packaged-browser-engine-adapter.mjs';
+import { armAttemptCommandSettle } from './packaged-browser-engine-keyboard.mjs';
+import { isPlaywrightScreenshotCspViolation, openEngineAuditPage, serveEngineAuditFixtures, waitForEngineExpression } from './packaged-browser-engine-adapter.mjs';
 import { attachExceptionContext, summarizeExceptionContexts } from './packaged-browser-exception-context.mjs';
 
 // Cross-engine packaged smoke and audit (#631). The DevTools-based check-packaged-web-browser.mjs
@@ -380,7 +381,7 @@ async function context(options = {}) {
   created.on('page', (page) => {
     diag.page(page);
     page.on('pageerror', (error) => { record.exceptions.push(String(error)); diag.exception(error, page); });
-    page.on('worker', (worker) => record.workers.push({ url: worker.url(), responses: [] }));
+    page.on('worker', (worker) => record.workers.push({ url: worker.url(), purpose: record.workerPurpose ?? null, responses: [] }));
   });
   return { context: created, record };
 }
@@ -524,7 +525,7 @@ async function audit(packagedOrigin, manifest) {
 
 async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
   const records = []; const interactions = [];
-  let highlightedTokens = 0; let keyboard = null;
+  let highlightedTokens = 0; let keyboard = null; let graph = null;
   const populated = (page) => `document.querySelector('main h1') !== null && document.querySelector('main [aria-busy="true"]') === null
     && document.body.innerText.includes(${JSON.stringify(page.rendered)}) && !document.querySelector('main [role="alert"]')`;
   const open = async (target, page, context, prepare = true) => {
@@ -659,6 +660,8 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
       keyboard = { steps: [] };
       const overview = fixtures.pages.find((page) => page.name === 'attempt overview');
       await open(target, overview, 'keyboard commands');
+      const overviewJob = new RegExp(`^/nested/jobs/([0-9a-f]{32})/runs/${fixtures.runId}$`).exec(overview.path)?.[1];
+      assert.ok(overviewJob, `Attempt overview path ${overview.path} does not name the fixture attempt`);
       for (const [mode, command, key, done] of [['retry', 'Retry as a new attempt', ' ', `Open new attempt ${fixtures.retriedRunId}`],
         ['running', 'Request cancellation', 'Enter', `Cancellation of attempt ${fixtures.runId} was recorded`]]) {
         fixtures.controls.mode = mode;
@@ -667,8 +670,13 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
         await target.keyboard.press('Enter');
         await target.getByText(/Available actions verified/).waitFor();
         keyboard.steps.push({ action: command, tabs: await tabTo(command) });
-        await target.keyboard.press(key === ' ' ? 'Space' : key);
-        await target.getByText(done).first().waitFor();
+        const settled = armAttemptCommandSettle(target, { origin, basePath: '/nested/', jobId: overviewJob, runId: fixtures.runId,
+          action: mode === 'running' ? 'cancel' : 'recover', readLabel: 'Read available actions' });
+        const reread = await settled(async () => {
+          await target.keyboard.press(key === ' ' ? 'Space' : key);
+          await target.getByText(done).first().waitFor();
+        });
+        keyboard.steps.push({ action: `${command} re-read`, ...reread });
         const sent = fulfilled.filter((entry) => entry.method === 'POST').slice(before);
         assert.equal(sent.length, 1, `${command} must send exactly one command`);
         assert.ok(sent[0].idempotencyKey && sent[0].ifMatch === `"${fixtures.runVersion}"` && sent[0].csrf, `${command} lost its identity-bound headers: ${JSON.stringify(sent[0])}`);
@@ -680,8 +688,16 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
       const saved = await fs.readFile(await download.path());
       assert.ok(saved.equals(fixtures.sourceBytes), 'Keyboard download bytes differ from the recorded input');
       keyboard.download = { suggestedFilename: download.suggestedFilename(), bytes: saved.length, matches: true };
+      record.workerPurpose = 'highlight';
       await open(target, source, 'worker/CSP qualification');
       highlightedTokens = await target.locator('.source-token').count();
+      // #644: the lazy scorecard and graph chunks and the layout worker, opened through the reader's links.
+      record.workerPurpose = 'graph-layout';
+      graph = await diagnostics.phase('graph-journey', () => runGraphJourney({ steps: fixtures.graphJourney, fulfilled,
+        navigate: path => target.goto(origin + path), click: text => target.evaluate(clickJourneyLink(text)),
+        ready: (expression, label) => waitForEngineExpression(target, expression, label, { timeout: 20000 }),
+        evaluate: expression => target.evaluate(expression) }));
+      record.workerPurpose = null;
     });
     record.exceptionContext.auditPhase = `${viewport.name} closing`;
     await created.close();
@@ -728,7 +744,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
     layout, contrast, focus, chart, chartScreenshots, chartCaptures, fulfilled, unmapped, interactions,
     workers: { highlightedTokens,
       targets: workerTargets.map((worker) => ({ ...worker, responses: responses.filter((response) => response.url === worker.url) })) },
-    keyboard, timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data),
+    graph, keyboard, timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data),
       interactions: summary(interactionTimes), raw: { cold, feedback, data, interactions: interactionTimes } } };
   return { result, records, responses, origin };
 }

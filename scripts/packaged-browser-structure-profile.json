@@ -7,6 +7,7 @@
     "include/modules/{module}.h": ["archive-payload", "build-input", "editable", "public-interface", "viewable"],
     "src/modules/{module}.c": ["archive-payload", "build-input", "editable", "module-implementation", "viewable"],
     "reports/program_model.json": ["archive-payload", "evidence", "viewable"],
-    "reports/module_plan.json": ["archive-payload", "evidence", "viewable"]
+    "reports/module_plan.json": ["archive-payload", "evidence", "viewable"],
+    "reports/confidence.json": ["archive-payload", "evidence", "viewable"]
   }
 }

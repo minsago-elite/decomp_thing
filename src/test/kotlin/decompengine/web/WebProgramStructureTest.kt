@@ -38,6 +38,7 @@ class WebProgramStructureTest {
         val modelInput: String = inputSha,
         /** Non-module files whose manifest records carry acceptedImplementation=true, which the manifest permits. */
         val acceptedOtherPaths: Set<String> = emptySet(),
+        streamed: Boolean = false,
     ) {
         val sources = (listOf("Makefile", "include/decomp_types.h") + modules.flatMap { listOf("src/modules/$it.c", "include/modules/$it.h") })
             .associateWith { "// $it\n".toByteArray() }
@@ -68,13 +69,19 @@ class WebProgramStructureTest {
             "reports/runs/$runId/source-tree/source_tree_manifest.json" to manifest,
             "reports/runs/$runId/source-tree/reports/build_contract.json" to descriptor,
         )).mapValues { captured(it.value) }.toMutableMap()
-        val reads = mutableListOf<String>()
-        val evidence = WebSourceCatalogEvidence(listOf(profile), { captured(inputBytes).copy(identity = INPUT_IDENTITY) }) { _, path, maximum ->
+        val reads: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
+        val evidence = WebSourceCatalogEvidence(listOf(profile), { captured(inputBytes).copy(identity = INPUT_IDENTITY) }, readArtifact = { _, path, maximum ->
             reads += path
             val file = files[path] ?: error("Unexpected read $path")
             if (file.bytes.size > maximum) throw RepairBudgetExceededException("fixture exceeds $maximum")
             file
-        }
+        }, verifyInput = null, verifyArtifact = null, streamArtifact = if (!streamed) null else { _, path, maximum, sha, size, consume ->
+            reads += "stream:$path"
+            val file = files.getValue(path)
+            require(file.bytes.size.toLong() <= maximum && file.bytes.size.toLong() == size)
+            consume(java.io.ByteArrayInputStream(file.bytes))
+            if (WebExplorationArtifact.sha256(file.bytes) != sha) revisionSourceChanged()
+        })
         val cache = WebProgramStructureCache()
         fun pagesWithCache(cache: WebProgramStructureCache, timing: ((String, Long) -> Unit)? = null): WebProgramStructurePages {
             return WebProgramStructurePages { job, run, revision, project ->
@@ -83,6 +90,7 @@ class WebProgramStructureTest {
                 else evidence.readStructureMeasured(reference, cache, timing, project)
             }
         }
+        fun pages(cache: WebProgramStructureCache) = pagesWithCache(cache)
         fun pagesWithFreshCache(timing: ((String, Long) -> Unit)? = null) = pagesWithCache(WebProgramStructureCache(), timing)
         val pages = pagesWithCache(cache)
     }
@@ -138,6 +146,23 @@ class WebProgramStructureTest {
         BooleanArray(names.size), BooleanArray(names.size), Array(names.size) { emptyArray<String>() },
         Array(names.size) { emptyArray<String>() }, IntArray(names.size))
 
+    @Test fun `100000 reordered function identities compare exactly and observe cancellation`() {
+        val ids = Array(100_000) { "function_$it" }
+        val names = List<String?>(ids.size) { null }
+        val current = columnTable(WebStructureKind.FUNCTION, names, ids)
+        val baseline = columnTable(WebStructureKind.FUNCTION, names, ids.reversedArray())
+        assertTrue(current.samePopulation(baseline))
+        Thread.currentThread().interrupt()
+        try {
+            assertFailsWith<java.util.concurrent.CancellationException> { current.samePopulation(baseline) }
+        } finally {
+            Thread.interrupted()
+        }
+        val global = columnTable(WebStructureKind.GLOBAL, listOf(null), arrayOf(ids[0]))
+        val function = columnTable(WebStructureKind.FUNCTION, listOf(null), arrayOf(ids[0]))
+        assertFalse(function.samePopulation(global))
+    }
+
     private fun collisionIndex(functionNames: List<String?>, globalNames: List<String?>, typeNames: List<String?>) =
         WebProgramStructureIndex(WebRevisionSourceReference(jobId, runId, revisionId, inputSha, "version_1"),
             inputSha, inputSha, inputSha, "metadata", WebStructureOutcome.AVAILABLE, null, null,
@@ -174,7 +199,7 @@ class WebProgramStructureTest {
             original.inputSha256, original.metadataVersion, original.outcome, original.model, original.modelSchemaVersion,
             original.planOutcome, original.plan, original.tables, modules, original.sourceFileIds,
             original.sharedInterfacePath, original.unknownPlanReferences, original.retainedBytes)
-        val pages = WebProgramStructurePages { _, _, _, project -> project(index) { revision.model!! } }
+        val pages = WebProgramStructurePages { _, _, _, project -> project(index) { _, _ -> revision.model!! } }
         val first = pages.modules("owner", jobId, runId, revisionId, "limit=1")
         assertContract("moduleInventory", first)
         assertEquals(2, first.getValue("summary").jsonObject.getValue("dependencyCycles").jsonPrimitive.int)
@@ -239,6 +264,19 @@ class WebProgramStructureTest {
             val table = columnTable(WebStructureKind.FUNCTION, List(count) { null })
             assertContentEquals(IntArray(count) { it }, table.byAddress)
         }
+    }
+
+    @Test fun `entity detail uses committed stream adapter and preserves byte capture response`() {
+        val content = model(functions)
+        val array = Revision(content, null, emptyList())
+        val streaming = Revision(content, null, emptyList(), streamed = true)
+        streaming.pages.functions("owner", jobId, runId, revisionId, null)
+        streaming.reads.clear()
+        val expected = array.pages.entity(WebStructureKind.FUNCTION, jobId, runId, revisionId, functions.first().id, null)
+        val actual = streaming.pages.entity(WebStructureKind.FUNCTION, jobId, runId, revisionId, functions.first().id, null)
+        assertEquals(expected, actual)
+        assertTrue(streaming.reads.any { it.startsWith("stream:") && it.endsWith("program_model.json") })
+        assertFalse(streaming.reads.any { !it.startsWith("stream:") && it.endsWith("program_model.json") })
     }
 
     @Test fun `private entity ids stay distinct after redaction and agree across inventory and references`() {
@@ -426,7 +464,6 @@ class WebProgramStructureTest {
             "evidence=unresolved&sort=id&limit=1" to listOf("fn_0000000000401100", "fn_0000000000402000", "fn_ffffffffffffffff"),
             "module=core&ownership=owned&limit=1" to listOf("fn_0000000000401000", "fn_0000000000401100"),
             "status=failed" to listOf("fn_0000000000402000"),
-            "module=absent" to emptyList(),
         )) {
             val seen = mutableListOf<String>()
             var cursor: String? = null
@@ -449,9 +486,13 @@ class WebProgramStructureTest {
                 revision.pages.functions(owner, jobId, runId, revisionId, "$query&cursor=$cursor")
             }.code)
         }
-        for (query in listOf("sort=size", "order=up", "status=verified", "evidence=verified", "limit=201", "unknown=1", "search=")) {
+        for (query in listOf("sort=size", "order=up", "status=verified", "evidence=verified", "limit=201", "unknown=1", "search=", "module=../x")) {
             assertEquals(422, assertFailsWith<WebAccessDenied> { revision.pages.functions("owner", jobId, runId, revisionId, query) }.status, query)
         }
+        // A module filter is a selector: an unrecorded module is not found rather than an empty result.
+        assertEquals("MODULE_NOT_FOUND", assertFailsWith<WebAccessDenied> {
+            revision.pages.functions("owner", jobId, runId, revisionId, "module=absent")
+        }.code)
     }
 
     @Test fun `changed structure records expire cursors and pinned reads`() {
@@ -1112,6 +1153,42 @@ class WebProgramStructureTest {
             assertFailsWith<WebProgramStructureBuilder.WebStructureFailure> { planBudget.charge(1) }.reason)
     }
 
+    @Test fun `speculative model charges join snapshot and plan admission before projection publication`() {
+        val revision = standard()
+        val snapshot = revision.evidence.readRevision(revision.reference)
+        val manifest = SourceTreeManifestReader.parse(revision.manifest.decodeToString(), profile)
+        val bytes = revision.model!!
+        val parsed = WebProgramStructureBuilder.parseModel(bytes).value!!
+        assertTrue(parsed.retainedBytes > 0)
+        val snapshotCharge = 64 * 1024L + snapshot.files.withIndex().sumOf { (row, file) ->
+            128L + 2L * (file.evidence.path.length + revisionSourceFileId(revision.reference, row, file.evidence.path).length)
+        }
+        fun build(charge: Long) = WebProgramStructureBuilder.build(snapshot, profile, manifest, {
+            WebStructureEvidence(captured(bytes), sha(bytes), WebStructureParse(
+                WebProgramStructureBuilder.ParsedModel(parsed.schemaVersion, parsed.inputSha256, parsed.tables, charge,
+                    parsed.retainedCharges.copyOf().also {
+                        it[WebStructureCharge.MODEL_ENTITIES.ordinal] += charge - parsed.retainedBytes
+                    }),
+                WebStructureOutcome.AVAILABLE))
+        }, {
+            val planBytes = revision.plan!!
+            WebStructureEvidence(captured(planBytes), sha(planBytes), WebProgramStructureBuilder.parsePlan(planBytes))
+        })
+        val admitted = build(parsed.retainedBytes)
+        assertTrue(admitted.available)
+        assertEquals("available", admitted.planOutcome.state)
+        assertTrue(admitted.retainedBytes > snapshotCharge + parsed.retainedBytes)
+        val maximum = WebProgramStructureBuilder.MAXIMUM_RETAINED_BYTES
+        val modelOverflow = build(maximum)
+        assertEquals("MODEL_RETAINED_BYTES_EXCEEDED", modelOverflow.outcome.reason)
+        assertTrue(modelOverflow.tables.isEmpty())
+        val planOverflow = build(maximum - snapshotCharge)
+        assertTrue(planOverflow.available)
+        assertEquals("PLAN_RETAINED_BYTES_EXCEEDED", planOverflow.planOutcome.reason)
+        assertTrue(planOverflow.modules.isEmpty())
+        assertTrue(planOverflow.tables.all { table -> table.owners.all { it == OWNER_NOT_RECORDED } })
+    }
+
     @Test fun `canonical identifiers reuse only the matching kind and retain exact mixed charges`() {
         val f = RecoveredFunction("f", "F", 1u, "void F(void)", null)
         val same = RecoveredFunction("same", "S", 2u, "void S(void)", null)
@@ -1342,7 +1419,7 @@ class WebProgramStructureTest {
     }
 
     private inner class StreamingCapture(val revision: Revision = standard()) {
-        val events = mutableListOf<String>()
+        val events: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
         val phases = mutableListOf<String>()
         var compareFailure: Exception? = null
         var fenceFailure: String? = null
@@ -1366,7 +1443,7 @@ class WebProgramStructureTest {
                 compareFailure?.let { throw it }
                 if (same(expected, revision.files.getValue(path))) StableComparison.SAME else StableComparison.DIFFERENT
             })
-        fun read(project: (WebProgramStructureIndex, () -> ByteArray) -> WebProgramStructureIndex = { index, _ -> index }) =
+        fun read(project: (WebProgramStructureIndex, WebStructureRecordReader) -> WebProgramStructureIndex = { index, _ -> index }) =
             evidence.readStructureMeasured(revision.reference, revision.cache, { phase, _ -> phases += phase }, project)
         fun clear() { events.clear(); phases.clear() }
         val prefix get() = WebProgramStructureCache.Prefix(jobId, runId, revisionId, revision.sourceSha, inputSha)
@@ -1590,6 +1667,13 @@ class WebProgramStructureTest {
         assertEquals(1, detail.getValue("entity").jsonObject.getValue("calledBy").jsonObject.getValue("total").jsonPrimitive.int)
         val modulePage = revision.pages.modules("owner", jobId, runId, revisionId, "limit=200")
         assertEquals(modules.size, modulePage.getValue("totalModules").jsonPrimitive.int)
+        // First reads of the same revision with an empty projection cache: the full manifest, model and plan build.
+        val firstReads = (1..3).map {
+            val fresh = revision.pages(WebProgramStructureCache())
+            started = System.nanoTime()
+            assertEquals(200, fresh.functions("owner", jobId, runId, revisionId, "limit=200").items().size)
+            (System.nanoTime() - started) / 1_000_000
+        }.sorted()
         warm.sort()
         println("program-structure-scale functions=$count modelBytes=${revision.model!!.size} coldMs=$coldSamples " +
             "coldP50Ms=$coldP50 coldP95Ms=$coldP95 coldMaxMs=${orderedCold.last()} " +
@@ -1633,6 +1717,9 @@ class WebProgramStructureTest {
             "slowestPhases=${coldPhases[slowestIndex].mapValues { (_, nanos) -> nanos / 1_000_000 }}")
         // D0 budgets: bounded responses (≤200 rows, <1 MiB), first-data-page latency and incremental JVM memory.
         assertTrue(bytes < 1_000_000, "page bytes $bytes")
+        // Shared CI hosts are noisy: the 500 ms budget is reported above and qualified in the packaged journey, while
+        // this ceiling only catches a regression to the earlier multi-second rebuild.
+        assertTrue(firstReads[1] < 3 * FIRST_READ_BUDGET_MS, "first-read latency $firstReads")
         assertTrue(warm[warm.size / 2] < 500, "warm page latency $warm")
         assertTrue(retained < 256L * 1024 * 1024, "retained projection bytes $retained")
     }
@@ -1654,6 +1741,7 @@ class WebProgramStructureTest {
     }
 
     private companion object {
+        const val FIRST_READ_BUDGET_MS = 500L
         val INPUT_IDENTITY = LinuxFileIdentity(LinuxFileKey(1, 1), 0x8180, 1000, 1000, 1, 1, true, false, false)
     }
 }

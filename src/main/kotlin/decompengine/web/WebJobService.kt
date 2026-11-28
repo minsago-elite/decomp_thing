@@ -15,8 +15,6 @@ import decompengine.jobs.WorkflowStoreException
 import decompengine.jobs.WorkflowTerminalReason
 import decompengine.jobs.WorkflowTransition
 import decompengine.jobs.recoveryDisposition
-import decompengine.project.SourceTreeManifestProbe
-import decompengine.project.SourceTreeManifestStage
 import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
@@ -60,12 +58,37 @@ internal fun <T> withWebUploadPublicationOutcome(
     throw WebJobServiceException("RECOVERY_REQUIRED", "Upload publication is uncertain. Inspect storage before retrying.", failure)
 }
 
-/** Terminal publication and shutdown signalling share this fence, independently of cleanup locks. */
-internal class WebCompletionPublicationFence(private val publishShutdown: () -> Unit) {
+/**
+ * Terminal publication, shutdown signalling and continuation launch permits share this fence, independently
+ * of cleanup locks. A permit is granted only before the shutdown signal, under the same lock that publishes
+ * it, so shutdown either refuses a launch or finds its permit and interrupts the holder. At most
+ * [maximumLaunches] permits are outstanding at once.
+ */
+internal class WebCompletionPublicationFence(private val maximumLaunches: Int = 1, private val publishShutdown: () -> Unit) {
+    init { require(maximumLaunches in 1..64) }
     private val mutex = ReentrantLock(true)
-    fun signalShutdown() = mutex.withLock { publishShutdown() }
+    private var shutdownSignalled = false
+    private val launches = LinkedHashSet<WebLaunchPermit<*>>()
+    fun signalShutdown() = mutex.withLock {
+        shutdownSignalled = true
+        try { publishShutdown() } finally { launches.forEach { it.holder.interrupt() } }
+    }
     fun <T> publishCompletion(publish: () -> T): T = mutex.withLock { publish() }
+
+    /**
+     * Grants the calling thread a permit, or returns null after the shutdown signal or at capacity. [prepare]
+     * runs under the fence and must be inert and bounded; it must not wait for, or call back into, the service.
+     */
+    fun <W> grantLaunch(prepare: () -> W): WebLaunchPermit<W>? = mutex.withLock {
+        if (shutdownSignalled || launches.size >= maximumLaunches) null
+        else WebLaunchPermit(Thread.currentThread(), prepare()).also { launches += it }
+    }
+
+    /** The holder releases its permit after the launched work returns; shutdown no longer interrupts it. */
+    fun releaseLaunch(permit: WebLaunchPermit<*>) = mutex.withLock { launches.remove(permit); Unit }
 }
+
+internal class WebLaunchPermit<W>(val holder: Thread, val prepared: W)
 
 internal fun selectWebLegacyCompletion(status: String, message: String, stopped: Boolean): Pair<String, String> =
     if (status == "complete" && stopped) "failed" to "Server stopped before the operation reported completion"
@@ -290,6 +313,7 @@ class WebJobService(
         require(workers in 1..2 && queueCapacity in 1..32) { "invalid workflow worker or queue bound" }
         workers + queueCapacity
     }
+    private val recoveryInspections = java.util.concurrent.Semaphore(maximumInFlight)
     private val ownedExecutor = if (executor == null) {
         require(workers in 1..2 && queueCapacity in 1..32)
         ThreadPoolExecutor(workers, workers, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(queueCapacity), { task ->
@@ -311,7 +335,7 @@ class WebJobService(
         storageWriterExclusion { decompengine.jobs.RetainedStorageUsage.measure(store.storageRoot, maximumBytes).logicalBytes }
     })
     private val sourceCatalogEvidence = WebSourceCatalogEvidence(sourceProfiles, ::readSourceCatalogInput, ::readArtifact,
-        ::verifySourceCatalogInput, ::verifySourceCatalogArtifact, ::compareSourceCatalogArtifact)
+        ::verifySourceCatalogInput, ::verifySourceCatalogArtifact, ::compareSourceCatalogArtifact, ::streamSourceCatalogArtifact)
     private val programStructureCache = WebProgramStructureCache()
 
     /** Installs a deterministic retained-byte ceiling before tests admit any upload. */
@@ -344,7 +368,7 @@ class WebJobService(
     @Volatile private var initialized = false
     @Volatile private var stopping = false
     @Volatile private var closed = false
-    private val completionPublication = WebCompletionPublicationFence { stopping = true }
+    private val completionPublication = WebCompletionPublicationFence(maximumInFlight) { stopping = true }
     private val retentionJobs = java.util.ArrayDeque<String>()
     private val retentionRuns = java.util.ArrayDeque<Pair<String, String>>()
     private var retentionCycleActive = false
@@ -683,6 +707,8 @@ class WebJobService(
 
     /** Test seam: runs inside each physical listing read, where no service monitor may be held. */
     @Volatile internal var listingReadObserver: (String) -> Unit = {}
+    /** Test seam: runs under the service monitor after the continuation's last ownership check, before its permit. */
+    @Volatile internal var continuationLaunchObserver: () -> Unit = {}
 
     /**
      * Complete bounded HTML collection. Reads never acquire ownership or retain workflow histories.
@@ -847,6 +873,15 @@ class WebJobService(
     }
 
     @Synchronized
+    private fun streamSourceCatalogArtifact(jobId: String, path: String, maximumBytes: Long,
+        sha256: String, size: Long, consume: (java.io.InputStream) -> Unit) {
+        requireInitializedRead()
+        val segments = canonicalReportSegments(path)
+        if (segments[1] == "runs") getAttempt(jobId, segments[2]) else presentation(jobId)
+        sourceCatalogVerification { store.streamCommittedArtifact(jobId, path, maximumBytes, sha256, size, consume) }
+    }
+
+    @Synchronized
     private fun compareSourceCatalogArtifact(jobId: String, path: String, maximumBytes: Long,
         expected: decompengine.repair.StableRegularFile): decompengine.repair.StableComparison {
         requireInitializedRead()
@@ -926,39 +961,33 @@ class WebJobService(
 
     /** Recorded model/plan projection of the actual persisted candidate, rechecked after projection. */
     internal fun <T> readProgramStructure(jobId: String, runId: String, revisionId: String,
-        project: (WebProgramStructureIndex, () -> ByteArray) -> T): T {
-        val reference = revisionSourceReference(jobId, runId, revisionId)
-        val structureTiming = java.lang.Boolean.getBoolean("decompengine.web.structureTiming")
-        val timing = if (structureTiming) { phase: String, elapsedNanos: Long ->
-            System.err.println("web-structure-timing phase=$phase elapsedNanos=$elapsedNanos")
-        } else null
-        val manifestProbe = if (structureTiming) object : SourceTreeManifestProbe {
-            private var active: SourceTreeManifestStage? = null
-            private var startedNanos = 0L
-
-            override fun start(stage: SourceTreeManifestStage) {
-                end()
-                active = stage
-                startedNanos = System.nanoTime()
+        project: (WebProgramStructureIndex, WebStructureRecordReader) -> T): T {
+        val timing = if (java.lang.Boolean.getBoolean("decompengine.web.structureTiming")) WebStructureTiming() else null
+        var status = "failed"
+        try {
+            val reference = revisionSourceReference(jobId, runId, revisionId)
+            val result = try {
+                sourceCatalogEvidence.readStructureDiagnosed(reference, programStructureCache, timing?.phase, null, timing, project)
             }
-
-            override fun end() {
-                val stage = active ?: return
-                val elapsedNanos = System.nanoTime() - startedNanos
-                active = null
-                System.err.println("web-structure-manifest-timing stage=${stage.marker} elapsedNanos=$elapsedNanos")
+                catch (changed: WebAccessDenied) { throw changed }
+                catch (failure: Exception) {
+                    if (failure is java.util.concurrent.CancellationException || failure is InterruptedException || Thread.currentThread().isInterrupted) throw failure
+                    throw WebAccessDenied(503, "PROGRAM_STRUCTURE_UNAVAILABLE", "The revision structure records are unavailable or exceed their limits.")
+                }
+            if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
+            status = "ok"
+            return result
+        } catch (failure: Throwable) {
+            status = when {
+                failure is InterruptedException || Thread.currentThread().isInterrupted -> "interrupted"
+                failure is java.util.concurrent.CancellationException -> "cancelled"
+                failure is WebAccessDenied -> "refused"
+                else -> "failed"
             }
-        } else null
-        val result = try {
-            sourceCatalogEvidence.readStructureDiagnosed(reference, programStructureCache, timing, null, manifestProbe, project)
+            throw failure
+        } finally {
+            timing?.finish(status)
         }
-            catch (changed: WebAccessDenied) { throw changed }
-            catch (failure: Exception) {
-                if (failure is java.util.concurrent.CancellationException || failure is InterruptedException || Thread.currentThread().isInterrupted) throw failure
-                throw WebAccessDenied(503, "PROGRAM_STRUCTURE_UNAVAILABLE", "The revision structure records are unavailable or exceed their limits.")
-            }
-        if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
-        return result
     }
 
     /** Generation declarations use the same current-candidate and bounded metadata capture boundary. */
@@ -1099,10 +1128,10 @@ class WebJobService(
     private fun <T> coordinatePinPublication(jobId: String, runId: String, command: (WorkflowAttemptStore) -> T,
         currentAttempt: (T) -> WorkflowAttempt): T {
         val owner = writableStore()
-        getAttempt(jobId, runId)
-        val task = (active[jobId] as? DurableTask)?.takeIf { it.attempt.runId == runId }
+        val previous = getAttempt(jobId, runId)
+        val task = active[jobId] as? DurableTask
         return try {
-            command(owner).also { result -> task?.attempt = currentAttempt(result) }
+            command(owner).also { result -> task?.pinPublished(previous, currentAttempt(result)) }
         } catch (failure: Throwable) {
             if (failure is WorkflowStoreException && !failure.outcomeUnknown) {
                 throw WebJobServiceException(failure.code, "The progress retention pin request was not applied. Refresh the attempt before retrying.", failure)
@@ -1478,8 +1507,7 @@ class WebJobService(
     }
 
     /** Read-only eligibility for one attempt. It reserves nothing; every command re-checks under the same lock. */
-    @Synchronized
-    internal fun attemptControls(jobId: String, runId: String): WebAttemptControls {
+    internal fun attemptControls(jobId: String, runId: String): WebAttemptControls = withRecoveryInspection { observed ->
         val attempt = getAttempt(jobId, runId)
         val view = inspectStoredJob(checkNotNull(attempts), jobId) as? WorkflowJobInspection.Available
             ?: throw WebJobServiceException("JOB_RECORD_UNAVAILABLE", "The job record is unavailable; inspect its storage diagnostic.")
@@ -1493,18 +1521,54 @@ class WebJobService(
             else -> null
         }
         fun recovery(mode: WorkflowRecoveryMode): RecoveryDecision = blocked?.let { RecoveryDecision.Refused(it) }
-            ?: recoveryDecision(jobId, view, attempt, mode)
+            ?: recoveryDecision(jobId, view, attempt, mode, observed)
         val retry = recovery(WorkflowRecoveryMode.RETRY)
         val resume = recovery(WorkflowRecoveryMode.RESUME)
-        return WebAttemptControls(attempt, cancel, (retry as? RecoveryDecision.Refused)?.code,
+        if (resume is PendingInspection) return@withRecoveryInspection resume
+        RecoveryStep.Done(WebAttemptControls(attempt, cancel, (retry as? RecoveryDecision.Refused)?.code,
             (resume as? RecoveryDecision.Refused)?.code, (resume as? RecoveryDecision.Admissible)?.recovery?.restores,
-            view.snapshot.attempts.lastOrNull { it.previousRunId == runId }?.runId)
+            view.snapshot.attempts.lastOrNull { it.previousRunId == runId }?.runId))
     }
 
     private sealed interface RecoveryDecision {
-        data class Admissible(val registration: Registration, val recovery: WorkflowAttemptRecovery, val predecessorReports: Path?,
+        data class Admissible(val registration: Registration, val recovery: WorkflowAttemptRecovery,
             val inputSourceTree: Path? = null) : RecoveryDecision
         data class Refused(val code: String) : RecoveryDecision
+    }
+
+    private sealed interface RecoveryStep<out T> {
+        data class Done<T>(val value: T) : RecoveryStep<T>
+    }
+
+    private data class PendingInspection(
+        val owner: WorkflowAttemptStore, val jobVersion: String, val registration: Registration,
+        val policy: DurableWebWorkflowCheckpointPolicy, val request: DurableWebWorkflowCheckpointRequest,
+    ) : RecoveryDecision, RecoveryStep<Nothing>
+
+    private data class ObservedInspection(val pending: PendingInspection, val checkpoint: DurableWebWorkflowCheckpoint?,
+        val refused: String? = null)
+
+    /** Both passes run the same locked decision. Replay, version, ownership and capacity are checked again after I/O. */
+    private fun <T> withRecoveryInspection(operation: (ObservedInspection?) -> RecoveryStep<T>): T {
+        val pending = when (val first = synchronized(this) { operation(null) }) {
+            is RecoveryStep.Done -> return first.value
+            is PendingInspection -> first
+        }
+        val observed = if (!recoveryInspections.tryAcquire()) ObservedInspection(pending, null, "CAPACITY_UNAVAILABLE")
+        else try {
+            ObservedInspection(pending, pending.policy.inspect(pending.request))
+        } catch (failure: InterruptedException) {
+            Thread.currentThread().interrupt()
+            ObservedInspection(pending, null, "CHECKPOINT_UNVERIFIED")
+        } catch (_: Exception) {
+            ObservedInspection(pending, null, "CHECKPOINT_UNVERIFIED")
+        } finally {
+            recoveryInspections.release()
+        }
+        return when (val second = synchronized(this) { operation(observed) }) {
+            is RecoveryStep.Done -> second.value
+            is PendingInspection -> error("recovery inspection must finish after revalidation")
+        }
     }
 
     /**
@@ -1513,7 +1577,7 @@ class WebJobService(
      * the exact recorded harness identity; it never infers continuation from a fresh session or caller input.
      */
     private fun recoveryDecision(jobId: String, view: WorkflowJobInspection.Available, predecessor: WorkflowAttempt,
-        mode: WorkflowRecoveryMode): RecoveryDecision {
+        mode: WorkflowRecoveryMode, observed: ObservedInspection?): RecoveryDecision {
         val snapshot = view.snapshot
         fun refuse(code: String) = RecoveryDecision.Refused(code)
         if (closed || stopping) return refuse("SERVICE_STOPPED")
@@ -1542,17 +1606,21 @@ class WebJobService(
             null
         }
         val decision = if (mode == WorkflowRecoveryMode.RETRY) {
-            RecoveryDecision.Admissible(registration, WorkflowAttemptRecovery(WorkflowRecoveryMode.RETRY), null, inputSourceTree)
+            RecoveryDecision.Admissible(registration, WorkflowAttemptRecovery(WorkflowRecoveryMode.RETRY), inputSourceTree)
         } else {
+            if (registration.adapter.continuation == null) return refuse("RESUME_UNSUPPORTED")
             val policy = registration.adapter.checkpoints ?: return refuse("RESUME_UNSUPPORTED")
             if (predecessor.harnessCapabilityId != registration.harnessCapabilityId) return refuse("HARNESS_CHANGED")
             val directory = try { store.runReportsDirectory(jobId, predecessor.runId) } catch (_: Exception) { return refuse("CHECKPOINT_MISSING") }
-            val checkpoint = try { policy.inspect(DurableWebWorkflowCheckpointRequest(store.get(jobId), predecessor, directory)) }
-                catch (_: Exception) { return refuse("CHECKPOINT_UNVERIFIED") }
+            val pending = PendingInspection(checkNotNull(attempts), snapshot.version, registration, policy,
+                DurableWebWorkflowCheckpointRequest(store.get(jobId), predecessor, directory))
+            if (observed == null) return pending
+            if (observed.pending != pending) return refuse("CHECKPOINT_UNVERIFIED")
+            val checkpoint = observed.checkpoint ?: return refuse(observed.refused ?: "CHECKPOINT_UNVERIFIED")
             when (checkpoint) {
                 is DurableWebWorkflowCheckpoint.Refused -> return refuse(checkpoint.reason.code)
                 is DurableWebWorkflowCheckpoint.Verified -> RecoveryDecision.Admissible(registration,
-                    WorkflowAttemptRecovery(WorkflowRecoveryMode.RESUME, checkpoint.restores, checkpoint.checkpointSha256), directory,
+                    WorkflowAttemptRecovery(WorkflowRecoveryMode.RESUME, checkpoint.restores, checkpoint.checkpointSha256),
                     inputSourceTree)
             }
         }
@@ -1566,10 +1634,9 @@ class WebJobService(
      * capacity check and is read-only. A new command binds the predecessor's exact version and recorded input;
      * retry always publishes a new linked attempt, and resume records the verified checkpoint it continues.
      */
-    @Synchronized
     internal fun requestDurableRecovery(jobId: String, runId: String, expectedRunVersion: String, mode: WorkflowRecoveryMode,
         expectedInputRevisionId: String?, requestKey: String,
-        prerequisites: WebWorkflowPrerequisites? = WebWorkflowPrerequisites.UNCHECKED): DurableWebWorkflowStartResult {
+        prerequisites: WebWorkflowPrerequisites? = WebWorkflowPrerequisites.UNCHECKED): DurableWebWorkflowStartResult = withRecoveryInspection { observed ->
         requireInitializedRead()
         requirePublicationAvailable()
         val id = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
@@ -1583,7 +1650,7 @@ class WebJobService(
         catch (failure: WorkflowStoreException) {
             throw WebJobServiceException(failure.code, "The recorded recovery is unavailable. Refresh its state before retrying.", failure)
         }
-        if (replay != null) return DurableWebWorkflowStartResult(replay.attempt, replayed = true)
+        if (replay != null) return@withRecoveryInspection RecoveryStep.Done(DurableWebWorkflowStartResult(replay.attempt, replayed = true))
         if (stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
         val view = inspectStoredJob(owner, jobId) as? WorkflowJobInspection.Available
             ?: throw WebJobServiceException("JOB_RECORD_UNAVAILABLE", "The job record is unavailable; inspect its storage diagnostic.")
@@ -1593,7 +1660,8 @@ class WebJobService(
         if (predecessor.inputRevisionId != expectedInputRevisionId) {
             throw WebJobServiceException("INPUT_REVISION_CONFLICT", "The attempt's recorded input differs from the expected input revision.")
         }
-        val decision = when (val selected = recoveryDecision(jobId, view, predecessor, mode)) {
+        val decision = when (val selected = recoveryDecision(jobId, view, predecessor, mode, observed)) {
+            is PendingInspection -> return@withRecoveryInspection selected
             is RecoveryDecision.Refused -> throw WebJobServiceException(selected.code, "This attempt cannot be recovered in the requested mode.")
             is RecoveryDecision.Admissible -> selected
         }
@@ -1609,9 +1677,9 @@ class WebJobService(
         val admitted = publishStart(jobId) {
             owner.createIdempotent(jobId, view.snapshot.version, request, requestKey, expectedRunVersion)
         }
-        if (admitted.replayed) return DurableWebWorkflowStartResult(admitted.attempt, replayed = true)
-        return dispatchAdmitted(DurableTask(job, admitted.attempt, decision.registration.adapter, decision.predecessorReports,
-            decision.inputSourceTree))
+        if (admitted.replayed) return@withRecoveryInspection RecoveryStep.Done(DurableWebWorkflowStartResult(admitted.attempt, replayed = true))
+        RecoveryStep.Done(dispatchAdmitted(DurableTask(job, admitted.attempt, decision.registration.adapter,
+            decision.inputSourceTree, predecessor)))
     }
 
     /** Shared by starts and recovery commands: a declared prerequisite must hold in the supplied snapshot. */
@@ -1718,6 +1786,9 @@ class WebJobService(
         holds += hold
         return AutoCloseable { holds.remove(hold) }
     }
+
+    /** Leases currently held for [jobId]; for delivery checks. */
+    internal fun activeDownloadLeases(jobId: String): Int = synchronized(this) { downloadLeases[jobId] ?: 0 }
 
     /** Download delivery keeps a lease so deletion cannot remove bytes a response is still sending. */
     internal fun downloadLease(jobId: String): AutoCloseable = synchronized(this) {
@@ -2046,7 +2117,16 @@ class WebJobService(
     }
 
     private inner class DurableTask(val job: Job, var attempt: WorkflowAttempt, val adapter: DurableWebWorkflowAdapter,
-        val predecessorReports: Path? = null, val inputSourceTree: Path? = null) : OwnedTask(job.id) {
+        val inputSourceTree: Path? = null, private var admittedPredecessor: WorkflowAttempt? = null) : OwnedTask(job.id) {
+        // Invoked under the service monitor only after pin publication succeeded.
+        fun pinPublished(previous: WorkflowAttempt, current: WorkflowAttempt) {
+            if (current.runId == attempt.runId) attempt = current
+            if (admittedPredecessor == previous && current == previous.copy(version = current.version,
+                    progressRetentionPinned = current.progressRetentionPinned)) {
+                admittedPredecessor = current
+            }
+        }
+        private val admitted = attempt
         private var publicationFailure: WebJobServiceException? = null
         var cancellationRequested = false
         fun failPublication(failure: WebJobServiceException) {
@@ -2062,9 +2142,13 @@ class WebJobService(
                     worker = Thread.currentThread()
                     attempt = checkNotNull(attempts).transition(jobId, attempt.runId, attempt.version, WorkflowTransition.Start).attempt
                     DurableWebWorkflowContext(job, attempt, store.runReportsDirectory(jobId, attempt.runId, create = true),
-                        predecessorReports, inputSourceTree)
+                        inputSourceTree = inputSourceTree)
                 }
-                val outcome = adapter.execute(context)
+                val outcome = when {
+                    !matchesAdmission(context.attempt) -> DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.REFUSED)
+                    admitted.recovery?.mode == WorkflowRecoveryMode.RESUME -> resume(context)
+                    else -> adapter.execute(context)
+                }
                 synchronized(this@WebJobService) {
                     if (closed || stopping || (Thread.currentThread().isInterrupted && !cancellationRequested)) finish(interrupted())
                     else finish(when (outcome) {
@@ -2086,6 +2170,68 @@ class WebJobService(
                 }
             } finally { synchronized(this@WebJobService) { release() } }
         }
+        // Pinning and starting advance lifecycle fields while the admitted execution inputs stay fixed.
+        private fun matchesAdmission(current: WorkflowAttempt): Boolean = current == admitted.copy(
+            state = current.state, startedAt = current.startedAt, version = current.version,
+            progressRetentionPinned = current.progressRetentionPinned,
+        )
+
+        private fun resume(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
+            val refused = DurableWebWorkflowOutcome.Failed(WorkflowTerminalReason.REFUSED)
+            val continuation = adapter.continuation ?: return refused
+            val predecessor = synchronized(this@WebJobService) { admittedPredecessor } ?: return refused
+            val recovery = admitted.recovery ?: return refused
+            fun stillOwned(): Boolean = synchronized(this@WebJobService) {
+                publicationFailure?.let { throw it }
+                if (terminal || active[jobId] !== this || closed || stopping || cancellationRequested) {
+                    throw InterruptedException("Continuation ownership changed")
+                }
+                val snapshot = (checkNotNull(attempts).inspect(jobId) as? WorkflowJobInspection.Available)?.snapshot
+                snapshot?.latestRun == attempt && matchesAdmission(attempt) && attempt.previousRunId == predecessor.runId &&
+                    snapshot.attempts.singleOrNull { it.runId == predecessor.runId } == admittedPredecessor
+            }
+
+            if (!stillOwned()) return refused
+            val capture = try {
+                val directory = store.runReportsDirectory(jobId, predecessor.runId)
+                continuation.capture(DurableWebWorkflowCheckpointRequest(job, predecessor, directory))
+            } catch (cancelled: InterruptedException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
+            }
+            if (!stillOwned() || capture == null || capture.sha256 != recovery.checkpointSha256 || capture.restores != recovery.restores) {
+                return refused
+            }
+            // Cancellation or shutdown may land between that check and the adapter's first side effect. The fence
+            // repeats the check under the service monitor (which orders cancellation) and grants a launch permit
+            // under the completion fence (which orders the shutdown signal). Neither lock is held while [run]
+            // starts or waits, so cancellation and shutdown can interrupt the permit holder.
+            var launchRefused = false
+            var launched = false
+            val fence = object : DurableWebWorkflowContinuationFence {
+                override fun <W, T> launch(prepare: () -> W, run: (W) -> T): T {
+                    val permit = synchronized(this@WebJobService) {
+                        try {
+                            if (launched || !stillOwned()) throw ContinuationLaunchRefused()
+                            launched = true
+                            continuationLaunchObserver()
+                            // The held monitor guards every other ownership fact. Only the shutdown signal can
+                            // change without it, and the permit is refused once that signal is published.
+                            completionPublication.grantLaunch(prepare) ?: throw ContinuationLaunchRefused()
+                        } catch (failure: Throwable) {
+                            launchRefused = true
+                            throw failure
+                        }
+                    }
+                    return try { run(permit.prepared) } finally { completionPublication.releaseLaunch(permit) }
+                }
+            }
+            val outcome = try { continuation.continueFrom(context, capture, fence) }
+            catch (failure: ContinuationLaunchRefused) { return refused }
+            return if (launchRefused) refused else outcome
+        }
+
         override fun stopPending() = finish(interrupted())
         fun finish(transition: WorkflowTransition.Finish) = completionPublication.publishCompletion<Unit> {
             publicationFailure?.let { throw it }
@@ -2114,6 +2260,8 @@ class WebJobService(
             WorkflowTransition.Finish(WorkflowRunState.CANCELLED, WorkflowTerminalReason.CANCELLED)
         else WorkflowTransition.Finish(WorkflowRunState.INTERRUPTED, WorkflowTerminalReason.PROCESS_INTERRUPTED)
     }
+
+    private class ContinuationLaunchRefused : IllegalStateException("The admitted continuation changed before launch")
 
     private fun legacyStatus(state: WorkflowRunState): String = when (state) {
         WorkflowRunState.QUEUED -> "queued"

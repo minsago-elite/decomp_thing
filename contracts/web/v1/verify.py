@@ -524,8 +524,10 @@ def check_structure(kind: str, data: dict) -> None:
         rows, pages = (owned["items"], [owned["page"]]) if owned else ([], [])
         if owned and (len(owned["items"]) > owned["total"] or any(item["kind"] != owned["kind"] for item in owned["items"])):
             raise ValueError("owned entity page disagrees with its kind or total")
-    else:
+    elif kind == "entityDetail":
         rows, pages = ([data["entity"]] if data["entity"] else []), []
+    else:
+        rows, pages = [], []
     if data["state"] != "available" and (rows or data["recoveryAssessment"] != "not-recorded"):
         raise ValueError("unavailable program records cannot present entities or an assessment")
     for page in pages:
@@ -554,12 +556,227 @@ def check_structure(kind: str, data: dict) -> None:
             raise ValueError("text previews exist exactly for recorded fields")
 
 
+def check_neighborhood(data: dict) -> None:
+    """Bounded graphs: edges join included nodes, and a complete neighborhood omits nothing."""
+    neighborhood = data["neighborhood"]
+    if neighborhood is None:
+        return
+    nodes, edges, completeness = neighborhood["nodes"], neighborhood["edges"], neighborhood["completeness"]
+    if [node["index"] for node in nodes] != list(range(len(nodes))) or nodes[0]["depth"] != 0:
+        raise ValueError("graph nodes must be numbered in discovery order from the focus")
+    center, query = nodes[0], data["query"]
+    if center["selector"] != query["focus"] or center["kind"] != ("function" if query["view"] == "calls" else "module") \
+            or center.get("entityId" if query["view"] == "calls" else "moduleId") != query["focus"]:
+        raise ValueError("the graph center must be the recorded function or module named by the focus")
+    if any(node["selector"] not in (None, node.get("entityId", node.get("moduleId"))) for node in nodes):
+        raise ValueError("graph selectors must be the recorded identity")
+    for edge in edges:
+        if edge["source"] >= len(nodes) or edge["target"] >= len(nodes):
+            raise ValueError("graph edges must join included nodes")
+        if (edge["resolution"] == "no-record") != (nodes[edge["target"]]["kind"] == "unrecorded-function"):
+            raise ValueError("only edges to unrecorded targets lack a record")
+    for node in nodes:
+        for direction, side in (("outgoing", "source"), ("incoming", "target")):
+            shown = sum(1 for edge in edges if edge[side] == node["index"])
+            if node[direction]["shown"] != shown or shown > node[direction]["total"]:
+                raise ValueError("graph node degrees disagree with the included edges")
+    reasons = completeness["reasons"]
+    if (completeness["state"] == "complete") != (not reasons):
+        raise ValueError("a truncated neighborhood must name its limit")
+    totals = [completeness[key] for key in ("reachableNodes", "reachableEdges", "omittedNodes", "omittedEdges", "edgesBeyondDepth", "filteredEdges")]
+    if ("VISIT_LIMIT" in reasons) != any(value is None for value in totals) or ("VISIT_LIMIT" in reasons and any(value is not None for value in totals)):
+        raise ValueError("unknown totals are reported exactly when exploration stopped at its bound")
+    if completeness["reachableNodes"] is not None:
+        if completeness["omittedNodes"] != completeness["reachableNodes"] - len(nodes) or completeness["omittedEdges"] != completeness["reachableEdges"] - len(edges):
+            raise ValueError("omitted counts must equal the reachable totals less the included items")
+        if completeness["state"] == "complete" and (completeness["omittedNodes"] or completeness["omittedEdges"]):
+            raise ValueError("a complete neighborhood cannot omit nodes or edges")
+
+
+def check_measure(measure: dict, unit: str) -> None:
+    """Only measured results carry a measurement; other states never present a value."""
+    if measure["state"] == "measured":
+        if measure["numerator"] is None or measure["denominator"] is None or (unit == "ratio" and measure["value"] is None):
+            raise ValueError("a measured result states its numerator, denominator and recorded value")
+    elif measure["value"] is not None and not (measure["state"] in ("unmeasured", "failed") and unit == "ratio"):
+        raise ValueError("an unmeasured or unknown result cannot present a value")
+    if measure["state"] != "measured" and measure["reason"] is None:
+        raise ValueError("a result that is not measured must state why")
+
+
+def check_offset_page(page: dict, count: int, total) -> None:
+    """A structure page starts at a multiple of its limit below the total: a continued page is full and its cursor names
+    the next such offset, and a final page holds the rows that remain after the last multiple below the total."""
+    limit, cursor = page["limit"], page["nextCursor"]
+    if cursor is not None:
+        match = re.fullmatch(r"([a-f0-9]{64})_(0|[1-9][0-9]{0,6})_[a-f0-9]{32}", cursor)
+        if match is None or match.group(1) != page["snapshotVersion"]:
+            raise ValueError("a structure page continues at a cursor signed for its own snapshot")
+        offset = int(match.group(2))
+        if count != limit or offset < limit or offset % limit or (total is not None and offset >= total):
+            raise ValueError("a continued structure page is full and continues within its total")
+    elif total is not None and count != (0 if total == 0 else (total - 1) % limit + 1):
+        raise ValueError("a final structure page holds exactly the rows remaining in its total")
+
+
+def check_scorecard(data: dict) -> None:
+    card = data["scorecard"]
+    if card is None:
+        return
+    for metric in card["metrics"] + [item["metric"] for item in card["modules"]["items"]]:
+        check_measure(metric, metric["unit"])
+        if metric["state"] == "unmeasured" and metric["value"] is not None and metric["reason"] != "EMPTY_POPULATION":
+            raise ValueError("only an empty population keeps its recorded placeholder value")
+    if card["modules"]["page"]["snapshotVersion"] != data["structureVersion"]:
+        raise ValueError("scorecard pages must be bound to the structure version")
+    check_offset_page(card["modules"]["page"], len(card["modules"]["items"]), card["modules"]["total"])
+    # The rows are the available plan's modules, counted by the scope; without an available plan there are none.
+    total = card["modules"]["total"]
+    if (card["scope"]["modules"] is not None) != (data["plan"]["state"] == "available") or total != card["scope"]["modules"] or \
+            (total is None and (card["modules"]["items"] or card["modules"]["page"]["nextCursor"] is not None)):
+        raise ValueError("scorecard module rows are counted exactly when the plan is available")
+
+
+# Every identity blocks deltas, including the scope: the entity population and the module plan.
+BLOCKING_COMPARISON_CHECKS = frozenset(("input-binary", "reconstruction-profile", "confidence-schema",
+                                        "score-interpretation", "score-formula", "model-schema",
+                                        "entity-population", "module-plan"))
+
+
+def exact_difference(current: str, baseline: str) -> str:
+    """The producer's exact difference: the wider operand scale, written plainly, with zero written as 0."""
+    def scaled(text: str):
+        match = re.fullmatch(r"(-?)([0-9]+)(?:\.([0-9]+))?", text)
+        if match is None:
+            raise ValueError("a measured operand must be exact decimal text")
+        fraction = match.group(3) or ""
+        units = int(match.group(2) + fraction)
+        return (-units if match.group(1) else units), len(fraction)
+    (a, a_scale), (b, b_scale) = scaled(current), scaled(baseline)
+    scale = max(a_scale, b_scale)
+    units = a * 10 ** (scale - a_scale) - b * 10 ** (scale - b_scale)
+    if units == 0:
+        return "0"
+    digits = str(abs(units)).rjust(scale + 1, "0")
+    text = digits if scale == 0 else digits[:-scale] + "." + digits[-scale:]
+    return "-" + text if units < 0 else text
+
+
+def expected_delta(state: str, current, baseline) -> dict:
+    """The delta the producer derives from two measures of one row."""
+    empty = {"value": None, "numerator": None, "denominator": None}
+    if current is None or baseline is None:
+        return {"state": "not-comparable", "reason": "MODULE_NOT_IN_BOTH_PLANS", **empty}
+    if state != "compatible":
+        return {"state": "withheld", "reason": "INCOMPATIBLE_BASELINE", **empty}
+    for side, measure in (("CURRENT", current), ("BASELINE", baseline)):
+        if measure["state"] != "measured":
+            return {"state": "not-comparable", "reason": side + "_" + measure["state"].upper().replace("-", "_"), **empty}
+    exact = lambda key: None if current[key] is None or baseline[key] is None else exact_difference(current[key], baseline[key])
+    return {"state": "computed", "reason": None, "value": exact("value"), "numerator": exact("numerator"),
+            "denominator": exact("denominator")}
+
+
+def check_comparison_side(side: dict, values: dict) -> None:
+    """A side's identity check values are the ones its own model, plan and confidence records state."""
+    available = side["confidence"]["state"] == "available"
+    scope, model = side["scope"], side["model"]
+    if (scope is not None) != available or (side["confidence"]["schemaVersion"] is not None) != available:
+        raise ValueError("a side carries a scorecard scope and confidence schema exactly when its scorecard is available")
+    if scope is not None:
+        if scope["modelSha256"] != model["sha256"] or scope["modelSchemaVersion"] != (model["schemaVersion"] or 1):
+            raise ValueError("a side's scorecard scope must name its own model record")
+        if values.get("input-binary") != scope["inputSha256"]:
+            raise ValueError("the input-binary check must state each recorded scope's input")
+        if (scope["modules"] is not None) != (side["plan"]["state"] == "available"):
+            raise ValueError("a side's scope counts modules exactly when its plan is available")
+    if values.get("model-schema") != (None if model["schemaVersion"] is None else str(model["schemaVersion"])):
+        raise ValueError("the model-schema check must state each side's model record schema")
+    if values.get("confidence-schema") != (str(side["confidence"]["schemaVersion"]) if available else None):
+        raise ValueError("the confidence-schema check must state each side's confidence record schema")
+    if any((values.get(key) is not None) != available for key in ("score-interpretation", "score-formula")):
+        raise ValueError("score identities are recorded exactly when a side's scorecard is available")
+    if values.get("module-plan") != (side["plan"]["sha256"] if side["plan"]["state"] == "available" else None):
+        raise ValueError("the module-plan check must state each side's available plan record")
+
+
+def check_comparison_identities(data: dict) -> None:
+    """Each blocking identity is checked exactly once and every check states the values each side's records carry."""
+    checks, state = data["compatibility"]["checks"], data["compatibility"]["state"]
+    ids = [check["id"] for check in checks]
+    if len(set(ids)) != len(ids) or not BLOCKING_COMPARISON_CHECKS <= set(ids):
+        raise ValueError("a comparison states every blocking identity check exactly once")
+    for check in checks:
+        if check["blocking"] != (check["id"] in BLOCKING_COMPARISON_CHECKS):
+            raise ValueError("only the fixed identity checks block deltas")
+        recorded = check["current"] is not None and check["baseline"] is not None
+        if (check["state"] == "not-recorded") == recorded:
+            raise ValueError("an identity check is not recorded exactly when a side records no value")
+        # Each value renders its identity unambiguously (the population names its digest), so equal text is a match.
+        if recorded and (check["state"] == "match") != (check["current"] == check["baseline"]):
+            raise ValueError("an identity check matches exactly when its recorded values are equal")
+    for side in ("current", "baseline"):
+        check_comparison_side(data[side], {check["id"]: check[side] for check in checks})
+    if (state == "unavailable") != (data["current"]["scope"] is None or data["baseline"]["scope"] is None):
+        raise ValueError("a comparison is unavailable exactly when a side has no scorecard scope")
+
+
+def check_comparison(data: dict) -> None:
+    check_comparison_identities(data)
+    state = data["compatibility"]["state"]
+    blocked = any(check["blocking"] and check["state"] != "match" for check in data["compatibility"]["checks"])
+    if (state == "incompatible") != (blocked and state != "unavailable"):
+        raise ValueError("compatibility must follow the blocking identity checks")
+    modules, page = data["modules"], data["modules"]["page"]
+    items = modules["items"]
+    if data["current"]["structureVersion"] != data["structureVersion"] or page["snapshotVersion"] != data["structureVersion"]:
+        raise ValueError("comparison module pages must be bound to the current structure version")
+    if len(items) > page["limit"] or len(items) > modules["total"] or (page["nextCursor"] is not None and not items):
+        raise ValueError("a comparison module page exceeds its bound or continues without rows")
+    check_offset_page(page, len(items), modules["total"])
+    if state == "unavailable":
+        if data["metrics"] or modules["total"] or page["nextCursor"] is not None:
+            raise ValueError("an unavailable scorecard cannot be compared")
+    else:
+        # Both scopes are recorded here; a side whose plan is not available (an unset count) contributes no modules.
+        current, baseline = (data[side]["scope"]["modules"] or 0 for side in ("current", "baseline"))
+        total = modules["total"]
+        if total < max(current, baseline) or total > current + baseline:
+            raise ValueError("comparison module total is outside the union bounds of the recorded plans")
+        # The union partitions into modules in both plans and those in only one; a page lists no more of a part than exists.
+        parts = {"both": current + baseline - total, "current-only": total - baseline, "baseline-only": total - current}
+        if any(sum(item["presence"] == presence for item in items) > size for presence, size in parts.items()):
+            raise ValueError("a comparison page lists more modules of a plan membership than the recorded plans hold")
+    if len({item["id"] for item in data["metrics"]}) != len(data["metrics"]) or len({item["moduleId"] for item in items}) != len(items):
+        raise ValueError("a comparison lists each measure and module once")
+    for item in items:
+        presence = "both" if item["current"] and item["baseline"] else "current-only" if item["current"] else \
+            "baseline-only" if item["baseline"] else None
+        if item["presence"] != presence or (item["selector"] is not None and item["selector"] != item["moduleId"]):
+            raise ValueError("a module row's presence and selector follow its recorded sides")
+    rows = [(item["current"], item["baseline"], item["delta"], item["unit"]) for item in data["metrics"]] + [
+        (item["current"], item["baseline"], item["delta"], "ratio") for item in items]
+    for current, baseline, delta, unit in rows:
+        for measure in (current, baseline):
+            if measure is not None:
+                check_measure(measure, unit)
+        if delta != expected_delta(state, current, baseline):
+            raise ValueError("a delta must be the producer's exact difference, withholding or reason for its measures")
+
+
 def check_semantics(document: dict) -> None:
     """Check relationships JSON Schema cannot express with portable draft-07."""
     kind = document["kind"]
     data = document.get("data", {})
-    if kind in ("functionInventory", "moduleInventory", "moduleDetail", "entityDetail"):
+    if kind in ("functionInventory", "moduleInventory", "moduleDetail", "entityDetail", "structureNeighborhood", "structureScorecard"):
         check_structure(kind, data)
+        if kind == "structureNeighborhood":
+            check_neighborhood(data)
+        if kind == "structureScorecard":
+            check_scorecard(data)
+        return
+    if kind == "scorecardComparison":
+        check_comparison(data)
         return
     if kind == "validationHistory":
         if data["state"] != "recorded":

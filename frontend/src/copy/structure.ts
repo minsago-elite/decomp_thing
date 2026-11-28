@@ -1,13 +1,19 @@
 import { structureTitles as titles } from './structureTitles';
+import { structureLinks as links } from './structureLinks';
 
 /** Program-structure copy. Recorded identities, names and digests remain separate display data. */
 export const structureCopy = {
   functionsTitle: titles.functions,
   modulesTitle: titles.modules,
   moduleTitle: titles.module,
+  graphTitle: titles.graph,
+  scorecardTitle: titles.scorecard,
+  invalidTitle: 'Revision structure view',
+  exploreCalls: 'Explore its recorded call neighborhood',
+  exploreModules: 'Explore its recorded module dependencies',
   entityTitles: { function: titles.function, global: titles.global, type: titles.type },
-  browseFunctions: titles.browseFunctions,
-  browseModules: titles.browseModules,
+  browseFunctions: links.browseFunctions,
+  browseModules: links.browseModules,
   returnAttempt: 'Return to this attempt',
   returnJobs: 'Return to jobs',
   returnFunctions: 'Return to the function inventory',

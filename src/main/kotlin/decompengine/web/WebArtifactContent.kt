@@ -161,6 +161,7 @@ internal class WebArtifactContent(private val store: WebArtifactStore,
         // The listed media type stays metadata; the transport is always an inert attachment.
         exchange.responseHeaders.set("Content-Type", "application/octet-stream")
         exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"${family.displayName}\"; filename*=UTF-8''$name")
+        var aborted = false
         try {
             if (notModified) { exchange.responseHeaders.remove("Content-Type"); exchange.sendResponseHeaders(304, -1); return }
             val length = range?.length ?: servedSize
@@ -170,11 +171,19 @@ internal class WebArtifactContent(private val store: WebArtifactStore,
             if (exchange.requestMethod == "HEAD" || length == 0L) { exchange.sendResponseHeaders(status, -1); return }
             exchange.sendResponseHeaders(status, length)
             val slice = range ?: WebByteRange(0, servedSize - 1)
-            if (projected != null) {
-                exchange.responseBody.write(projected, slice.start.toInt(), slice.length.toInt())
-                exchange.responseBody.flush()
-            } else stream(exchange, selection, size, slice, cancellation)
-        } finally { exchange.close() }
+            // After the headers, a failure (including a changed artifact) must drop the connection short of its length.
+            try {
+                abortAfterHeaders {
+                    if (projected != null) {
+                        exchange.responseBody.write(projected, slice.start.toInt(), slice.length.toInt())
+                        exchange.responseBody.flush()
+                    } else stream(exchange, selection, size, slice, cancellation)
+                }
+            } catch (failure: WebResponseAborted) { aborted = true; throw failure }
+        } finally {
+            // As for every attachment, an aborted body is left to the listener; closing it here could block on a drain.
+            if (!aborted) exchange.close()
+        }
     }
 
     private fun stream(exchange: HttpExchange, selection: WebArtifactSelection, size: Long, range: WebByteRange, cancellation: () -> Unit) {

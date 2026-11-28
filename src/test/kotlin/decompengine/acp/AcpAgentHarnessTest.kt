@@ -2509,7 +2509,28 @@ class AcpAgentHarnessTest {
             }
             // The peer acknowledges the ready write and installs its TERM handler before this
             // event, so cancellation exercises the intended uncooperative lifecycle.
-            assertTrue(readyAcknowledged.await(3, TimeUnit.SECONDS), "fixture never acknowledged uncooperative readiness")
+            val readinessAcknowledged = readyAcknowledged.await(3, TimeUnit.SECONDS)
+            if (!readinessAcknowledged) {
+                // Capture only an outcome already available; never extend the readiness deadline.
+                val completed = execution.isDone
+                var completedResult: decompengine.agent.AgentExecutionResult? = null
+                var completionFailure: Throwable? = null
+                if (completed) {
+                    try {
+                        completedResult = execution.get()
+                    } catch (wrapped: ExecutionException) {
+                        completionFailure = wrapped.cause ?: wrapped
+                    } catch (cancelled: java.util.concurrent.CancellationException) {
+                        completionFailure = cancelled
+                    }
+                }
+                val invocation = (completionFailure as? AgentExecutionException)?.receipt?.providerEvidence as? AcpInvocationEvidenceSnapshot
+                assertTrue(readinessAcknowledged, "fixture never acknowledged uncooperative readiness; " +
+                    "completed=$completed " +
+                    "result=${completedResult?.stopReason?.name ?: if (completed) "unavailable" else "in-flight/unknown"} " +
+                    "invocation=${invocation?.summaryForTest() ?: "unavailable"} " +
+                    "cause=${boundedPreparationCauseForTest(completionFailure)}")
+            }
             assertTrue(ready.exists(), "fixture never reached session/prompt")
             assertEquals("ready\n", ready.readText())
             cancellation.cancel()

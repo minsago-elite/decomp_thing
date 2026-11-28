@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { promises as fs, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { isUtf8 } from 'node:buffer';
+import { nativeDownloadByClick } from './packaged-browser-native-download.mjs';
 import { applyStructureProfile, structureProfile } from './packaged-browser-structure-cold.mjs';
 
 // Kept current by WebProgramStructureTest; the seed writes manifests without the JVM profile registry.
@@ -26,6 +27,11 @@ const functionId = (index) => `fn_${hex(functionAddress(index)).padStart(16, '0'
 const moduleId = (index) => `module_${String(index).padStart(4, '0')}`;
 const globalId = (index) => `global_${hex(0x600000 + index * 8).padStart(16, '0')}`;
 const typeId = (index) => `type_${sha(`synthetic-type:${index}`)}`;
+const RECORD_DOWNLOADS = {
+  confidence: { path: 'reports/confidence.json', text: 'Download the confidence report' },
+  'program-model': { path: 'reports/program_model.json', text: 'Download the program model record' },
+  'module-plan': { path: 'reports/module_plan.json', text: 'Download the module plan record' },
+};
 const roles = (path) => {
   const template = path.replace(/^src\/modules\/[^/]+\.c$/, 'src/modules/{module}.c').replace(/^include\/modules\/[^/]+\.h$/, 'include/modules/{module}.h');
   const value = pins.declarations[template];
@@ -47,6 +53,38 @@ function canonicalPlan(modules) {
     `      "boundaryEvidence": [${list(module.boundaryEvidence)}]`,
     '    }'].join('\n'));
   return `{\n  "schemaVersion": 2,\n  "modules": [${blocks.join(',')}\n  ],\n  "dependencyCycles": []\n}\n`;
+}
+
+// StructuralRecoveryScore: the mean of extraction-label weights, rendered like Kotlin "%.4f" on the same double.
+const WEIGHT = { recovered: 1.0, partial: 0.6, synthetic: 0.25, failed: 0.0 };
+const score = (labels) => (labels.length ? labels.reduce((sum, label) => sum + WEIGHT[label], 0) / labels.length : 0).toFixed(4);
+
+/** The producer's schema-2 confidence layout for the seeded model and plan (#541); identity lists are only counted by the reader. */
+function confidence(model, modules, inputSha256) {
+  const parsed = JSON.parse(model);
+  const labels = new Map([...parsed.functions, ...parsed.globals, ...parsed.types].map((entity) => [entity.id, entity.extractionStatus]));
+  const accepted = modules.filter((module) => module.sourcePath.endsWith('0.c')).length;
+  return JSON.stringify({
+    schemaVersion: 2,
+    basis: 'recovery evidence only; behavioral equivalence is not implied',
+    scoreMeaning: 'structural recovery heuristic; not implementation acceptance or measured behavioral confidence',
+    scoreInterpretation: { schemaVersion: 1, kind: 'structural-recovery', calibrationStatus: 'uncalibrated', calibratedProbability: null,
+      calibrationArtifactSha256: null, empiricalSampleCount: null },
+    recoveryAssessment: { schemaVersion: 1, state: 'unassessed', modelSchemaVersion: 2, modelSha256: sha(model),
+      unassessedEntityIds: [...labels.keys()].sort(), assessedEntityIds: [] },
+    projectScore: '__PROJECT_SCORE__',
+    modules: modules.map((module) => ({ id: module.id,
+      score: `__SCORE_${module.id}__`, unresolvedRecoveryEntityIds: [], unresolvedImplementationIds: module.functionIds.includes(functionId(1)) ? [functionId(1)] : [],
+      revisionEvidence: { sourcePath: module.sourcePath, inputBinarySha256: inputSha256 } })),
+    unresolvedRecoveryEntityIds: [], unresolvedImplementationIds: [functionId(1)], unresolvedEntityIds: [functionId(1)],
+    semanticPlanningBudgetEvidence: { schemaVersion: 1 },
+    sourceGenerationBudgetEvidence: { schemaVersion: 1, outcome: { plannedModules: modules.length, completedModules: modules.length,
+      acceptedModules: accepted, unresolvedModules: modules.length - accepted }, modules: [] },
+  }).replace('"__PROJECT_SCORE__"', score([...labels.values()]))
+    .replace(/"__SCORE_([^"]+)__"/g, (_, id) => {
+      const module = modules.find((item) => item.id === id);
+      return score([...module.functionIds, ...module.globalIds, ...module.typeIds].map((entity) => labels.get(entity)));
+    });
 }
 
 /** Test-only persisted revision written before server ownership; no workflow, compiler or model runs. */
@@ -91,6 +129,7 @@ export async function seedStructure(root) {
     ['include/decomp_types.h', '#pragma once\n'],
     ['reports/program_model.json', model],
     ['reports/module_plan.json', canonicalPlan(modules)],
+    ['reports/confidence.json', confidence(model, modules, sha(input))],
   ]);
   for (const module of modules) {
     files.set(module.sourcePath, `/* ${module.id}: synthetic recorded source */\n#include "../../include/modules/${module.id}.h"\n`);
@@ -120,14 +159,23 @@ export async function seedStructure(root) {
     await fs.writeFile(join(directory, name), bytes, { flag: 'wx', mode: 0o600 });
   }
   const tree = join(directory, 'reports', 'runs', runId, 'source-tree');
+  const manifestBytes = Buffer.from(JSON.stringify(manifest));
+  const contractBytes = Buffer.from(JSON.stringify(contract));
   const written = [...entries.map(({ path, bytes }) => [path, bytes]),
-    ['source_tree_manifest.json', Buffer.from(JSON.stringify(manifest))], ['reports/build_contract.json', Buffer.from(JSON.stringify(contract))]];
+    ['source_tree_manifest.json', manifestBytes], ['reports/build_contract.json', contractBytes]];
   for (const [path, bytes] of written) {
     await fs.mkdir(dirname(join(tree, path)), { recursive: true, mode: 0o700 });
     await fs.writeFile(join(tree, path), bytes, { flag: 'wx', mode: 0o600 });
   }
+  const recordSha256 = Object.fromEntries(manifest.files
+    .filter(({ path }) => Object.values(RECORD_DOWNLOADS).some(record => record.path === path))
+    .map(({ path, sha256 }) => [path, sha256]));
+  // Reproduce the seeded revision's pins from the committed bytes, independent of any browser link.
+  const metadataVersion = sha(`revision-source-metadata-v1\n${sha(manifestBytes)}\n${sha(contractBytes)}\n${sourceSha256}\n`);
+  const structureVersion = sha(['program-structure-v1', metadataVersion, recordSha256[RECORD_DOWNLOADS['program-model'].path],
+    recordSha256[RECORD_DOWNLOADS['module-plan'].path], 'available', 'available'].join('\n'));
   return { jobId, runId, revisionId, functions: FUNCTIONS, modules: modules.length, modelBytes: Buffer.byteLength(model),
-    functionAddress, functionId, moduleId };
+    functionAddress, functionId, moduleId, records: { tree, downloadParent: dirname(root), recordSha256, structureVersion } };
 }
 
 const ROWS = `[...document.querySelectorAll('table[aria-label], table')].filter(table => table.querySelector('caption')?.textContent === 'Recovered functions')
@@ -617,9 +665,31 @@ export function createColdEvidenceRecorder(browserOrigin, now = () => performanc
   };
 }
 
+/**
+ * Runs the record downloads, then the budget verdict. A verdict failure carries the download result (or its bounded
+ * failure) as `recordDownloads`; with a passing verdict a download failure is thrown as itself.
+ */
+export async function downloadsThenVerdict(downloads, verdict) {
+  let result = null;
+  let failure = null;
+  try { result = await downloads(); } catch (error) { failure = error; }
+  try { verdict(); } catch (error) {
+    if (error !== null && typeof error === 'object') {
+      error.recordDownloads = result ?? { status: 'failed', error: String(failure?.message ?? failure).slice(0, 4096) };
+    }
+    throw error;
+  }
+  if (failure !== null) throw failure;
+  return result;
+}
+
 export function assertStructureQualification(measurements, evidenceFailures = []) {
   const budgetFailures = evaluateStructureBudgets(measurements);
-  if (budgetFailures.length || evidenceFailures.length) throw new Error(`Structure qualification failed: ${JSON.stringify({ evidenceFailures, budgetFailures, measurements })}`);
+  if (budgetFailures.length || evidenceFailures.length) {
+    const error = new Error(`Structure qualification failed: ${JSON.stringify({ evidenceFailures, budgetFailures, measurements })}`);
+    error.failedChecks = [...evidenceFailures, ...budgetFailures];
+    throw error;
+  }
 }
 
 /**
@@ -655,7 +725,9 @@ export function classifyFailedInventoryRequests(coldEvidence, inventoryConsumpti
       const ids = Array.isArray(action.requestIdHashes) ? action.requestIdHashes : [];
       if (ids.length !== 1 || ids[0] !== request.idHash || typeof request.urlHash !== 'string') continue;
       const key = `${request.idHash}:${request.urlHash}`;
-      candidates.set(key, (candidates.get(key) ?? 0) + 1);
+      const matches = candidates.get(key) ?? [];
+      matches.push(action);
+      candidates.set(key, matches);
     }
   }
   let provenCanceledAfterConsumptionCount = 0;
@@ -666,12 +738,15 @@ export function classifyFailedInventoryRequests(coldEvidence, inventoryConsumpti
       const headerLength = row?.responseHeaders?.['content-length'];
       const contentLength = typeof headerLength === 'string' && /^(?:0|[1-9][0-9]{0,8})$/.test(headerLength)
         ? Number(headerLength) : null;
+      const matches = candidates.get(key);
       const eligible = row?.method === 'GET' && row?.pathTemplate === '/nested/api/v1/jobs/{id}/runs/{id}/revisions/{id}/functions' &&
         row?.status === 200 && row?.failure?.errorText === 'net::ERR_ABORTED' && row?.failure?.canceled === true &&
         /^[a-f0-9]{64}$/.test(row?.networkIdHash ?? '') && /^[a-f0-9]{64}$/.test(row?.urlHash ?? '') &&
         row?.lateFailedAfterFinished !== true && row?.loadingFinishedEncodedDataLength === null &&
         Number.isSafeInteger(contentLength) && row?.dataLength === contentLength &&
-        candidates.get(key) === 1 && !matched.has(key);
+        matches?.length === 1 && !matched.has(key) &&
+        (matches[0].kind !== 'search' || (SERVER_REQUEST_ID.test(matches[0].request.serverRequestId) &&
+          matches[0].request.serverRequestId === row.responseHeaders?.['x-request-id']));
       if (eligible) {
         matched.add(key);
         provenCanceledAfterConsumptionCount++;
@@ -1214,14 +1289,14 @@ export function evaluateStructureBudgets(m) {
 
 // ---------------------------------------------------------------------------------------------
 // #536 inventory consumption proof (evidence only). It never changes request behaviour, failure
-// classification or budgets: it only observes which response each of the 52 inventory actions
-// (first page, 50 next pages, reload) validated and consumed, and fails closed as "unproven".
+// classification or budgets: it observes which response each inventory action validated and
+// consumed (first page, 50 next pages, reload, search), and fails closed as "unproven".
 const PROOF_BODY_LIMIT_BYTES = 1024 * 1024;
 const PROOF_RAW_LIMIT_BYTES = 4 * 1024 * 1024;
 const PROOF_STREAM_PENDING_LIMIT = 16;
 const PROOF_DATA_EVENT_LIMIT = 4096;
 const PROOF_LEDGER_LIMIT = 128;
-const PROOF_ACTION_LIMIT = 52;
+const PROOF_ACTION_LIMIT = 53;
 const PROOF_PAYLOAD_LIMIT = 16384;
 const PROOF_READY_LIMIT = 4;
 const PROOF_DOCUMENT_BINDING = '__decompInventoryDocument';
@@ -1230,6 +1305,10 @@ const PROOF_READY_BINDING = '__decompInventoryReady';
 export const INVENTORY_PROOF_BINDINGS = [PROOF_DOCUMENT_BINDING, PROOF_TIMING_BINDING, PROOF_READY_BINDING];
 const INVENTORY_PATH = /\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/functions$/;
 const SUMMARY_PATTERN = 'Showing \\d+\\u2013\\d+ of \\d+ matching functions(?: \\(\\d+ recorded\\))?';
+const SEARCH_INDEX = FUNCTIONS - 1;
+const SEARCH_NAME = 'synthetic_function_99999';
+const SEARCH_QUERY = `?search=${SEARCH_NAME}`;
+const SERVER_REQUEST_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 
 /** Installed on every new document: nonce + timeOrigin announcement, nonce-tagged ResourceTiming and a ROWS observer. */
 export function inventoryDocumentInstrumentation() {
@@ -1257,29 +1336,39 @@ export function inventoryDocumentInstrumentation() {
     const rows = () => ${ROWS};
     const summaryPattern = new RegExp(${JSON.stringify(SUMMARY_PATTERN)});
     let armed = null, emitted = 0, last = null;
-    const state = () => {
+    const state = search => {
       const list = rows();
       const summary = (document.body?.innerText ?? '').match(summaryPattern)?.[0] ?? null;
-      return { list, summary, key: JSON.stringify([list, summary]) };
+      let result = null;
+      if (search && list.length === 1) {
+        const table = [...document.querySelectorAll('table')].find(table => table.querySelector('caption')?.textContent === 'Recovered functions');
+        const link = table?.querySelector('tbody tr td:nth-child(2) a');
+        const id = table?.querySelector('tbody tr td:nth-child(3) code')?.textContent;
+        if (link) result = { name: link.textContent, href: link.getAttribute('href'), id, location: location.pathname + location.search };
+      }
+      return { list, summary, result, key: JSON.stringify([list, summary, result]) };
     };
     const emit = (current, token) => {
       if (++emitted > ${PROOF_LEDGER_LIMIT}) { if (emitted === ${PROOF_LEDGER_LIMIT + 1}) send(${JSON.stringify(PROOF_READY_BINDING)}, { nonce, overflow: true }); return; }
       send(${JSON.stringify(PROOF_READY_BINDING)}, { nonce, token, readyAt: performance.now(), count: current.list.length,
-        addresses: current.list, summary: current.summary });
+        addresses: current.list, summary: current.summary, result: current.result });
     };
     const check = () => {
-      const current = state();
-      if (current.list.length !== 100 || current.list.some(value => typeof value !== 'string')) return;
+      const current = state(armed?.search);
+      if (current.list.length !== (armed?.count ?? 100) || current.list.some(value => typeof value !== 'string')) return;
       if (armed) {
         if (current.key === armed.baselineKey && armed.stale !== true) return;
         if (JSON.stringify(current.list) !== armed.addresses || !current.summary?.startsWith(armed.summary)) return;
+        if (armed.search && (current.result?.name !== armed.search.name || current.result.id !== armed.search.id
+          || current.result.location !== armed.search.location || !current.result.href?.startsWith(armed.search.linkPrefix))) return;
         const token = armed.token; armed = null; last = current.key; emit(current, token);
       } else if (current.key !== last) { last = current.key; emit(current, null); }
     };
-    Object.defineProperty(window, '__decompArmInventory', { value: (token, addresses, summary) => {
-      const current = state();
+    Object.defineProperty(window, '__decompArmInventory', { value: (token, addresses, summary, search) => {
+      const current = state(search);
       const baselineMatches = JSON.stringify(current.list) === JSON.stringify(addresses) && current.summary?.startsWith(summary) === true;
-      armed = { token: String(token), addresses: JSON.stringify(addresses), summary: String(summary), baselineKey: current.key, stale: baselineMatches };
+      armed = { token: String(token), addresses: JSON.stringify(addresses), summary: String(summary), baselineKey: current.key, stale: baselineMatches,
+        count: addresses.length, search };
       last = current.key;
       return { nonce, baselineMatches };
     } });
@@ -1292,16 +1381,17 @@ export function inventoryDocumentInstrumentation() {
 }
 
 /** Ordered id/address oracle for one inventory page of the seeded fixture. */
-export function inventoryPageOracle(fixture, start) {
+export function inventoryPageOracle(fixture, start, count = 100) {
   const ids = [], addresses = [];
-  for (let index = start; index < start + 100; index++) {
+  for (let index = start; index < start + count; index++) {
     ids.push(fixture.functionId(index)); addresses.push(`0x${fixture.functionAddress(index).toString(16)}`);
   }
   return { start, ids, addresses, digest: sha(JSON.stringify(ids.map((id, i) => [id, addresses[i]]))),
-    addressDigest: sha(JSON.stringify(addresses)), first: addresses[0], last: addresses[99] };
+    addressDigest: sha(JSON.stringify(addresses)), first: addresses[0], last: addresses.at(-1) };
 }
 
 export function inventorySummaryPrefix(start, kind) {
+  if (kind === 'search') return 'Showing 1–1 of 1 matching functions (100000 recorded)';
   return kind === 'first' ? `Showing 1–100 of 100000 matching functions (100000 recorded)` : `Showing ${start + 1}–${start + 100} of 100000 matching functions`;
 }
 
@@ -1445,6 +1535,11 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call, 
       summary: typeof value.summary === 'string' ? value.summary.slice(0, 128) : null, loaderAtReady: mainLoaderId };
     const action = ready.token !== null ? byToken.get(ready.token) : current;
     if (!action || closed) { counters.unattributedReadies++; return; }
+    if (action.search) {
+      const fields = ['name', 'href', 'id', 'location'];
+      if (fields.some(key => typeof value.result?.[key] !== 'string' || value.result[key].length > 1024)) { counters.invalid++; return; }
+      ready.result = Object.fromEntries(fields.map(key => [key, value.result[key]]));
+    }
     if (action.readies.length >= PROOF_READY_LIMIT) { action.readyOverflow++; return; }
     action.readies.push(ready);
   }
@@ -1492,6 +1587,10 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call, 
       protocol: typeof response.protocol === 'string' ? response.protocol.slice(0, 32) : null, contentLength,
       contentEncoding: typeof headers['content-encoding'] === 'string' ? headers['content-encoding'].slice(0, 32) : null,
       type: event.type ?? null, frameId: event.frameId ?? null, loaderId: event.loaderId ?? null };
+    if (record.action.search) {
+      record.response.urlHash = sameOrigin ? sha(response.url) : null;
+      record.response.serverRequestId = SERVER_REQUEST_ID.test(headers['x-request-id']) ? headers['x-request-id'] : null;
+    }
   }
   function dataReceived(event) {
     tick();
@@ -1552,15 +1651,20 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call, 
     if (doc?.apiVersion !== 1 || doc?.kind !== 'functionInventory' || !data) reasons.push('body-envelope');
     if (data?.state !== 'available') reasons.push('body-state');
     if (data?.binding?.jobId !== fixture.jobId || data?.binding?.runId !== fixture.runId || data?.binding?.revisionId !== fixture.revisionId) reasons.push('body-revision');
-    if (data?.totalFunctions !== fixture.functions || data?.matchedFunctions !== fixture.functions) reasons.push('body-total');
+    if (data?.totalFunctions !== fixture.functions || data?.matchedFunctions !== (record.action.search ? 1 : fixture.functions)) reasons.push('body-total');
     if (data?.page?.limit !== 100) reasons.push('body-limit');
     if (!/^[a-f0-9]{64}$/.test(String(data?.structureVersion))) reasons.push('body-structure-version');
     const items = Array.isArray(data?.items) ? data.items : [];
-    if (items.length !== 100) reasons.push('body-count');
+    if (items.length !== oracle.ids.length) reasons.push('body-count');
     if (items.some(item => item?.kind !== 'function' || item?.recorded !== true)) reasons.push('body-recorded');
     const ids = items.map(item => item?.entityId), addresses = items.map(item => item?.address);
     const digest = sha(JSON.stringify(ids.map((id, i) => [id, addresses[i]])));
     if (digest !== oracle.digest) reasons.push('body-oracle-mismatch');
+    if (record.action.search) {
+      if (!record.response?.serverRequestId || doc?.requestId !== record.response.serverRequestId) reasons.push('body-request-id');
+      if (items[0]?.name !== record.action.search.name || items[0]?.selector !== oracle.ids[0]) reasons.push('body-search-entity');
+      if (data?.page?.nextCursor !== null || data?.page?.snapshotVersion !== data?.structureVersion) reasons.push('body-search-page');
+    }
     return { reasons, digest, first: addresses[0] ?? null, last: addresses.at(-1) ?? null,
       binding: Object.fromEntries(['jobId', 'runId', 'revisionId'].map(key => [key, String(data?.binding?.[key] ?? '').slice(0, 128)])),
       total: Number.isSafeInteger(data?.totalFunctions) ? data.totalFunctions : null,
@@ -1626,11 +1730,16 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call, 
     if (actions.length >= expectedActions) { counters.actionOverflow++; current = null; return null; }
     const token = `${label}:${crypto.randomUUID()}`;
     const priorDocument = [...documents.values()].at(-1) ?? null;
-    current = { label, kind, token, start, oracle: inventoryPageOracle(fixture, start), summaryPrefix: inventorySummaryPrefix(start, kind),
+    const oracle = inventoryPageOracle(fixture, start, kind === 'search' ? 1 : 100);
+    const revision = `/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}`;
+    const search = kind === 'search' ? { name: SEARCH_NAME, id: oracle.ids[0], location: `/nested${revision}/functions${SEARCH_QUERY}`,
+      linkPrefix: `/nested${revision}/functions/${oracle.ids[0]}?structureVersion=` } : null;
+    current = { label, kind, token, start, oracle, search, summaryPrefix: inventorySummaryPrefix(start, kind),
+      searchUrlHash: search ? sha(`${origin}/nested/api/v1${revision}/functions${SEARCH_QUERY}&limit=100`) : null,
       startOrdinal: ordinal, priorNonce: priorDocument?.nonce ?? null, priorLoader: mainLoaderId, arm: null,
       requests: [], readies: [], readyOverflow: 0, requestOverflow: 0 };
     actions.push(current); byToken.set(token, current);
-    return { token, addresses: current.oracle.addresses, summary: current.summaryPrefix };
+    return { token, addresses: current.oracle.addresses, summary: current.summaryPrefix, search };
   }
   function armResult(result) {
     if (!current) return;
@@ -1661,9 +1770,12 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call, 
     if (ready) {
       if (!doc) reasons.push('ready-unknown-document');
       else if (!doc.boundToMain) reasons.push('ready-document-not-main-context');
-      if (ready.count !== 100 || ready.addressDigest !== action.oracle.addressDigest) reasons.push('ready-dom-mismatch');
+      if (ready.count !== action.oracle.ids.length || ready.addressDigest !== action.oracle.addressDigest) reasons.push('ready-dom-mismatch');
       if (!ready.summary?.startsWith(action.summaryPrefix)) reasons.push('ready-summary-mismatch');
       if (doc && ready.loaderAtReady !== doc.loaderId) reasons.push('ready-loader-changed');
+      if (action.search && (ready.result?.name !== action.search.name || ready.result?.id !== action.search.id
+        || ready.result?.location !== action.search.location
+        || ready.result?.href !== action.search.linkPrefix + request?.body?.structureVersion)) reasons.push('ready-search-entity');
     }
     let timing = null;
     if (request) {
@@ -1672,6 +1784,10 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call, 
       if (request.loaderId === null || request.loaderId !== request.mainLoaderAtRequest) reasons.push('request-not-current-loader');
       if (doc && request.loaderId !== doc.loaderId) reasons.push('request-loader-not-ready-document');
       if (!['Fetch', 'XHR'].includes(request.type)) reasons.push('request-type');
+      if (action.search) {
+        if (request.urlHash !== action.searchUrlHash || response?.urlHash !== action.searchUrlHash) reasons.push('search-request-url');
+        if (!(request.requestOrdinal > action.arm?.ordinal)) reasons.push('search-request-before-arm');
+      }
       if (!response) reasons.push('response-missing');
       else {
         if (response.status !== 200) reasons.push('response-status');
@@ -1713,7 +1829,7 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call, 
         request.body.bytes === response.contentLength && ready && ready.ordinal > request.failure.ordinal &&
         matches.length === 1 && timing.responseStatus === 200 &&
         timing.encodedBodySize === response.contentLength && timing.decodedBodySize === response.contentLength &&
-        timing.responseEnd <= ready.readyAt);
+        timing.responseEnd <= ready.readyAt && (!action.search || reasons.length === 0));
       if (request.failure && !canceledAfterConsumption) reasons.push('loading-failed');
       request.terminalEvidence = canceledAfterConsumption ? 'canceled-after-consumption'
         : request.failure ? 'unproven-loading-failure' : request.finished ? 'finished' : 'pending';
@@ -1727,6 +1843,7 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call, 
         mainLoaderAtRequestHash: request.mainLoaderAtRequest === null ? null : sha(request.mainLoaderAtRequest),
         ordinals: { request: request.requestOrdinal, response: request.response?.ordinal ?? null, finished: request.finished?.ordinal ?? null, failed: request.failure?.ordinal ?? null },
         status: request.response?.status ?? null, protocol: request.response?.protocol ?? null, sameOrigin: request.response?.sameOrigin ?? null,
+        ...(action.search && { serverRequestId: request.response?.serverRequestId ?? null, responseUrlHash: request.response?.urlHash ?? null }),
         fromDiskCache: request.response?.fromDiskCache ?? null, fromServiceWorker: request.response?.fromServiceWorker ?? null,
         fromPrefetchCache: request.response?.fromPrefetchCache ?? null, contentLength: request.response?.contentLength ?? null,
         servedFromCache: request.servedFromCache, stream: { ...request.stream, dataEvents: request.dataEvents }, bodyCross: { ...request.bodyCross },
@@ -1740,7 +1857,8 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call, 
       timing: timing && { encodedBodySize: timing.encodedBodySize, decodedBodySize: timing.decodedBodySize, responseEnd: timing.responseEnd,
         nextHopProtocol: timing.nextHopProtocol, initiatorType: timing.initiatorType, deliveryType: timing.deliveryType, responseStatus: timing.responseStatus },
       ready: ready && { ordinal: ready.ordinal, readyAt: ready.readyAt, addressDigest: ready.addressDigest, first: ready.first, last: ready.last,
-        documentNonceHash: sha(ready.nonce), freshDocument: action.kind === 'reload' ? ready.nonce !== action.priorNonce : null } };
+        documentNonceHash: sha(ready.nonce), freshDocument: action.kind === 'reload' ? ready.nonce !== action.priorNonce : null,
+        ...(action.search && { result: ready.result }) } };
   }
   function summary({ exceptions = 0 } = {}) {
     const global = [];
@@ -1823,7 +1941,78 @@ export async function qualifyStructureColdSample(options) {
   });
 }
 
-async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evaluate, ready, browserOrigin,
+export async function qualifyStructureRecordDownloads({ fixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin,
+  profile = 'loopback' }) {
+  const tab = await makeTarget();
+  await applyStructureProfile(cdp, tab.sessionId, structureProfile(profile));
+  const relativeRevision = `jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}`;
+  const revision = `${browserOrigin}/nested/${relativeRevision}`;
+  const api = `${browserOrigin}/nested/api/v1/${relativeRevision}`;
+  const { tree, downloadParent, recordSha256, structureVersion } = fixture.records;
+  const sessionCookie = async () => {
+    const { cookies } = await cdp.call('Network.getCookies', { urls: [revision] }, tab.sessionId);
+    const session = cookies.find(cookie => cookie.path === '/nested/' && cookie.httpOnly && cookie.sameSite === 'Strict');
+    assert.ok(session?.value, 'Record downloads require the authenticated workbench read session');
+    return session.value;
+  };
+  const originalSession = await sessionCookie();
+  const downloads = {};
+  const download = async (id, viewUrl) => {
+    const { path, text } = RECORD_DOWNLOADS[id];
+    const expected = await fs.readFile(join(tree, path));
+    assert.equal(sha(expected), recordSha256[path], `Seeded ${id} bytes must match their manifest commitment`);
+    const anchor = `[...document.querySelectorAll('main a')].find(a => a.textContent === ${JSON.stringify(text)})`;
+    const before = await evaluate(tab, `(() => {
+      const link = ${anchor};
+      const citation = link?.closest('li, p');
+      return { url: location.href, timeOrigin: performance.timeOrigin, href: link?.href,
+        enabled: !!link?.download && link.getAttribute('aria-disabled') !== 'true',
+        recordPath: citation?.querySelector('bdi')?.textContent, sha256: citation?.querySelector('code')?.textContent };
+    })()`);
+    assert.equal(before.url, viewUrl, `${id} must download from its workbench view`);
+    assert.equal(before.href, `${api}/records/${id}?structureVersion=${structureVersion}`);
+    assert.equal(before.enabled, true, `${id} must have an enabled native download link`);
+    assert.equal(before.recordPath, path);
+    assert.equal(before.sha256, recordSha256[path], `${id} must cite the seeded commitment`);
+    const result = await nativeDownloadByClick({ cdp, tab, evaluate, waitFor, text, expected,
+      directory: join(downloadParent, `structure-download-${id}`), timeout: 60_000 });
+    assert.equal(result.suggestedFilename, basename(path));
+    assert.equal(result.sha256, recordSha256[path]);
+    assert.equal(await evaluate(tab, 'performance.timeOrigin'), before.timeOrigin, `${id} must keep the same workbench document`);
+    downloads[id] = { ...result, structureVersion, committedSha256: recordSha256[path] };
+  };
+
+  const scorecardUrl = `${revision}/scorecard`;
+  await cdp.call('Page.navigate', { url: scorecardUrl }, tab.sessionId);
+  await ready(tab, `[...document.querySelectorAll('table caption')].some(caption => caption.textContent === 'Measures')`, 'scorecard for the confidence download');
+  await download('confidence', scorecardUrl);
+
+  const module = fixture.moduleId(0);
+  const graphUrl = `${revision}/graph?view=modules&focus=${module}&depth=2&nodeLimit=200&edgeLimit=400`;
+  await cdp.call('Page.navigate', { url: graphUrl }, tab.sessionId);
+  await ready(tab, `(() => {
+    const inspect = [...document.querySelectorAll('table button')].find(button => button.textContent === ${JSON.stringify(`Inspect ${module}`)});
+    if (!inspect) return false;
+    inspect.focus();
+    return document.activeElement === inspect;
+  })()`, 'module graph inspection control');
+  for (const type of ['keyDown', 'keyUp']) {
+    await cdp.call('Input.dispatchKeyEvent', { type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13,
+      ...(type === 'keyDown' ? { text: '\r' } : {}) }, tab.sessionId);
+  }
+  // The drawing sits above the links and can move their pointer targets while layout completes.
+  await ready(tab, `document.body.innerText.includes(${JSON.stringify(`Selected node ${module}.`)})
+    && document.querySelector('svg[role="img"] .graph-node') !== null`, 'selected module graph record links');
+  await download('program-model', graphUrl);
+  await download('module-plan', graphUrl);
+  assert.ok(await sessionCookie() === originalSession, 'Record downloads must keep the authenticated read session');
+  assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method) && new URL(request.url).origin === browserOrigin),
+    'Record qualification must read only from the packaged workbench');
+  assert.deepEqual(tab.exceptions, []);
+  return downloads;
+}
+
+async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin,
   profile: profileName = 'loopback', coldSample = false }, jvmRssSampler, observer = moduleBodyObserver()) {
   const tab = await makeTarget();
   observer.attach(cdp, tab.sessionId, browserOrigin);
@@ -1839,6 +2028,7 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   await tab.initialize('Page.addScriptToEvaluateOnNewDocument', { source: structureFeedbackInstrumentation() });
   await cdp.call('Performance.enable', {}, tab.sessionId);
   const inventoryReads = [];
+  const graphReads = [];
   const inventoryRequests = new Map();
   const coldEvidence = createColdEvidenceRecorder(browserOrigin);
   await tab.initialize('Runtime.addBinding', { name: '__decompResourceTiming' });
@@ -1874,7 +2064,7 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   await tab.initialize('Page.addScriptToEvaluateOnNewDocument', { source: inventoryDocumentInstrumentation() });
   const armProof = async (expectation) => {
     if (!expectation) return;
-    try { proof.armResult(await evaluate(tab, `window.__decompArmInventory?.(${JSON.stringify(expectation.token)}, ${JSON.stringify(expectation.addresses)}, ${JSON.stringify(expectation.summary)}) ?? null`)); }
+    try { proof.armResult(await evaluate(tab, `window.__decompArmInventory?.(${JSON.stringify(expectation.token)}, ${JSON.stringify(expectation.addresses)}, ${JSON.stringify(expectation.summary)}, ${JSON.stringify(expectation.search)}) ?? null`)); }
     catch { proof.armResult(null); }
   };
   const phase = value => { coldEvidence.phase(value); jvmRssSampler.phase(value); };
@@ -1920,6 +2110,7 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
       inventoryReads.push(url.searchParams.get('limit'));
       inventoryRequests.set(event.requestId, event.timestamp);
     }
+    if (/\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/graph$/.test(url.pathname)) graphReads.push(url.search);
   }, tab.sessionId);
   cdp.on('Network.loadingFinished', (event) => {
     const started = inventoryRequests.get(event.requestId);
@@ -2032,9 +2223,9 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   // Handshake: the fresh document (new nonce/loader) must itself report the restored rows; bounded observation only.
   for (let waited = 0; waited < 2000 && !proof.freshReady('reload'); waited += 25) await new Promise(resolve => setTimeout(resolve, 25));
   await proof.drain(proofCall);
-  proof.close();
 
   phase('search');
+  await armProof(proof.beginAction({ label: 'search', kind: 'search', start: SEARCH_INDEX }));
   started = performance.now();
   await evaluate(tab, `(() => {
     const field = document.querySelector('input[name="search"]');
@@ -2047,10 +2238,60 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   assert.ok(await evaluate(tab, `document.body.innerText.includes('No owning module') && document.body.innerText.includes('Excluded')`));
   await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'synthetic_function_99999').click()`);
   await ready(tab, `document.querySelector('main h2')?.textContent === 'synthetic_function_99999' && document.body.innerText.includes('Excluded: the recorded module plan assigns this entity to no module.')`, 'excluded function facts');
+  proof.close();
+  await proof.drain(proofCall);
   assert.match(await evaluate(tab, 'location.search'), /^\?structureVersion=[a-f0-9]{64}$/);
   assert.ok(await evaluate(tab, `document.body.innerText.includes('Recovery assessment: unassessed')`));
   await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'synthetic_function_99998').click()`);
   await ready(tab, `document.querySelector('main h2')?.textContent === 'synthetic_function_99998'`, 'caller cross-link within the pinned structure version');
+  phase('graph');
+  // Bounded call neighborhood (#537, #538): explicit limits on the wire, a worker-drawn layout and equivalent keyboard tables.
+  started = performance.now();
+  await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'Explore its recorded call neighborhood').click()`);
+  await ready(tab, `document.querySelector('table caption')?.textContent === 'Nodes' && [...document.querySelectorAll('table')].some(table => table.querySelector('caption')?.textContent === 'Relationships')`, 'call neighborhood tables');
+  const graphTablesMs = performance.now() - started;
+  await ready(tab, `document.querySelector('svg[role="img"] .graph-node') !== null`, 'call neighborhood drawing');
+  const graphDrawnMs = performance.now() - started;
+  assert.match(graphReads.at(-1), /^\?view=calls&focus=fn_[0-9a-f]{16}&direction=both&depth=1&nodeLimit=60&edgeLimit=150&unresolved=show&structureVersion=[a-f0-9]{64}$/);
+  assert.ok(await evaluate(tab, `document.body.innerText.includes('Complete within the requested depth')`));
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Inspect synthetic_function_99999').focus()`);
+  await enter();
+  await ready(tab, `document.activeElement?.textContent === 'Selected' && document.body.innerText.includes('Selected node synthetic_function_99999.')`, 'keyboard inspection of a neighborhood node');
+  assert.match(await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent.startsWith('Open the recorded function'))?.getAttribute('href')`),
+    new RegExp(`^${revision}/functions/fn_[0-9a-f]{16}\\?structureVersion=[a-f0-9]{64}$`));
+  assert.match(await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'Download the program model record')?.getAttribute('href')`),
+    /\/records\/program-model\?structureVersion=[a-f0-9]{64}$/);
+  assert.ok(await evaluate(tab, `document.querySelectorAll('tr').length`) <= 500, 'Mounted neighborhood rows exceed the D0 DOM budget');
+  await heap();
+  await cdp.call('Page.navigate', { url: browserOrigin + `${revision}/graph?view=modules&focus=${fixture.moduleId(0)}&depth=2&nodeLimit=200&edgeLimit=400` }, tab.sessionId);
+  // Module 0 owns every global, so a hundred modules depend on it: the node table pages its 200 rows.
+  await ready(tab, `document.body.innerText.includes('Module dependencies') && document.querySelector('table caption')?.textContent === 'Nodes (Rows 1–100 of 200)'`, 'module dependency neighborhood');
+  assert.ok(await evaluate(tab, `document.body.innerText.includes('Truncated: this is not the complete neighborhood. the node limit was reached.')`));
+  assert.ok(await evaluate(tab, `document.querySelectorAll('tr').length`) <= 500, 'Mounted module neighborhood rows exceed the D0 DOM budget');
+  await ready(tab, `document.querySelector('svg[role="img"] .graph-node') !== null`, 'module dependency drawing');
+  await heap();
+  phase('scorecard');
+  // Recorded scorecard (#541): measured, unmeasured and reconciled values from the committed confidence report.
+  started = performance.now();
+  await cdp.call('Page.navigate', { url: browserOrigin + `${revision}/scorecard` }, tab.sessionId);
+  await ready(tab, `[...document.querySelectorAll('table caption')].some(caption => caption.textContent === 'Measures') && document.body.innerText.includes('Showing 1–50 of ${fixture.modules} modules.')`, 'recorded scorecard');
+  const scorecardMs = performance.now() - started;
+  assert.ok(await evaluate(tab, `document.body.innerText.includes('Not measured: the score is uncalibrated, so no probability is recorded')`));
+  const projectScoreCells = await evaluate(tab, `(() => {
+    const table = [...document.querySelectorAll('table')].find(item => item.caption?.textContent === 'Measures');
+    const row = [...(table?.tBodies[0]?.rows ?? [])].find(item => item.cells[0]?.textContent === 'Structural recovery score (heuristic)');
+    return row ? [...row.cells].map(cell => cell.textContent) : [];
+  })()`);
+  assert.deepEqual(projectScoreCells.slice(1, 6), ['Ratio', 'Measured', '0.9668', '96789.4 of 100110', '0.9668'],
+    'The seeded project score must reproduce from its recorded labels');
+  assert.ok(await evaluate(tab, `document.body.innerText.includes('The module sums plus excluded entities, less shared memberships, equal the project numerator and denominator.')`));
+  assert.ok(await evaluate(tab, `document.querySelector('svg[role="img"][aria-label^="Bar chart"]') !== null`));
+  await ready(tab, `document.body.innerText.includes('No other attempt of this job has a result revision to compare.')`, 'scorecard baseline listing');
+  assert.match(await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'Download the confidence report')?.getAttribute('href')`),
+    /\/records\/confidence\?structureVersion=[a-f0-9]{64}$/);
+  await heap();
+  await cdp.call('Page.navigate', { url: browserOrigin + `${revision}/functions/${fixture.functionId(99998)}` }, tab.sessionId);
+  await ready(tab, `document.querySelector('main h2')?.textContent === 'synthetic_function_99998'`, 'function detail before module navigation');
   phase('module');
   const module = fixture.moduleId(Math.floor(99998 / 24));
   await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === ${JSON.stringify(module)}).click()`);
@@ -2116,7 +2357,10 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
     requestMethods: tab.requests.map(request => request.method), peakBrowserHeapBytes, browserHeapMemory, jvmMemory,
     moduleResponse: moduleResponseEvidence, structureTiming: structureTimingSummary, firstPagePerformance,
     ...coldEvidenceSummary, ...inventoryFailureClassification, inventoryConsumption };
-  assertStructureQualification(measurements, evidenceFailures);
+  // Attachment transfer is outside the structure navigation latency and memory measurements. It runs before the budget
+  // verdict, so a budget failure keeps the download evidence and a download failure never hides that verdict.
+  const recordDownloads = await downloadsThenVerdict(() => qualifyStructureRecordDownloads({ fixture, makeTarget, cdp, evaluate,
+    ready, waitFor, browserOrigin, profile: profileName }), () => assertStructureQualification(measurements, evidenceFailures));
   pageMs.sort((a, b) => a - b);
   return { ...measurements, recordedFunctions: fixture.functions, modules: fixture.modules, modelBytes: fixture.modelBytes, rowsPerPage: 100,
     pagesVisited: 51, measuredInteractions: localFeedbackMs.length, maximumMountedRows: 100,
@@ -2125,5 +2369,7 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
     functionRequestP95Ms: Math.round(requestP95Ms), localFeedbackP95Ms: Math.round(localFeedbackP95Ms),
     firstPageBudgetMs: profile.firstPageLimitMs, localFeedbackBudgetMs: LOCAL_FEEDBACK_BUDGET_MS, jvmMemory,
     searchMs: Math.round(searchMs), peakBrowserHeapBytes, cursorReload: true,
-    pinnedCrossLinks: true, moduleSourceLink: true, moduleResponse: moduleResponseEvidence, narrowReflow: true, boundedInventoryReads: inventoryReads.length, mutationRequests: 0 };
+    pinnedCrossLinks: true, moduleSourceLink: true, moduleResponse: moduleResponseEvidence, narrowReflow: true, boundedInventoryReads: inventoryReads.length, mutationRequests: 0,
+    graphTablesMs: Math.round(graphTablesMs), graphDrawnMs: Math.round(graphDrawnMs), boundedGraphReads: graphReads.length,
+    scorecardMs: Math.round(scorecardMs), recordDownloads };
 }

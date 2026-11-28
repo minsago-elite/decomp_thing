@@ -977,6 +977,11 @@
       "reason": "A page with unrecorded entries cannot claim completeness."
     },
     {
+      "file": "fixtures/invalid-support-export-audit-revision.json",
+      "valid": false,
+      "reason": "A revision-bound audit target names a closed-syntax revision ID or commitment."
+    },
+    {
       "file": "fixtures/capacity-saturated.json",
       "valid": true
     },
@@ -1411,6 +1416,186 @@
       "valid": false
     },
     {
+      "file": "fixtures/scorecard-comparison-incompatible.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/scorecard-comparison.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/scorecard-comparison-unavailable.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/structure-neighborhood-calls.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/structure-neighborhood-modules.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/structure-neighborhood-not-recorded.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/structure-neighborhood-truncated.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/structure-scorecard-not-recorded.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/structure-scorecard.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-structure-neighborhood-unavailable-graph.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-structure-neighborhood-edge-endpoint.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-structure-neighborhood-complete-with-omissions.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-structure-neighborhood-unrecorded-selector.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-structure-neighborhood-foreign-center.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-structure-scorecard-measured-without-denominator.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-structure-scorecard-unmeasured-value.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-structure-scorecard-unavailable-scorecard.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-incompatible-delta.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-unmeasured-delta.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-missing-input-check.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-advisory-identity-check.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-repeated-identity-check.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-foreign-scope-input.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-unequal-match.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-compatible-without-scope.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-model-schema-check-contradicts-record.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-scope-names-foreign-model.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-confidence-check-without-record.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-delta-disagrees-with-operands.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-foreign-page-snapshot.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-unavailable-with-module-rows.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-module-page-without-rows.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-final-page-missing-rows.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-cursor-beyond-total.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-structure-scorecard-final-page-missing-rows.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-structure-scorecard-continued-page-without-rows.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-structure-scorecard-cursor-for-another-snapshot.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-incompatible-unwithheld-delta.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-concealed-baseline-modules.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/scorecard-comparison-unrecorded-baseline-plan.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-available-plan-without-module-count.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-module-in-both-without-baseline-plan.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/structure-scorecard-unrecorded-plan.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-structure-scorecard-unrecorded-plan-with-module-rows.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-structure-scorecard-available-plan-without-module-total.json",
+      "valid": false
+    },
+    {
       "file": "fixtures/git-workspace-unborn-dirty.json",
       "valid": true
     },
@@ -1520,6 +1705,22 @@
     },
     {
       "file": "fixtures/invalid-artifact-family-role-projection.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/scorecard-comparison-replanned-baseline.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-replanned-baseline-delta.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-advisory-population-check.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-scorecard-comparison-population-differs-with-equal-text.json",
       "valid": false
     }
   ]

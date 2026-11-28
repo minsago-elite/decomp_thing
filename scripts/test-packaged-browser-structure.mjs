@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
-import { appendStructureFeedbackSample, assertStructureSourceLink, createBrowserHeapSummary, createJvmRssSummary, createModuleResponseInterceptor,
+import { appendStructureFeedbackSample, assertStructureQualification, assertStructureSourceLink, createBrowserHeapSummary, createJvmRssSummary, createModuleResponseInterceptor,
   classifyFailedInventoryRequests, createStructureResponseRecorder, createStructureTimingRecorder, evaluateStructureBudgets,
   isModuleDetailUrl, moduleDetailFetchPattern, nearestRankP95, recordBrowserHeapSample, recordJvmRssSample,
   startBrowserHeapSampler, structureFeedbackInstrumentation, summarizeBrowserHeap, summarizeJvmRss } from './packaged-browser-structure.mjs';
-import { moduleBodyObserver, qualifyStructureBudgets, qualifyStructureColdSample, structureColdSampleFailure, structureFailureEvidence } from './packaged-browser-structure.mjs';
+import { downloadsThenVerdict, moduleBodyObserver, qualifyStructureBudgets, qualifyStructureColdSample, structureColdSampleFailure, structureFailureEvidence } from './packaged-browser-structure.mjs';
 import { publishReport } from './packaged-browser-restart.mjs';
 import { TargetProtocol } from './packaged-browser-target-lifecycle.mjs';
 import { spawn } from 'node:child_process';
@@ -527,11 +527,16 @@ test('every D0 budget is evaluated even when several fail', () => {
   const constrained = { ...passing, firstPageBudgetMs: 1000, firstPageMs: 900, pageDataP95Ms: 900, searchMs: 900, requestP95Ms: 900 };
   assert.deepEqual(evaluateStructureBudgets(constrained), []);
   assert.ok(evaluateStructureBudgets({ ...constrained, firstPageMs: 1001 }).some(failure => failure.includes('1000ms budget')));
-  const failures = evaluateStructureBudgets({ ...passing, firstPageMs: 501, localFeedbackP95Ms: 101,
+  const exceeded = { ...passing, firstPageMs: 501, localFeedbackP95Ms: 101,
     peakBrowserHeapBytes: 128 * 1024 * 1024 + 1,
     browserHeapMemory: { coverageComplete: true, sampledPeakBytes: 128 * 1024 * 1024 + 1 },
-    jvmMemory: { coverageComplete: true, incrementalPeakBytes: 256 * 1024 * 1024 + 1 } });
+    jvmMemory: { coverageComplete: true, incrementalPeakBytes: 256 * 1024 * 1024 + 1 } };
+  const failures = evaluateStructureBudgets(exceeded);
   assert.equal(failures.length, 4);
+  assert.throws(() => assertStructureQualification(exceeded, ['missing request evidence']), error => {
+    assert.deepEqual(error.failedChecks, ['missing request evidence', ...failures]);
+    return true;
+  });
   assert.ok(evaluateStructureBudgets({ ...passing,
     browserHeapMemory: { coverageComplete: false, sampledPeakBytes: 1 } })
     .some(failure => failure.startsWith('Browser heap sampling was incomplete:')));
@@ -655,8 +660,8 @@ test('only exact complete Chromium cancellations proven consumed by every invent
       failure: { errorText: 'net::ERR_ABORTED', canceled: true }, contentLength: 123, dataLength: 123,
       body: { bytes: 123 }, stream: { problem: null, firstSpanOrdinal: 4 } } };
   };
-  const proofActions = Array.from({ length: 52 }, (_, index) => actionFor(index));
-  const proof = { consumptionProven: true, expectedActions: 52, recordedActions: 52, provenActions: 52, actions: proofActions };
+  const proofActions = Array.from({ length: 53 }, (_, index) => actionFor(index));
+  const proof = { consumptionProven: true, expectedActions: 53, recordedActions: 53, provenActions: 53, actions: proofActions };
   const matched = proofActions[0].request;
   const row = { networkIdHash: matched.idHash, urlHash: matched.urlHash, method: 'GET',
     pathTemplate: '/nested/api/v1/jobs/{id}/runs/{id}/revisions/{id}/functions', status: 200,
@@ -683,6 +688,13 @@ test('only exact complete Chromium cancellations proven consumed by every invent
   assert.equal(classifyFailedInventoryRequests(cold, incompleteProof).unprovenFailedInventoryRequestCount, 1);
   const duplicateProof = { ...proof, actions: [proofActions[0], proofActions[0], ...proofActions.slice(2)] };
   assert.equal(classifyFailedInventoryRequests(cold, duplicateProof).unprovenFailedInventoryRequestCount, 1);
+  const searchProof = structuredClone(proof);
+  searchProof.actions[0].kind = 'search';
+  searchProof.actions[0].request.serverRequestId = 'a2ef3d56-07af-4dc2-bf5f-1da33521b373';
+  assert.equal(classifyFailedInventoryRequests(cold, searchProof).unprovenFailedInventoryRequestCount, 1);
+  const searchTransport = structuredClone(cold);
+  searchTransport.failedInventoryRequests[0].responseHeaders['x-request-id'] = searchProof.actions[0].request.serverRequestId;
+  assert.equal(classifyFailedInventoryRequests(searchTransport, searchProof).unprovenFailedInventoryRequestCount, 0);
   const overflow = { ...cold, failedInventoryRequestCount: 17, failedInventoryRequestOverflow: 1 };
   assert.equal(classifyFailedInventoryRequests(overflow, proof).failedInventoryRequestEvidenceComplete, false);
   const budget = { ...cold, ...classifyFailedInventoryRequests(cold, proof), firstPageMs: 100, pageDataP95Ms: 100,
@@ -799,6 +811,7 @@ const proofFixture = { jobId: 'a'.repeat(32), runId: 'run_structure_scale', revi
   functionAddress: index => 0x400000 + index * 16, functionId: index => `fn_${(0x400000 + index * 16).toString(16).padStart(16, '0')}` };
 const inventoryUrl = cursor => `${browserOrigin}/nested/api/v1/jobs/${proofFixture.jobId}/runs/run_structure_scale/revisions/revision_structure_scale/functions?limit=100&cursor=${cursor}`;
 const NONCE_A = '11111111-1111-4111-8111-111111111111', NONCE_B = '22222222-2222-4222-8222-222222222222';
+const SEARCH_REQUEST_ID = 'a2ef3d56-07af-4dc2-bf5f-1da33521b373';
 const inventoryBody = (start, overrides = {}) => {
   const oracle = inventoryPageOracle(proofFixture, start);
   const data = { binding: { jobId: proofFixture.jobId, runId: proofFixture.runId, revisionId: proofFixture.revisionId }, state: 'available',
@@ -809,8 +822,18 @@ const inventoryBody = (start, overrides = {}) => {
 };
 
 async function runProofScenario(o = {}) {
-  const start = o.start ?? 100, kind = o.kind ?? 'page';
-  const body = o.body ?? inventoryBody(start, o.bodyOverrides);
+  const kind = o.kind ?? 'page';
+  const isSearch = kind === 'search';
+  const start = o.start ?? (isSearch ? 99999 : 100);
+  const oracle = inventoryPageOracle(proofFixture, start, isSearch ? 1 : 100);
+  const searchBody = isSearch ? JSON.stringify({
+    ...JSON.parse(inventoryBody(start, { data: { matchedFunctions: 1,
+      items: [{ kind: 'function', entityId: oracle.ids[0], address: oracle.first, recorded: true,
+        name: 'synthetic_function_99999', selector: oracle.ids[0], ...o.searchItem }],
+      page: { limit: 100, snapshotVersion: 'd'.repeat(64), nextCursor: null } } })),
+    requestId: o.bodyRequestId ?? SEARCH_REQUEST_ID,
+  }) : null;
+  const body = o.body ?? searchBody ?? inventoryBody(start, o.bodyOverrides);
   const calls = [], commands = new Map();
   const call = (method, params) => {
     calls.push([method, params.requestId]);
@@ -837,7 +860,9 @@ async function runProofScenario(o = {}) {
   } else if (!o.noArm) proof.armResult({ nonce: NONCE_A, baselineMatches: o.staleBaseline === true });
   const activeContext = kind === 'reload' ? 2 : 1;
   const bytes = Buffer.byteLength(body);
-  const url = inventoryUrl(start);
+  const url = isSearch && !o.wrongSearchUrl
+    ? inventoryUrl(start).replace(/\?.+$/, '?search=synthetic_function_99999&limit=100')
+    : inventoryUrl(start);
   const requestIds = o.duplicateRequest ? ['r1', 'r2'] : ['r1'];
   const extraRequests = o.overflowRequests ?? 0;
   for (let i = 0; i < extraRequests; i++) proof.requestWillBeSent({ requestId: `x${i}`, frameId: 'F', loaderId: loader, type: 'Fetch', request: { method: 'GET', url: `${url}&n=${i}` } });
@@ -851,7 +876,8 @@ async function runProofScenario(o = {}) {
       proof.loadingFailed({ requestId, errorText: 'net::ERR_ABORTED', canceled: true }); continue;
     }
     proof.responseReceived({ requestId, type: 'Fetch', response: { url, status: o.status ?? 200, protocol: 'http/1.1',
-      fromDiskCache: o.diskCache === true, fromServiceWorker: o.serviceWorker === true, headers: { 'Content-Length': String(o.contentLength ?? bytes) } } });
+      fromDiskCache: o.diskCache === true, fromServiceWorker: o.serviceWorker === true,
+      headers: { 'Content-Length': String(o.contentLength ?? bytes), ...(isSearch && { 'X-Request-ID': SEARCH_REQUEST_ID }) } } });
     if (o.capture) await o.capture({ proof, requestId, body, bytes, command: commands.get(requestId) });
     else {
       if (o.failBeforeBody) commands.get(requestId)?.reject(new Error('stream refused'));
@@ -864,9 +890,13 @@ async function runProofScenario(o = {}) {
     else if (!o.pending) proof.loadingFinished({ requestId, encodedDataLength: bytes });
   }
   function readyPayload() {
-    const oracle = inventoryPageOracle(proofFixture, o.readyStart ?? start);
-    return { nonce: o.readyNonce ?? docNonce, token: kind === 'reload' ? null : expectation.token, readyAt: o.readyAt ?? 60, count: 100,
-      addresses: o.staleDom ? inventoryPageOracle(proofFixture, start - 100).addresses : oracle.addresses, summary: expectation.summary };
+    const readyOracle = inventoryPageOracle(proofFixture, o.readyStart ?? start, isSearch ? 1 : 100);
+    return { nonce: o.readyNonce ?? docNonce, token: kind === 'reload' ? null : expectation.token,
+      readyAt: o.readyAt ?? 60, count: readyOracle.ids.length,
+      addresses: o.staleDom ? inventoryPageOracle(proofFixture, start - 100, readyOracle.ids.length).addresses : readyOracle.addresses,
+      summary: expectation.summary,
+      ...(isSearch && { result: { id: expectation.search.id, name: expectation.search.name, location: expectation.search.location,
+        href: expectation.search.linkPrefix + 'd'.repeat(64), ...o.searchResult } }) };
   }
   const timingNonce = o.timingNonce ?? docNonce;
   const timings = o.missingTiming ? 0 : o.duplicateTiming ? 2 : 1;
@@ -943,7 +973,34 @@ for (const [name, options, reason] of [
   });
 }
 
-test('a proof cannot be complete with fewer than 52 actions and adds no budget changes', async () => {
+test('search consumption requires the exact streamed server response and rendered pinned row', async () => {
+  const options = { kind: 'search', canceled: true };
+  const action = await proofVerdict(options);
+  assert.deepEqual(action.reasons, []);
+  assert.equal(action.request.serverRequestId, SEARCH_REQUEST_ID);
+  assert.equal(action.request.terminalEvidence, 'canceled-after-consumption');
+  assert.equal(action.ready.result.name, 'synthetic_function_99999');
+  assert.equal(action.request.body.matched, 1);
+  for (const [changes, reason] of [
+    [{ bodyRequestId: 'other' }, 'body-request-id'],
+    [{ wrongSearchUrl: true }, 'search-request-url'],
+    [{ searchItem: { name: 'other' } }, 'body-search-entity'],
+    [{ searchResult: { href: 'old-pin' } }, 'ready-search-entity'],
+    [{ staleBaseline: true }, 'arm-stale-baseline'],
+    [{ duplicateRequest: true }, 'request-count:2'],
+    [{ truncate: true }, 'body-stream-chunk-length'],
+    [{ noReady: true }, 'ready-count:0'],
+  ]) {
+    const invalid = await proofVerdict({ ...options, ...changes });
+    assert.equal(invalid.validatedConsumption, false);
+    assert.ok(invalid.reasons.includes(reason), invalid.reasons.join(','));
+  }
+  const pending = await proofVerdict({ kind: 'search', pending: true });
+  assert.equal(pending.validatedConsumption, false);
+  assert.ok(pending.reasons.includes('terminal-pending'));
+});
+
+test('a proof cannot be complete without all 53 actions and adds no budget changes', async () => {
   const { proof, call } = await runProofScenario();
   await proof.drain(call);
   const summary = proof.summary();
@@ -967,7 +1024,7 @@ test('cold inventory proof can bound exactly one first-page action without weake
   assert.equal(one.beginAction({ label:'first',kind:'first',start:0 }).addresses.length,100);
   assert.equal(one.beginAction({ label:'duplicate',kind:'first',start:0 }),null);
   assert.equal(one.summary().counters.actionOverflow,1);
-  assert.throws(() => proofModule.createInventoryConsumptionProof({ browserOrigin, fixture, call: async () => ({}), expectedActions: 53 }), /action bound/);
+  assert.throws(() => proofModule.createInventoryConsumptionProof({ browserOrigin, fixture, call: async () => ({}), expectedActions: 54 }), /action bound/);
 });
 
 test('archived seq20/seq82 metadata lacking bodies and nonces stays unproven FAIL', () => {
@@ -1454,4 +1511,30 @@ test('invalid UTF-8 cannot become a valid oracle body through replacement decodi
   } });
   assert.equal(action.validatedConsumption, false);
   assert.ok(action.reasons.includes('body-utf8'));
+});
+
+test('record downloads run before the budget verdict and survive its failure', async () => {
+  const order = [];
+  const downloads = { confidence: { nativeDownload: 'completed' } };
+  const budget = Object.assign(new Error('Structure qualification failed'), { failedChecks: ['first page 801 ms > 500 ms'] });
+  await assert.rejects(downloadsThenVerdict(async () => { order.push('downloads'); return downloads; },
+    () => { order.push('verdict'); throw budget; }), (error) => {
+    assert.equal(error, budget);
+    assert.deepEqual(error.failedChecks, ['first page 801 ms > 500 ms']);
+    assert.equal(error.recordDownloads, downloads);
+    return true;
+  });
+  assert.deepEqual(order, ['downloads', 'verdict']);
+});
+
+test('a download failure keeps the budget verdict primary and is reported when the budgets pass', async () => {
+  const budget = new Error('budget failed');
+  const broken = new Error('native download of Download the program model record ended canceled');
+  await assert.rejects(downloadsThenVerdict(async () => { throw broken; }, () => { throw budget; }), (error) => {
+    assert.equal(error, budget);
+    assert.deepEqual(error.recordDownloads, { status: 'failed', error: broken.message });
+    return true;
+  });
+  await assert.rejects(downloadsThenVerdict(async () => { throw broken; }, () => {}), (error) => error === broken);
+  assert.deepEqual(await downloadsThenVerdict(async () => ({ ok: true }), () => {}), { ok: true });
 });

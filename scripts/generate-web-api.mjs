@@ -83,7 +83,10 @@ delete runtimeSchema.$schema; delete runtimeSchema.title;
 // also carries its own semantic checks and is registered with registerContractGroup.
 const lazyExtensionKinds = ['jobDeletionPreview', 'storageSummary', 'maintenancePreview', 'jobOrganizationRequest', 'jobDeletionRequest',
   'supportExport', 'capacity', 'sourceChunk', 'revisionFile', 'revisionDirectory', 'validationHistory'];
-const lazyGroups = { structure: ['functionInventory', 'moduleInventory', 'moduleDetail', 'entityDetail'] };
+const lazyGroups = {
+  structure: ['functionInventory', 'moduleInventory', 'moduleDetail', 'entityDetail', 'structureNeighborhood',
+    'structureScorecard', 'scorecardComparison'],
+};
 const kindOf = (variant) => variant.properties?.kind?.const;
 const lazyKinds = new Set([...lazyExtensionKinds, ...Object.values(lazyGroups).flat()]);
 if (lazyKinds.size !== lazyExtensionKinds.length + Object.values(lazyGroups).flat().length) throw Error('A lazy contract kind is listed twice');

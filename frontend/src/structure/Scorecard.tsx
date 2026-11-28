@@ -1,0 +1,466 @@
+import { useEffect, useRef, useState } from 'preact/hooks';
+import type { MutableRef } from 'preact/hooks';
+import { useLocation } from 'preact-iso/router';
+import type { Acceptance, Run, ScorecardComparison, ScorecardMetric, ScorecardReconciliation, StructureScorecard } from '../api/generated';
+import { ApiClientError } from '../api/errors';
+import { scorecardCopy as copy } from '../copy/scorecard';
+import { structureCopy } from '../copy/structure';
+import { message, textMessage } from '../shared/messages';
+import { apiPath } from '../app/paths';
+import type { SourceSelection } from '../app/paths';
+import { usePrivateTransport } from '../session/PrivateTransport';
+import { sourceDownloadName } from '../sources/navigation';
+import { structureItemPath, structureListPath } from './paths';
+import { bindStructure, revisionReadRoute, structureReadMessage, structureRecordRoute } from './navigation';
+import { Frame, useStructureRead } from './Frame';
+
+import { SCORECARD_PAGE_LIMIT, admitScorecardPage, scorecardLocation, scorecardSearch } from './scorecardQuery';
+import type { ScorecardQuery } from './scorecardQuery';
+
+const RUN_PAGE_LIMIT = 50;
+
+/**
+ * A heading-focus request belongs to the one read a sort or page move starts, to the results that own it, and to the
+ * control that asked. One request is pending at a time: any later move, Refresh or history navigation replaces it.
+ */
+type FocusRequest = { owner: 'scorecard' | 'comparison'; key: string; origin: string };
+type PendingFocus = FocusRequest & { from: Element | null; arrived: boolean };
+
+/** Moves focus to the owner's results once its requested read settles, unless the person moved focus meanwhile. */
+function useRequestedFocus(pending: MutableRef<PendingFocus | null>, owner: FocusRequest['owner'], key: string,
+  read: { state: string }, target: () => HTMLElement | null) {
+  useEffect(() => {
+    const request = pending.current;
+    if (!request || request.owner !== owner) return;
+    // Renders before the location changes still show the originating read; wait for the requested one.
+    if (key === request.origin && !request.arrived) return;
+    // Leaving the requested read abandons the request, including a return to its origin and a later return to it.
+    if (key !== request.key) { pending.current = null; return; }
+    request.arrived = true;
+    if (read.state === 'loading') return;
+    pending.current = null;
+    // Focus moved deliberately elsewhere while the read was pending stays where the person put it.
+    const active = document.activeElement;
+    if (active === request.from || active === null || active === document.body || !active.isConnected) target()?.focus();
+  }, [read]);
+}
+
+type Measure = Pick<ScorecardMetric, 'state' | 'reason' | 'value' | 'numerator' | 'denominator'>;
+
+/** State and reason in words; a recorded value is shown verbatim and never re-rounded or recolored into a pass. */
+function stateText(measure: Measure): string {
+  if (measure.state === 'measured') return copy.states.measured;
+  const reason = measure.reason ? copy.reasons[measure.reason] ?? measure.reason : copy.notRecorded;
+  return textMessage(copy.stateText, { state: copy.states[measure.state], reason });
+}
+
+function fraction(measure: Measure): string {
+  return measure.numerator !== null && measure.denominator !== null
+    ? textMessage(copy.of, { numerator: measure.numerator, denominator: measure.denominator }) : copy.notRecorded;
+}
+
+function StateCell({ measure }: { measure: Measure }) {
+  return <td><span class={`score-state is-${measure.state}`}>{stateText(measure)}</span></td>;
+}
+
+function Metrics({ metrics }: { metrics: readonly ScorecardMetric[] }) {
+  return <div class="structure-table"><table>
+    <caption>{copy.measuresTitle}</caption>
+    <thead><tr>{Object.values(copy.columns).map(label => <th scope="col" key={label}>{label}</th>)}</tr></thead>
+    <tbody>{metrics.map(metric => <tr key={metric.id}>
+      <th scope="row">{copy.metrics[metric.id]}</th>
+      <td>{copy.units[metric.unit]}</td>
+      <StateCell measure={metric} />
+      <td>{metric.value === null ? copy.notRecorded : <code>{metric.value}</code>}</td>
+      <td>{fraction(metric)}</td>
+      <td>{metric.recomputed === null ? '—' : <code>{metric.recomputed}</code>}</td>
+      <td>{textMessage(copy.field, { record: copy.records[metric.source.record], field: metric.source.field })}</td>
+    </tr>)}</tbody>
+  </table></div>;
+}
+
+function Reconciliation({ value }: { value: ScorecardReconciliation | null }) {
+  if (value === null) return <p>{copy.noReconciliation}</p>;
+  const row = (label: string, numerator: string, denominator: string) => <tr key={label}>
+    <th scope="row">{label}</th><td><code>{numerator}</code></td><td><code>{denominator}</code></td></tr>;
+  return <>
+    <div class="structure-table"><table>
+      <caption>{copy.reconciliationTitle}</caption>
+      <thead><tr>{Object.values(copy.reconciliationColumns).map(label => <th scope="col" key={label}>{label}</th>)}</tr></thead>
+      <tbody>
+        {row(copy.reconciliationRows.project, value.projectNumerator, value.projectDenominator)}
+        {row(copy.reconciliationRows.modules, value.moduleNumeratorSum, value.moduleDenominatorSum)}
+        {row(copy.reconciliationRows.excluded, value.excludedNumerator, value.excludedEntities)}
+        {row(copy.reconciliationRows.shared, value.duplicateNumerator, value.duplicateMemberships)}
+        {row(copy.reconciliationRows.unrecorded, '—', String(value.unrecordedPlanReferences))}
+        {row(copy.reconciliationRows.unplanned, '—', String(value.unplannedScoreRows))}
+      </tbody>
+    </table></div>
+    <p>{value.reconciles ? copy.reconciles : copy.doesNotReconcile}</p>
+    <p>{copy.nonAdditive}</p>
+  </>;
+}
+
+/** Bars are supplementary: every value, state and reason is in the table that follows, and in each bar's text. */
+type ModuleScores = NonNullable<StructureScorecard['scorecard']>['modules']['items'];
+
+function Chart({ items }: { items: ModuleScores }) {
+  if (items.length === 0) return null;
+  const row = 28, labelWidth = 200, barWidth = 320, width = labelWidth + barWidth + 120;
+  return <figure class="score-chart">
+    <figcaption>{copy.chartTitle}</figcaption>
+    <svg role="img" aria-label={copy.chartLabel} viewBox={`0 0 ${width} ${items.length * row + 8}`} width={width} height={items.length * row + 8}>
+      {items.map((item, position) => {
+        const measured = item.metric.state === 'measured' && item.metric.value !== null;
+        const ratio = measured ? Math.min(1, Math.max(0, Number(item.metric.value))) : 0;
+        const y = position * row + 4;
+        return <g key={item.moduleId}>
+          <text x="0" y={y + 17} class="score-chart-label">{item.moduleId.length > 26 ? `${item.moduleId.slice(0, 25)}…` : item.moduleId}</text>
+          <rect x={labelWidth} y={y + 4} width={barWidth} height={row - 10} class="score-chart-track" />
+          {measured && <rect x={labelWidth} y={y + 4} width={barWidth * ratio} height={row - 10} class="score-chart-bar" />}
+          <text x={labelWidth + barWidth + 8} y={y + 17} class="score-chart-value">{measured ? item.metric.value : copy.states[item.metric.state]}</text>
+        </g>;
+      })}
+    </svg>
+  </figure>;
+}
+
+/** Exact equality of recorded JSON values: the same keys, in any order, with the same values, and arrays in order. */
+function same(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null || Array.isArray(a) !== Array.isArray(b)) return false;
+  const left = Object.entries(a), right = b as Record<string, unknown>;
+  return left.length === Object.keys(right).length && left.every(([key, value]) => Object.hasOwn(right, key) && same(value, right[key]));
+}
+
+const measureOf = ({ state, reason, value, numerator, denominator }: Measure): Measure => ({ state, reason, value, numerator, denominator });
+
+/**
+ * A comparison's current side is the scorecard shown beside it: the same records and digests, scope and reconciliation,
+ * every paired measure as recorded there, and the recorded score of each module that this scorecard page also lists.
+ * A scorecard page that lists every module it counts (no module when its plan is unavailable) also lists every module
+ * the comparison measures on the current side.
+ */
+export function describesScorecard(comparison: ScorecardComparison, scorecard: StructureScorecard): boolean {
+  const current = comparison.current, card = scorecard.scorecard;
+  if (current.structureVersion !== scorecard.structureVersion || current.sourceSha256 !== scorecard.sourceSha256
+    || current.manifestSha256 !== scorecard.manifestSha256 || !same(current.model, scorecard.model)
+    || !same(current.plan, scorecard.plan) || !same(current.confidence, scorecard.confidence)) return false;
+  if (card === null) return current.scope === null && comparison.metrics.length === 0;
+  if (!same(current.scope, card.scope) || !same(current.reconciliation, card.reconciliation)) return false;
+  const { kind, schemaVersion, calibrationStatus } = card.interpretation;
+  const checks = comparison.compatibility.checks;
+  if (checks.find(check => check.id === 'score-interpretation')?.current !== `${kind}/v${schemaVersion}/${calibrationStatus}`
+    || checks.find(check => check.id === 'score-formula')?.current !== card.formula.id) return false;
+  // The producer pairs every current measure unless a side is unavailable, and then pairs none.
+  if (comparison.compatibility.state === 'unavailable') { if (comparison.metrics.length !== 0) return false; }
+  else if (comparison.metrics.length !== card.metrics.length || !comparison.metrics.every((metric, position) => {
+    const recorded = card.metrics[position]!;
+    return metric.id === recorded.id && metric.unit === recorded.unit && same(metric.current, measureOf(recorded));
+  })) return false;
+  if (comparison.compatibility.state !== 'unavailable' && card.modules.total !== null && comparison.modules.total < card.modules.total) return false;
+  const shown = new Map(card.modules.items.map(item => [item.moduleId, item.metric]));
+  const complete = card.modules.items.length === (card.modules.total ?? 0);
+  return comparison.modules.items.every(item => {
+    const recorded = shown.get(item.moduleId);
+    return recorded === undefined ? !complete || item.current === null : item.current !== null && same(item.current, measureOf(recorded));
+  });
+}
+
+function Comparison({ selected, basePath, query, scorecard, focus, onRoute }: {
+  selected: SourceSelection; basePath: string; query: ScorecardQuery; scorecard: StructureScorecard; focus: MutableRef<PendingFocus | null>;
+  onRoute: (query: ScorecardQuery, focus?: FocusRequest) => void;
+}) {
+  const { client } = usePrivateTransport(basePath);
+  const version = scorecard.structureVersion;
+  // Attempts are listed newest first, one bounded page at a time; older pages load on request, so an older
+  // baseline stays selectable and "no baselines" is said only once every page has been listed.
+  const [runs, setRuns] = useState<{ items: Run[]; nextCursor: string | null } | 'failed' | null>(null);
+  const [cursor, setCursor] = useState<string | undefined>(undefined);
+  const baselineChoice = query.baseline ? `${query.baseline.runId}/${query.baseline.revisionId}` : '';
+  const [choice, setChoice] = useState(baselineChoice);
+  // Back/Forward changes the submitted baseline without remounting this view. Keep draft selections
+  // until that URL value changes, rather than resetting them on unrelated renders or page reads.
+  useEffect(() => { setChoice(baselineChoice); }, [baselineChoice]);
+  useEffect(() => {
+    const controller = new AbortController();
+    const values = new URLSearchParams({ limit: String(RUN_PAGE_LIMIT) });
+    if (cursor) values.set('cursor', cursor);
+    void client.get('runs', `/jobs/${selected.jobId}/runs?${values}`, { signal: controller.signal })
+      .then(response => {
+        if (controller.signal.aborted) return;
+        if (response.data.jobId !== selected.jobId || response.data.items.some(run => run.jobId !== selected.jobId)) throw new ApiClientError('invalid_response');
+        setRuns(previous => ({ items: [...(cursor && previous && previous !== 'failed' ? previous.items : []), ...response.data.items],
+          nextCursor: response.data.page.nextCursor }));
+      })
+      .catch(() => { if (!controller.signal.aborted) setRuns('failed'); });
+    return () => controller.abort();
+  }, [selected.jobId, cursor]);
+  const readKey = (value: ScorecardQuery) => value.baseline ? [selected.jobId, selected.runId, selected.revisionId,
+    value.baseline.runId, value.baseline.revisionId, value.compareCursor ?? '', version].join('/') : '';
+  const key = readKey(query);
+  const [read] = useStructureRead<ScorecardComparison | null>(key, async signal => {
+    if (!query.baseline) return null;
+    const values = new URLSearchParams({ baselineRunId: query.baseline.runId, baselineRevisionId: query.baseline.revisionId,
+      limit: String(SCORECARD_PAGE_LIMIT) });
+    if (query.compareCursor) values.set('cursor', query.compareCursor);
+    values.set('structureVersion', version);
+    const data = (await client.get('scorecardComparison', `${revisionReadRoute(selected)}/scorecard-comparison?${values}`, { signal })).data;
+    const binding = data.binding, current = data.current.binding, base = data.baseline.binding;
+    if (binding.jobId !== selected.jobId || binding.runId !== selected.runId || binding.revisionId !== selected.revisionId
+      || current.jobId !== selected.jobId || current.runId !== selected.runId || current.revisionId !== selected.revisionId
+      || base.jobId !== selected.jobId || base.runId !== query.baseline.runId || base.revisionId !== query.baseline.revisionId) {
+      throw new ApiClientError('invalid_response');
+    }
+    if (data.structureVersion !== version || data.current.structureVersion !== version) {
+      throw new ApiClientError('http_error', { serverCode: 'STRUCTURE_CHANGED' });
+    }
+    admitScorecardPage(data.modules.page, data.modules.items.length, data.modules.total, query.compareCursor);
+    return data;
+  });
+  const candidates = runs && runs !== 'failed' ? runs.items.filter((run: Run, position, all) => run.resultRevisionId !== null
+    && !(run.runId === selected.runId && run.resultRevisionId === selected.revisionId)
+    && all.findIndex(other => other.runId === run.runId) === position) : [];
+  // A bookmark can name a revision beyond the loaded attempt pages (or an older revision of a listed run).
+  // Keep that exact submitted identity until an equivalent candidate arrives; never substitute a newer result.
+  const unlistedBaseline = query.baseline && !candidates.some(run => run.runId === query.baseline!.runId
+    && run.resultRevisionId === query.baseline!.revisionId) ? query.baseline : null;
+  // This admission check uses the comparison and scorecard returned by their respective reads.
+  const reply = read.state === 'ready' ? read.value : null;
+  const contradicts = reply !== null && !describesScorecard(reply, scorecard);
+  const data = contradicts ? null : reply;
+  // The pager unmounts while its page is read. Focus returns to that page's module heading, or to the comparison
+  // heading when the page fails or lists no modules.
+  const heading = useRef<HTMLHeadingElement>(null);
+  const modulesHeading = useRef<HTMLHeadingElement>(null);
+  useRequestedFocus(focus, 'comparison', key, read, () => (data ? modulesHeading.current : null) ?? heading.current);
+  const page = (next: ScorecardQuery) => onRoute(next, { owner: 'comparison', key: readKey(next), origin: key });
+  const offset = query.compareCursor ? Number(query.compareCursor.split('_')[1]) : 0;
+  const side = (value: Measure | null) => value === null ? copy.notRecorded
+    : value.state === 'measured' ? (value.value ?? fraction(value)) : stateText(value);
+  const delta = (value: ScorecardComparison['metrics'][number]['delta'], unit: 'ratio' | 'count') => value.state !== 'computed'
+    ? textMessage(copy.stateText, { state: copy.deltaStates[value.state], reason: value.reason ?? copy.notRecorded })
+    : unit === 'ratio' ? textMessage(copy.deltaValue, { value: value.value ?? '—', numerator: value.numerator ?? '—', denominator: value.denominator ?? '—' })
+      : textMessage(copy.deltaCount, { numerator: value.numerator ?? '—', denominator: value.denominator ?? '—' });
+  return <section aria-labelledby="scorecard-compare-title">
+    <h2 id="scorecard-compare-title" ref={heading} tabIndex={-1}>{copy.compareTitle}</h2>
+    <p>{copy.compareHint}</p>
+    {runs === 'failed' && <p role="alert">{copy.baselinesUnavailable}</p>}
+    {runs !== null && runs !== 'failed' && runs.nextCursor !== null && <p>
+      {textMessage(copy.olderAttempts, { count: runs.items.length })}{' '}
+      <button type="button" onClick={() => setCursor(runs.nextCursor ?? undefined)}>{copy.showOlderAttempts}</button></p>}
+    {runs !== null && runs !== 'failed' && (candidates.length === 0 && !query.baseline ? runs.nextCursor === null && <p>{copy.noBaselines}</p>
+      : <form class="job-filters" aria-label={copy.compareTitle} onSubmit={event => {
+        event.preventDefault();
+        const [runId, revisionId] = choice.split('/');
+        if (!runId || !revisionId) return;
+        const next: ScorecardQuery = { ...query, baseline: { runId, revisionId } };
+        delete next.compareCursor;
+        onRoute(next);
+      }}>
+        <label>{copy.baseline}<select name="baseline" value={choice} required onChange={event => setChoice(event.currentTarget.value)}>
+          <option value="">{copy.chooseBaseline}</option>
+          {unlistedBaseline && <option value={baselineChoice}>
+            {textMessage(copy.baselineOption, { run: unlistedBaseline.runId, revision: unlistedBaseline.revisionId })}</option>}
+          {candidates.map(run => <option key={run.runId} value={`${run.runId}/${run.resultRevisionId}`}>
+            {textMessage(copy.baselineOption, { run: run.runId, revision: run.resultRevisionId ?? '' })}</option>)}
+        </select></label>
+        <div class="job-actions"><button type="submit">{copy.compare}</button>
+          {query.baseline && <button type="button" onClick={() => { setChoice(''); const next = { ...query }; delete next.baseline; delete next.compareCursor; onRoute(next); }}>
+            {copy.clearComparison}</button>}</div>
+      </form>)}
+    {read.state === 'loading' && query.baseline && <p role="status">{structureCopy.loading}</p>}
+    {read.state === 'failed' && <p role="alert">{structureReadMessage(read.failure)}</p>}
+    {contradicts && <p role="alert">{structureReadMessage(new ApiClientError('invalid_response'))}</p>}
+    {data && <>
+      <p>{message(structureCopy.labeledValue, { label: copy.baseline, value: <bdi>{textMessage(copy.baselineOption, { run: data.baseline.binding.runId, revision: data.baseline.binding.revisionId })}</bdi> })}</p>
+      <p role="status"><strong>{copy.compatibility[data.compatibility.state]}</strong></p>
+      <div class="structure-table"><table>
+        <caption>{copy.checksTitle}</caption>
+        <thead><tr>{Object.values(copy.checkColumns).map(label => <th scope="col" key={label}>{label}</th>)}</tr></thead>
+        <tbody>{data.compatibility.checks.map(check => <tr key={check.id}>
+          <th scope="row">{copy.checks[check.id]}</th>
+          <td><span class={`score-state is-${check.state === 'match' ? 'measured' : check.blocking ? 'failed' : 'partial'}`}>{copy.checkStates[check.state]}</span></td>
+          <td>{check.blocking ? copy.yes : copy.no}</td>
+          <td>{check.current === null ? copy.notRecorded : <code>{check.current}</code>}</td>
+          <td>{check.baseline === null ? copy.notRecorded : <code>{check.baseline}</code>}</td>
+        </tr>)}</tbody>
+      </table></div>
+      {(['current', 'baseline'] as const).map(name => <p key={name}>{textMessage(copy.sideReconciliation, { side: copy.sides[name],
+        result: data[name].reconciliation === null ? copy.noBreakdown : data[name].reconciliation.reconciles ? copy.reconciled : copy.notReconciled })}</p>)}
+      {data.metrics.length > 0 && <div class="structure-table"><table>
+        <caption>{copy.measuresTitle}</caption>
+        <thead><tr>{Object.values(copy.comparisonColumns).map(label => <th scope="col" key={label}>{label}</th>)}</tr></thead>
+        <tbody>{data.metrics.map(metric => <tr key={metric.id}>
+          <th scope="row">{copy.metrics[metric.id]}</th>
+          <td>{copy.units[metric.unit]}</td><td>{side(metric.current)}</td><td>{side(metric.baseline)}</td><td>{delta(metric.delta, metric.unit)}</td>
+        </tr>)}</tbody>
+      </table></div>}
+      {data.modules.total > 0 && <>
+        <h3 ref={modulesHeading} tabIndex={-1}>{copy.moduleComparisonTitle}</h3>
+        <p role="status">{textMessage(copy.comparisonRange, { first: offset + 1, last: offset + data.modules.items.length, total: data.modules.total })}</p>
+        <div class="structure-table"><table>
+          <caption>{copy.moduleComparisonTitle}</caption>
+          <thead><tr>{Object.values(copy.moduleComparisonColumns).map(label => <th scope="col" key={label}>{label}</th>)}</tr></thead>
+          <tbody>{data.modules.items.map(item => <tr key={item.moduleId}>
+            <th scope="row">{item.selector ? <a href={structureItemPath(basePath, selected, 'modules', item.selector, version)}><bdi>{item.moduleId}</bdi></a>
+              : <bdi>{item.moduleId}</bdi>}</th>
+            <td>{copy.presence[item.presence]}</td><td>{side(item.current)}</td><td>{side(item.baseline)}</td><td>{delta(item.delta, 'ratio')}</td>
+          </tr>)}</tbody>
+        </table></div>
+        <nav class="job-actions" aria-label={copy.moduleComparisonTitle}>
+          <button type="button" disabled={!query.compareCursor} onClick={() => { const next = { ...query }; delete next.compareCursor; page(next); }}>{copy.first}</button>
+          <button type="button" disabled={!data.modules.page.nextCursor} onClick={() => {
+            if (data.modules.page.nextCursor) page({ ...query, compareCursor: data.modules.page.nextCursor });
+          }}>{copy.next}</button>
+        </nav>
+      </>}
+    </>}
+  </section>;
+}
+
+/** The recorded scorecard of one revision and an optional comparison with another attempt of the same job. */
+export default function Scorecard({ selected, basePath, search }: { selected: SourceSelection; basePath: string; search: string }) {
+  const location = useLocation();
+  const { client } = usePrivateTransport(basePath);
+  const query = scorecardLocation(search);
+  const results = useRef<HTMLHeadingElement>(null);
+  const refreshButton = useRef<HTMLButtonElement>(null);
+  const readKey = (value: ScorecardQuery) => [selected.jobId, selected.runId, selected.revisionId, value.sort, value.order,
+    value.cursor ?? '', value.version ?? ''].join('/');
+  const key = readKey(query);
+  // A move that leaves the read unchanged starts no read, so it records nothing for a later Refresh to consume.
+  const moveFocus = useRef<PendingFocus | null>(null);
+  // Back and Forward never ask for focus, so they abandon a pending request even when they reach its read.
+  useEffect(() => {
+    const abandon = () => { moveFocus.current = null; };
+    addEventListener('popstate', abandon);
+    return () => removeEventListener('popstate', abandon);
+  }, []);
+  const [read, refresh] = useStructureRead<StructureScorecard>(key, async signal => {
+    const values = new URLSearchParams({ limit: String(SCORECARD_PAGE_LIMIT) });
+    if (query.sort !== 'module') values.set('sort', query.sort);
+    if (query.order !== 'asc') values.set('order', query.order);
+    if (query.cursor) values.set('cursor', query.cursor);
+    if (query.version) values.set('structureVersion', query.version);
+    const data = bindStructure((await client.get('structureScorecard', `${revisionReadRoute(selected)}/scorecard?${values}`, { signal })).data,
+      selected, query.version);
+    if (data.query.sort !== query.sort || data.query.order !== query.order) throw new ApiClientError('invalid_response');
+    if (data.scorecard) admitScorecardPage(data.scorecard.modules.page, data.scorecard.modules.items.length, data.scorecard.modules.total, query.cursor);
+    return data;
+  });
+  const attemptPath = `/jobs/${selected.jobId}/runs/${selected.runId}`;
+  const [attempt, refreshAttempt] = useStructureRead<Acceptance>(attemptPath, async signal => {
+    const { data } = await client.get('run', attemptPath, { signal });
+    if (data.jobId !== selected.jobId || data.runId !== selected.runId) throw new ApiClientError('invalid_response');
+    return data.acceptance;
+  });
+  const acceptance = attempt.state === 'ready' ? attempt.value : null;
+  // A failed or expired page has no module heading; Refresh, which returns to current first pages, keeps the keyboard.
+  useRequestedFocus(moveFocus, 'scorecard', key, read, () => results.current ?? refreshButton.current);
+  // Every route replaces the pending request, so a later move by another owner, or one without focus, abandons it.
+  const route = (next: ScorecardQuery, focus?: FocusRequest) => {
+    moveFocus.current = focus && focus.key !== focus.origin ? { ...focus, from: document.activeElement, arrived: false } : null;
+    location.route(structureListPath(basePath, selected, 'scorecard', scorecardSearch(next)));
+  };
+  const move = (next: ScorecardQuery) => route(next, { owner: 'scorecard', key: readKey(next), origin: key });
+  const data = read.state === 'ready' ? read.value : null;
+  const card = data?.scorecard ?? null;
+  const offset = query.cursor ? Number(query.cursor.split('_')[1]) : 0;
+  const [sort, setSort] = useState(query.sort);
+  const [order, setOrder] = useState(query.order);
+  useEffect(() => {
+    setSort(query.sort);
+    setOrder(query.order);
+  }, [query.sort, query.order]);
+  // Inventory links stay outside the read gate; refresh reads current first pages for the card and comparison.
+  return <Frame selected={selected} data={data} read={read} pinned={query.version !== undefined} boundary={copy.boundary} refreshRef={refreshButton}
+    onRefresh={() => {
+      moveFocus.current = null;
+      refreshAttempt();
+      if (!query.version && !query.cursor && !query.compareCursor) { refresh(); return; }
+      const next = { ...query }; delete next.version; delete next.cursor; delete next.compareCursor; route(next);
+      // Clearing only compareCursor does not change the scorecard's read key, but it must also be reread.
+      refresh();
+    }}
+    navigation={<p><a href={structureListPath(basePath, selected, 'functions')}>{structureCopy.browseFunctions}</a>{' '}
+      <a href={structureListPath(basePath, selected, 'modules')}>{structureCopy.browseModules}</a></p>}>
+    {data && <>
+      <h2>{copy.record}</h2>
+      <p role={data.confidence.state === 'available' ? undefined : 'alert'}>{copy.recordStates[data.confidence.state]}
+        {data.confidence.stateReason && <> {message(structureCopy.reason, { code: <code>{data.confidence.stateReason}</code> })}</>}</p>
+      {data.confidence.path && data.confidence.sha256 && <p>
+        {message(structureCopy.recordDigest, { path: <bdi>{data.confidence.path}</bdi>, sha256: <code>{data.confidence.sha256}</code>,
+          schema: data.confidence.schemaVersion ?? structureCopy.notRecorded })}{' '}
+        <a href={apiPath(basePath, structureRecordRoute(selected, 'confidence', data.structureVersion))}
+          download={sourceDownloadName(data.confidence.path)}>{copy.download}</a></p>}
+      <dl class="job-facts">
+        <dt>{copy.acceptance}</dt><dd>{acceptance ? copy.acceptanceStates[acceptance] : copy.acceptanceUnavailable}</dd>
+      </dl>
+      {card && <>
+        <p>{message(copy.thresholds, { code: <code>{card.thresholds.reason}</code> })}</p>
+        <Metrics metrics={card.metrics} />
+        <details>
+          <summary>{copy.definitionTitle}</summary>
+          <dl class="job-facts">
+            <dt>{copy.interpretation}</dt><dd>{textMessage(copy.interpretationValue, { kind: card.interpretation.kind,
+              version: card.interpretation.schemaVersion, calibration: card.interpretation.calibrationStatus })}</dd>
+            <dt>{copy.formula}</dt><dd>{textMessage(copy.formulaValue, { id: card.formula.id })}</dd>
+            <dt>{copy.weights}</dt><dd>{card.formula.weights.map(item => `${item.label} ${item.weight}`).join(', ')}</dd>
+            <dt>{copy.basis}</dt><dd>{card.interpretation.basis.text}</dd>
+            <dt>{copy.meaning}</dt><dd>{card.interpretation.scoreMeaning.text}</dd>
+            <dt>{copy.scope}</dt><dd>{textMessage(copy.scopeValue, { entities: card.scope.entities, functions: card.scope.functions,
+              globals: card.scope.globals, types: card.scope.types })}</dd>
+            <dt>{copy.modulesInScope}</dt><dd>{card.scope.modules ?? structureCopy.notRecorded}</dd>
+            <dt>{copy.input}</dt><dd><code>{card.scope.inputSha256}</code></dd>
+            <dt>{copy.model}</dt><dd><code>{card.scope.modelSha256}</code> {textMessage(copy.modelSchema, { version: card.scope.modelSchemaVersion })}</dd>
+          </dl>
+        </details>
+        <div class="structure-table"><table>
+          <caption>{copy.labelsTitle}</caption>
+          <thead><tr>{Object.values(copy.labelColumns).map(label => <th scope="col" key={label}>{label}</th>)}</tr></thead>
+          <tbody>{card.labels.map(label => <tr key={label.label}>
+            <th scope="row">{structureCopy.extraction[label.label]}</th><td>{label.functions}</td><td>{label.globals}</td><td>{label.types}</td>
+            <td>{label.entities}</td><td><code>{label.weight}</code></td><td><code>{label.contribution}</code></td>
+          </tr>)}</tbody>
+        </table></div>
+        <Reconciliation value={card.reconciliation} />
+        <h2 ref={results} tabIndex={-1}>{copy.modulesTitle}</h2>
+        <form class="job-filters" aria-label={copy.applySort} onSubmit={event => {
+          event.preventDefault(); const next = { ...query, sort, order }; delete next.cursor; move(next);
+        }}>
+          <label>{copy.sort}<select name="sort" value={sort} onChange={event => setSort(event.currentTarget.value as ScorecardQuery['sort'])}>
+            {(['module', 'score'] as const).map(value => <option key={value} value={value}>{copy.sorts[value]}</option>)}</select></label>
+          <label>{copy.order}<select name="order" value={order} onChange={event => setOrder(event.currentTarget.value as ScorecardQuery['order'])}>
+            {(['asc', 'desc'] as const).map(value => <option key={value} value={value}>{copy.orders[value]}</option>)}</select></label>
+          <div class="job-actions"><button type="submit">{copy.applySort}</button></div>
+        </form>
+        {card.modules.total !== null && card.modules.total > 0 && <>
+          <p role="status">{textMessage(copy.moduleRange, { first: offset + 1, last: offset + card.modules.items.length, total: card.modules.total })}</p>
+          <Chart items={card.modules.items} />
+          <div class="structure-table"><table>
+            <caption>{copy.modulesTitle}</caption>
+            <thead><tr>{Object.values(copy.moduleColumns).map(label => <th scope="col" key={label}>{label}</th>)}</tr></thead>
+            <tbody>{card.modules.items.map(item => <tr key={item.moduleId}>
+              <th scope="row">{item.selector ? <a href={structureItemPath(basePath, selected, 'modules', item.selector, data.structureVersion)}><bdi>{item.moduleId}</bdi></a>
+                : <bdi>{item.moduleId}</bdi>}</th>
+              <td>{structureCopy.declarations[item.implementationDeclaration]}</td>
+              <StateCell measure={item.metric} />
+              <td>{item.metric.value === null ? copy.notRecorded : <code>{item.metric.value}</code>}</td>
+              <td>{fraction(item.metric)}</td>
+              <td>{item.metric.recomputed === null ? '—' : <code>{item.metric.recomputed}</code>}</td>
+            </tr>)}</tbody>
+          </table></div>
+          <nav class="job-actions" aria-label={copy.pages}>
+            <button type="button" disabled={read.state === 'loading' || !query.cursor} onClick={() => { const next = { ...query }; delete next.cursor; move(next); }}>{copy.first}</button>
+            <button type="button" disabled={read.state === 'loading' || !card.modules.page.nextCursor} onClick={() => {
+              if (card.modules.page.nextCursor) move({ ...query, cursor: card.modules.page.nextCursor });
+            }}>{copy.next}</button>
+          </nav>
+        </>}
+      </>}
+      <Comparison selected={selected} basePath={basePath} query={query} scorecard={data} focus={moveFocus}
+        onRoute={route} />
+    </>}
+  </Frame>;
+}

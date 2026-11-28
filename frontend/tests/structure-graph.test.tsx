@@ -1,0 +1,399 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
+import { beforeEach, expect, it, vi } from 'vitest';
+import type * as ClientModule from '../src/api/client';
+import type { Bootstrap, RevisionFile, StructureNeighborhood } from '../src/api/generated';
+import { graphCopy as copy } from '../src/copy/graph';
+import { structureCopy } from '../src/copy/structure';
+import { sourceCopy } from '../src/copy/sources';
+import { App } from '../src/app/App';
+import { createBrowserSession } from '../src/session/session';
+import { ApiClientError } from '../src/api/errors';
+import { graphLocation, graphPath } from '../src/graph/query';
+import { layoutGraph } from '../src/graph/layout';
+import type { LayoutWorker } from '../src/graph/layoutOperation';
+import '../src/structure/contract';
+import { decodeResponse } from '../src/api/decode';
+
+const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
+vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
+// The drawing runs in a worker; tests drive one controllable fake worker per layout.
+const workers = vi.hoisted(() => ({ list: [] as (LayoutWorker & { posted: unknown[]; terminated: boolean })[], answer: true }));
+vi.mock('../src/graph/layoutRuntime', () => ({ graphLayoutRuntime: {
+  createWorker: () => {
+    const worker = { onmessage: null as ((event: { data: unknown }) => void) | null, onerror: null, onmessageerror: null,
+      posted: [] as unknown[], terminated: false,
+      postMessage(message: unknown) {
+        this.posted.push(message);
+        const request = message as { nodes: { index: number; depth: number }[]; edges: { source: number; target: number }[] };
+        if (workers.answer) queueMicrotask(() => this.onmessage?.({ data: { type: 'graph-layout', ...layoutGraph(request.nodes, request.edges) } }));
+      },
+      terminate() { this.terminated = true; } };
+    workers.list.push(worker); return worker;
+  },
+  schedule: (callback: () => void, milliseconds: number) => window.setTimeout(callback, milliseconds),
+  clear: (handle: number) => window.clearTimeout(handle),
+} }));
+
+const fixture = <T,>(name: string) => (JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as { data: T }).data;
+const bootstrap = fixture<Bootstrap>('bootstrap');
+const calls = fixture<StructureNeighborhood>('structure-neighborhood-calls');
+const selected = calls.binding;
+const revision = `/nested/jobs/${selected.jobId}/runs/${selected.runId}/revisions/${selected.revisionId}`;
+const api = `/jobs/${selected.jobId}/runs/${selected.runId}/revisions/${selected.revisionId}`;
+beforeEach(() => { transport.get.mockReset(); workers.list.length = 0; workers.answer = true; });
+
+async function session() {
+  const value = createBrowserSession({
+    bootstrap: () => Promise.resolve({ ...bootstrap, basePath: '/nested/', sessionExpiresAt: new Date(Date.now() + 60000).toISOString() }),
+    exchange: vi.fn(), logout: () => Promise.resolve(),
+  }, '/nested');
+  await value.initialize({ kind: 'absent' });
+  return value;
+}
+
+it('reads one bounded neighborhood with explicit limits and lists every node and relationship in tables', async () => {
+  const auth = await session();
+  transport.get.mockResolvedValue({ data: calls });
+  history.replaceState(null, '', `${revision}/graph?view=calls&focus=fn_0000000000401000&depth=2`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const nodes = await screen.findByRole('table', { name: copy.nodesTitle });
+    expect(transport.get).toHaveBeenCalledWith('structureNeighborhood',
+      `${api}/graph?view=calls&focus=fn_0000000000401000&direction=both&depth=2&nodeLimit=60&edgeLimit=150&unresolved=show`, expect.anything());
+    expect(within(nodes).getAllByRole('row')).toHaveLength(calls.neighborhood!.nodes.length + 1);
+    const edges = screen.getByRole('table', { name: copy.edgesTitle });
+    expect(within(edges).getAllByRole('row')).toHaveLength(calls.neighborhood!.edges.length + 1);
+    expect(within(edges).getByText(copy.resolutions['no-record'])).toBeTruthy();
+    expect(screen.getByText(copy.complete)).toBeTruthy();
+    // Families the model does not record are stated, never implied.
+    expect(screen.getByText(`${copy.families['call-kind']}: ${copy.familyStates['not-recorded']}`, { exact: false })).toBeTruthy();
+    // The drawing is supplementary: an image with a text alternative pointing at the tables.
+    const drawing = await screen.findByRole('img', { name: /relationships around main/ });
+    expect(drawing.getAttribute('aria-label')).toContain('5 nodes and 5 relationships around main');
+    expect(drawing.querySelectorAll('.graph-node')).toHaveLength(5);
+    expect(workers.list[0]!.terminated).toBe(true);
+  } finally { auth.dispose(); }
+});
+
+it('inspects nodes and relationships by keyboard with links to entity detail, source and the authoritative record', async () => {
+  const auth = await session();
+  transport.get.mockResolvedValue({ data: calls });
+  history.replaceState(null, '', `${revision}/graph?view=calls&focus=fn_0000000000401000&depth=2`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const inspect = await screen.findByRole('button', { name: 'Inspect helper' });
+    inspect.focus(); fireEvent.click(inspect);
+    const details = screen.getByRole('region', { name: copy.selectionTitle });
+    await waitFor(() => expect(document.activeElement?.textContent).toBe(copy.selectionTitle));
+    expect(within(details).getByText('Selected node helper.')).toBeTruthy();
+    const version = calls.structureVersion;
+    expect(within(details).getByRole('link', { name: `${copy.links.entity}: helper` }).getAttribute('href'))
+      .toBe(`${revision}/functions/fn_0000000000401010?structureVersion=${version}`);
+    expect(within(details).getByRole('link', { name: `${copy.links.module}: core` }).getAttribute('href'))
+      .toBe(`${revision}/modules/core?structureVersion=${version}`);
+    expect(within(details).getByRole('link', { name: /Open the implementation source/ }).getAttribute('href')).toMatch(
+      new RegExp(`^${revision}/source-files/file_`));
+    expect(within(details).getByRole('link', { name: copy.links.model }).getAttribute('href'))
+      .toBe(`/nested/api/v1${api}/records/program-model?structureVersion=${version}`);
+    expect(within(details).getByRole('link', { name: copy.links.focus }).getAttribute('href'))
+      .toBe(graphPath('/nested', selected, { view: 'calls', focus: 'fn_0000000000401010', depth: 2 }, version));
+    expect(within(details).getByText(structureCopy.evidenceMeanings.inferred)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Inspect main to fn_missing' }));
+    expect(within(details).getByText('Selected relationship from main to fn_missing.')).toBeTruthy();
+    expect(within(details).getByText(copy.callNote)).toBeTruthy();
+    expect(within(details).getByRole('link', { name: `${copy.links.caller}: main` })).toBeTruthy();
+    expect(within(details).queryByRole('link', { name: /Open the called function/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Inspect fn_missing' }));
+    expect(within(details).getByText(copy.unrecordedNote)).toBeTruthy();
+  } finally { auth.dispose(); }
+});
+
+it.each([
+  { view: 'calls', inspect: 'Inspect helper', link: copy.links.source },
+  { view: 'calls', inspect: 'Inspect main to fn_missing', link: copy.links.source },
+  { view: 'modules', inspect: 'Inspect core', link: copy.links.source },
+  { view: 'modules', inspect: 'Inspect core', link: copy.links.header },
+  { view: 'modules', inspect: 'Inspect core to util', link: copy.links.source },
+])('refuses metadata drift when following a $view source link from $inspect ($link)', async ({ view, inspect, link }) => {
+  const auth = await session();
+  const graph = view === 'calls' ? calls : fixture<StructureNeighborhood>('structure-neighborhood-modules');
+  const source = fixture<RevisionFile>('revision-file-root');
+  let fileId = '';
+  transport.get.mockImplementation(kind => Promise.resolve({ data: kind === 'structureNeighborhood' ? graph : {
+    ...source, binding: selected, sourceSha256: graph.sourceSha256, metadataVersion: '9'.repeat(64),
+    item: { ...source.item, fileId },
+  } }));
+  history.replaceState(null, '', `${revision}/graph?view=${view}&focus=${view === 'calls' ? 'fn_0000000000401000' : 'core'}&depth=${graph.query.depth}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    fireEvent.click(await screen.findByRole('button', { name: inspect, exact: true }));
+    const details = screen.getByRole('region', { name: copy.selectionTitle });
+    const record = within(details).getByRole('link', { name: view === 'calls' ? copy.links.model : copy.links.plan });
+    const workbenchUrl = location.href;
+    expect(fireEvent.click(record)).toBe(true);
+    expect(location.href).toBe(workbenchUrl);
+    expect(record.getAttribute('download')).toBe(view === 'calls' ? 'program_model.json' : 'module_plan.json');
+    const sourceLink = within(details).getByRole('link', { name: new RegExp(`^${link}:`) });
+    const url = new URL(sourceLink.getAttribute('href')!, location.origin);
+    fileId = url.pathname.split('/').at(-1)!;
+    expect(url.searchParams.get('sourceSha256')).toBe(graph.sourceSha256);
+    expect(url.searchParams.get('metadataVersion')).toBe(graph.metadataVersion);
+    fireEvent.click(sourceLink);
+    await waitFor(() => expect(location.pathname).toBe(`${revision}/source-files/${fileId}`));
+    expect((await screen.findByRole('alert')).textContent).toContain(sourceCopy.expired);
+    expect(location.search).toBe(`?sourceSha256=${graph.sourceSha256}&metadataVersion=${graph.metadataVersion}`);
+    expect(transport.get.mock.calls.some(([kind]) => kind === 'revisionFile')).toBe(true);
+    expect(transport.get.mock.calls.every(([kind]) => ['structureNeighborhood', 'revisionFile'].includes(kind))).toBe(true);
+  } finally { auth.dispose(); }
+});
+
+it('cancels drawing work without hiding the tables, and draws again on request', async () => {
+  const auth = await session();
+  workers.answer = false;
+  transport.get.mockResolvedValue({ data: calls });
+  history.replaceState(null, '', `${revision}/graph?view=calls&focus=fn_0000000000401000&depth=2`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    fireEvent.click(await screen.findByRole('button', { name: copy.cancelLayout }));
+    expect(workers.list[0]!.terminated).toBe(true);
+    expect(screen.getByText(copy.layoutCancelled)).toBeTruthy();
+    expect(screen.queryByRole('img', { name: /relationships around/ })).toBeNull();
+    expect(screen.getByRole('table', { name: copy.nodesTitle })).toBeTruthy();
+    workers.answer = true;
+    fireEvent.click(screen.getByRole('button', { name: copy.drawAgain }));
+    await screen.findByRole('img', { name: /relationships around main/ });
+    expect(workers.list).toHaveLength(2);
+  } finally { auth.dispose(); }
+});
+
+it('states truncation with exact omitted counts and shows a graph over unavailable records as not recorded', async () => {
+  const auth = await session();
+  const truncated = fixture<StructureNeighborhood>('structure-neighborhood-truncated');
+  transport.get.mockResolvedValue({ data: truncated });
+  history.replaceState(null, '', `${revision}/graph?view=calls&focus=fn_0000000000401000&depth=2&nodeLimit=2&edgeLimit=1`);
+  try {
+    const view = render(<App basePath="/nested" session={auth} />);
+    await screen.findByText(`${copy.truncated} ${copy.reasons.NODE_LIMIT}.`);
+    const facts = screen.getByRole('region', { name: copy.completenessTitle });
+    expect(within(facts).getByText(copy.omittedNodes).nextElementSibling?.textContent).toBe('3');
+    expect(within(facts).getByText(copy.omittedEdges).nextElementSibling?.textContent).toBe('4');
+    view.unmount();
+    // Without the model the producer records no focus and answers 404, the same as for an unrecorded function.
+    transport.get.mockRejectedValue(new ApiClientError('http_error', { status: 404, serverCode: 'ENTITY_NOT_FOUND' }));
+    history.replaceState(null, '', `${revision}/graph?view=calls&focus=fn_0000000000401000`);
+    render(<App basePath="/nested" session={auth} />);
+    expect((await screen.findByRole('alert')).textContent).toContain(structureCopy.missing);
+    expect(screen.queryByRole('table', { name: copy.nodesTitle })).toBeNull();
+    expect(screen.getByRole('link', { name: structureCopy.returnFunctions }).getAttribute('href')).toBe(`${revision}/functions`);
+  } finally { auth.dispose(); }
+});
+
+it('still decodes the retained not-recorded neighborhood fixture (decoder compatibility only)', () => {
+  // The producer no longer emits an unavailable neighborhood; the fixture keeps the decoder's handling of that shape.
+  const retained = fixture<StructureNeighborhood>('structure-neighborhood-not-recorded');
+  const document = { apiVersion: 1, kind: 'structureNeighborhood', requestId: 'r', data: retained };
+  expect(decodeResponse(JSON.stringify(document), 'structureNeighborhood').data.graphState).toBe('not-recorded');
+});
+
+it('keeps inventory navigation after a changed pinned neighborhood and refreshes to current records', async () => {
+  const auth = await session();
+  transport.get.mockImplementation((_kind, path) => path.includes('structureVersion=')
+    ? Promise.reject(new ApiClientError('http_error', { status: 409, serverCode: 'STRUCTURE_CHANGED' })) : Promise.resolve({ data: calls }));
+  history.replaceState(null, '', `${revision}/graph?view=calls&focus=fn_0000000000401000&depth=2&structureVersion=${'8'.repeat(64)}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect((await screen.findByRole('alert')).textContent).toContain(structureCopy.expired);
+    expect(screen.getByRole('link', { name: structureCopy.returnFunctions }).getAttribute('href')).toBe(`${revision}/functions`);
+    fireEvent.click(screen.getByRole('button', { name: structureCopy.refresh }));
+    await screen.findByRole('table', { name: copy.nodesTitle });
+    expect(location.search).toBe('?view=calls&focus=fn_0000000000401000&depth=2');
+  } finally { auth.dispose(); }
+});
+
+it('applies new limits through the URL and draws module dependencies with plan links', async () => {
+  const auth = await session();
+  const modules = fixture<StructureNeighborhood>('structure-neighborhood-modules');
+  transport.get.mockImplementation((_kind, path) => Promise.resolve({ data: path.includes('view=modules') ? modules : calls }));
+  history.replaceState(null, '', `${revision}/graph?view=calls&focus=fn_0000000000401000&depth=2`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    fireEvent.input(await screen.findByRole('spinbutton', { name: copy.nodeLimit }), { target: { value: '20' } });
+    fireEvent.change(screen.getByRole('combobox', { name: copy.direction }), { target: { value: 'outgoing' } });
+    fireEvent.click(screen.getByRole('button', { name: copy.apply }));
+    await waitFor(() => expect(location.search).toBe('?view=calls&focus=fn_0000000000401000&direction=outgoing&depth=2&nodeLimit=20'));
+    expect(graphLocation(location.search).query.nodeLimit).toBe(20);
+    history.replaceState(null, '', `${revision}/graph?view=modules&focus=core`);
+    dispatchEvent(new PopStateEvent('popstate'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Inspect core to util' }));
+    const details = screen.getByRole('region', { name: copy.selectionTitle });
+    expect(within(details).getByText(copy.derivedNote)).toBeTruthy();
+    expect(within(details).getByRole('link', { name: copy.links.plan }).getAttribute('href')).toContain('/records/module-plan?structureVersion=');
+    expect(within(details).getByRole('link', { name: `${copy.links.targetModule}: util` })).toBeTruthy();
+    expect(() => graphLocation('?view=modules&focus=core&unresolved=omit')).toThrow();
+    expect(() => graphLocation('?view=calls&focus=fn_1&depth=4')).toThrow();
+    expect(() => graphLocation('?view=calls')).toThrow();
+  } finally { auth.dispose(); }
+});
+
+it.each([
+  { search: 'view=calls&focus=fn_0000000000401000&depth=2&unresolved=omit', fixtureName: 'structure-neighborhood-calls', echoed: 'show' },
+  { search: 'view=calls&focus=fn_0000000000401000&depth=2', fixtureName: 'structure-neighborhood-calls', echoed: 'omit' },
+  { search: 'view=calls&focus=fn_0000000000401000&depth=2', fixtureName: 'structure-neighborhood-calls', echoed: null },
+  { search: 'view=modules&focus=core', fixtureName: 'structure-neighborhood-modules', echoed: 'show' },
+])('refuses a decoded neighborhood whose echoed unresolved policy answers another request ($search, echoed $echoed)', async ({ search, fixtureName, echoed }) => {
+  const auth = await session();
+  const envelope = JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${fixtureName}.json`), 'utf8')) as { data: StructureNeighborhood };
+  envelope.data.query.unresolved = echoed as StructureNeighborhood['query']['unresolved'];
+  const text = JSON.stringify(envelope);
+  transport.get.mockImplementation(() => Promise.resolve(decodeResponse(text, 'structureNeighborhood')));
+  history.replaceState(null, '', `${revision}/graph?${search}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect((await screen.findByRole('alert')).textContent).toBeTruthy();
+    expect(screen.queryByRole('table', { name: copy.edgesTitle })).toBeNull();
+    expect(screen.queryByRole('table', { name: copy.nodesTitle })).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+it.each([
+  { search: 'view=calls&focus=fn_0000000000401000&depth=2&unresolved=omit', fixtureName: 'structure-neighborhood-calls', echoed: 'omit' },
+  { search: 'view=calls&focus=fn_0000000000401000&depth=2', fixtureName: 'structure-neighborhood-calls', echoed: 'show' },
+  { search: 'view=modules&focus=core', fixtureName: 'structure-neighborhood-modules', echoed: null },
+])('shows a decoded neighborhood whose echoed unresolved policy matches ($search)', async ({ search, fixtureName, echoed }) => {
+  const auth = await session();
+  const envelope = JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${fixtureName}.json`), 'utf8')) as { data: StructureNeighborhood };
+  envelope.data.query.unresolved = echoed as StructureNeighborhood['query']['unresolved'];
+  const text = JSON.stringify(envelope);
+  transport.get.mockImplementation(() => Promise.resolve(decodeResponse(text, 'structureNeighborhood')));
+  history.replaceState(null, '', `${revision}/graph?${search}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('table', { name: copy.edgesTitle });
+    expect(transport.get.mock.calls[0]?.[1]).toContain(search.includes('modules') ? 'view=modules' : `unresolved=${echoed}`);
+    expect(transport.get.mock.calls[0]?.[1].includes('unresolved=')).toBe(!search.includes('modules'));
+  } finally { auth.dispose(); }
+});
+
+type Envelope = { data: StructureNeighborhood & { neighborhood: NonNullable<StructureNeighborhood['neighborhood']> } };
+const neighborhoodEnvelope = (name: string) =>
+  JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as Envelope;
+// The server builds the center from the requested recorded function or module, so its identity and selector are the focus.
+const foreignCenters: { name: string; fixtureName: string; search: string; edit: (data: Envelope['data']) => void }[] = [
+  { name: 'calls center is another recorded function', fixtureName: 'structure-neighborhood-calls',
+    search: 'view=calls&focus=fn_0000000000401010&depth=2', edit: data => { data.query.focus = 'fn_0000000000401010'; } },
+  { name: 'modules center is another module', fixtureName: 'structure-neighborhood-modules',
+    search: 'view=modules&focus=util', edit: data => { data.query.focus = 'util'; } },
+  { name: 'calls center carries no selector', fixtureName: 'structure-neighborhood-calls',
+    search: 'view=calls&focus=fn_0000000000401000&depth=2', edit: data => { data.neighborhood.nodes[0]!.selector = null; } },
+  { name: 'modules center carries no selector', fixtureName: 'structure-neighborhood-modules',
+    search: 'view=modules&focus=core', edit: data => { data.neighborhood.nodes[0]!.selector = null; } },
+  { name: 'calls center is an unrecorded call target', fixtureName: 'structure-neighborhood-calls',
+    search: 'view=calls&focus=fn_missing&depth=2', edit: data => {
+      data.query.focus = 'fn_missing';
+      data.neighborhood = { nodes: [{ index: 0, depth: 0, outgoing: { total: 0, shown: 0 }, incoming: { total: 0, shown: 0 },
+        kind: 'unrecorded-function', entityId: 'fn_missing', selector: null }], edges: [],
+      completeness: { state: 'complete', reasons: [], reachableNodes: 1, reachableEdges: 0, omittedNodes: 0, omittedEdges: 0,
+        edgesBeyondDepth: 0, filteredEdges: 0 } } as unknown as Envelope['data']['neighborhood'];
+    } },
+];
+
+it.each(foreignCenters)('rejects a neighborhood whose center is not the echoed focus at decode ($name)', ({ fixtureName, edit }) => {
+  const envelope = neighborhoodEnvelope(fixtureName);
+  edit(envelope.data);
+  expect(() => decodeResponse(JSON.stringify(envelope), 'structureNeighborhood')).toThrow(ApiClientError);
+});
+
+it.each(foreignCenters)('refuses a neighborhood whose center belongs to another entity despite a matching query echo ($name)', async ({ fixtureName, search, edit }) => {
+  const auth = await session();
+  const envelope = neighborhoodEnvelope(fixtureName);
+  edit(envelope.data);
+  // Bypasses the decoder: the route itself binds the center to the requested focus.
+  transport.get.mockResolvedValue({ data: envelope.data });
+  history.replaceState(null, '', `${revision}/graph?${search}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const outcome = await waitFor(() => {
+      if (screen.queryByRole('alert')) return { kind: 'alert' };
+      const graph = screen.queryByRole('table', { name: copy.nodesTitle });
+      if (graph) return { kind: 'graph', firstRow: within(graph).getAllByRole('row')[1]?.textContent };
+      throw new Error('waiting for graph response');
+    });
+    expect(outcome).toEqual({ kind: 'alert' });
+    expect(screen.queryByRole('table', { name: copy.edgesTitle })).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+it('accepts an unavailable graph for any recorded focus, since it has no center to bind', () => {
+  const envelope = neighborhoodEnvelope('structure-neighborhood-not-recorded');
+  envelope.data.query.focus = 'fn_0000000000401010';
+  expect(decodeResponse(JSON.stringify(envelope), 'structureNeighborhood').data.neighborhood).toBeNull();
+});
+
+/** Lets passive effects, which run after paint, settle before focus is inspected. */
+const afterPaint = () => act(async () => {
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+});
+
+/** Answers the held layout request of one fake worker. */
+async function answer(position: number) {
+  const worker = workers.list[position]!;
+  const request = worker.posted[0] as { nodes: { index: number; depth: number }[]; edges: { source: number; target: number }[] };
+  await act(() => { worker.onmessage?.({ data: { type: 'graph-layout', ...layoutGraph(request.nodes, request.edges) } }); });
+}
+
+it('keeps keyboard focus on the drawing controls as Cancel drawing, Draw again and a finished drawing replace them', async () => {
+  const auth = await session();
+  workers.answer = false;
+  transport.get.mockResolvedValue({ data: calls });
+  history.replaceState(null, '', `${revision}/graph?view=calls&focus=fn_0000000000401000&depth=2`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const cancel = await screen.findByRole('button', { name: copy.cancelLayout });
+    cancel.focus();
+    fireEvent.click(cancel);
+    const again = await screen.findByRole('button', { name: copy.drawAgain });
+    await afterPaint();
+    expect(workers.list[0]!.terminated).toBe(true);
+    expect(screen.getByRole('table', { name: copy.nodesTitle })).toBeTruthy();
+    expect(document.activeElement).toBe(again);
+    fireEvent.click(again);
+    const next = await screen.findByRole('button', { name: copy.cancelLayout });
+    await afterPaint();
+    expect(document.activeElement).toBe(next);
+    await answer(1);
+    await screen.findByRole('img', { name: /relationships around main/ });
+    await afterPaint();
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: copy.drawingTitle }));
+  } finally { auth.dispose(); }
+});
+
+it('leaves focus the reader placed elsewhere when drawing is canceled or finishes', async () => {
+  const auth = await session();
+  workers.answer = false;
+  transport.get.mockResolvedValue({ data: calls });
+  history.replaceState(null, '', `${revision}/graph?view=calls&focus=fn_0000000000401000&depth=2`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const cancel = await screen.findByRole('button', { name: copy.cancelLayout });
+    const inspect = screen.getAllByRole('button', { name: /Inspect/ })[0]!;
+    inspect.focus();
+    // A pointer activation that leaves focus on another control does not move it.
+    fireEvent.click(cancel);
+    await screen.findByRole('button', { name: copy.drawAgain });
+    await afterPaint();
+    expect(document.activeElement).toBe(inspect);
+    fireEvent.click(screen.getByRole('button', { name: copy.drawAgain }));
+    await screen.findByRole('button', { name: copy.cancelLayout });
+    await afterPaint();
+    expect(document.activeElement).toBe(inspect);
+    // Focus on Cancel drawing that the reader then moves away is left where they put it when the drawing finishes.
+    screen.getByRole('button', { name: copy.cancelLayout }).focus();
+    inspect.focus();
+    await answer(1);
+    await screen.findByRole('img', { name: /relationships around main/ });
+    await afterPaint();
+    expect(document.activeElement).toBe(inspect);
+  } finally { auth.dispose(); }
+});

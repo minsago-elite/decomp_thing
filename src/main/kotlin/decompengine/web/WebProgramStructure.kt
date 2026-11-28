@@ -12,6 +12,7 @@ import decompengine.project.ProjectFileRole
 import decompengine.project.ReconstructionProfile
 import decompengine.project.ReferencedDataByteEvidenceJson
 import decompengine.project.SourceTreeManifest
+import decompengine.repair.StableRegularFile
 import java.util.concurrent.CancellationException
 import kotlinx.serialization.json.Json
 
@@ -58,11 +59,25 @@ internal class WebStructureTable(
     val calls: Array<Array<String>>,
     val referencedGlobals: Array<Array<String>>,
     val stringCounts: IntArray,
-) {
-    val size: Int get() = ids.size
+    /** Recorded identity to row; the model reader builds it while it checks identity uniqueness. */
     val index: Map<String, Int> = HashMap<String, Int>(ids.size * 2).also { map ->
         ids.forEachIndexed { i, id -> check(map.put(id, i) == null) { "Recorded entity ID is duplicated." } }
+    },
+) {
+    val size: Int get() = ids.size
+
+    /** Model admission enforces unique IDs within each kind, so equal size and membership are exact. */
+    fun samePopulation(other: WebStructureTable): Boolean {
+        if (this === other) return true
+        if (kind != other.kind || size != other.size) return false
+        val thread = Thread.currentThread()
+        for (id in ids) {
+            if (thread.isInterrupted) throw CancellationException("Population comparison was cancelled.")
+            if (id !in other.index) return false
+        }
+        return true
     }
+
     // Unsigned 64-bit order; entities without a recorded address (types only) follow all addresses.
     private fun compareAddress(a: Int, b: Int): Int {
         val recorded = hasAddress[b].compareTo(hasAddress[a])
@@ -145,6 +160,13 @@ internal class WebProgramStructureIndex(
     val sharedInterfacePath: String?,
     val unknownPlanReferences: Int,
     val retainedBytes: Long,
+    /** Manifest facts the scorecard joins: the reconstruction profile and the committed confidence record. */
+    val profileId: String = "",
+    val profileSha256: String = "",
+    val confidenceFile: GeneratedFileEvidence? = null,
+    val confidenceDeclared: Boolean = false,
+    val manifestUnresolvedEntities: Int = 0,
+    val manifestUnresolvedImplementations: Int = 0,
 ) {
     val structureVersion: String = revisionSourceDigest(listOf("program-structure-v1", metadataVersion,
         model?.sha256 ?: "-", plan?.sha256 ?: "-", outcome.state, planOutcome.state).joinToString("\n"))
@@ -230,9 +252,122 @@ internal class WebProgramStructureIndex(
 
     fun table(kind: WebStructureKind): WebStructureTable = tables[kind.ordinal]
     val available: Boolean get() = outcome.state == "available"
+
+    /** Relationship adjacency, built on the first neighborhood read and retained only as far as the cache charges it. */
+    val callGraph: WebProgramGraph get() = derived("call-graph", WebProgramGraph::retainedBytes) { WebProgramGraph.calls(this) }
+    val moduleGraph: WebProgramGraph get() = derived("module-graph", WebProgramGraph::retainedBytes) { WebProgramGraph.modules(this) }
+
+    /**
+     * Digest of the recorded population: each kind's identities in sorted order as length-prefixed UTF-16 code units,
+     * so order is irrelevant and distinct unpaired surrogates, which UTF-8 encoding would merge, stay distinct.
+     */
+    fun populationDigest(): String = derived("population-digest", { 256L }) {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        val thread = Thread.currentThread()
+        for (table in tables) {
+            digest.update("${table.kind.route}\n${table.size}\n".toByteArray(Charsets.UTF_8))
+            for (id in table.ids.sortedArray()) {
+                if (thread.isInterrupted) throw CancellationException("Population digest was cancelled.")
+                val units = java.nio.ByteBuffer.allocate(Int.SIZE_BYTES + id.length * Char.SIZE_BYTES).putInt(id.length)
+                for (character in id) units.putChar(character)
+                digest.update(units.array())
+            }
+        }
+        java.util.HexFormat.of().formatHex(digest.digest())
+    }
+
+    /**
+     * The selectors of one entity kind that this policy publishes unchanged, mapped to their rows. Requests resolve
+     * through it only, so a concealed selector and an unrecorded one take the same single map miss and the supplied
+     * value is never scanned. Each kind's map is built on first use for one policy scope and charged to the structure
+     * cache like every derived value; a request builds only the map it resolves against.
+     */
+    internal fun publishedEntities(kind: WebStructureKind, policy: WebRedactionPolicy): WebPublishedSelectors =
+        derived("published-${kind.route}:${policy.selectorScope}", WebPublishedSelectors::retainedBytes) {
+            val rows = HashMap<String, Int>()
+            if (available) table(kind).let { table -> for (row in 0 until table.size) if (published(table.ids[row], policy)) rows[table.ids[row]] = row }
+            WebPublishedSelectors(rows)
+        }
+
+    /** The module selectors this policy publishes unchanged, mapped to their plan rows; empty without an available plan. */
+    internal fun publishedModules(policy: WebRedactionPolicy): WebPublishedSelectors =
+        derived("published-modules:${policy.selectorScope}", WebPublishedSelectors::retainedBytes) {
+            val rows = HashMap<String, Int>()
+            if (available && planOutcome.state == "available") modules.forEachIndexed { row, module -> if (published(module.id, policy)) rows[module.id] = row }
+            WebPublishedSelectors(rows)
+        }
+
+    private fun published(id: String, policy: WebRedactionPolicy) = WebProgramStructurePages.addressable(id) && policy.preservesOpaque(id)
+
+    private val derivedLock = Any()
+    private val derivedValues = HashMap<String, Any>()
+    private var provisionalBytes = 0L
+    private var charge: ((Long) -> Boolean)? = null
+
+    /**
+     * A value derived from this projection after it was built. Before cache admission it stays with the index and
+     * [admitRetention] adds its bytes to the entry charge; afterwards it is kept only when the owning cache charges its
+     * bytes against both ceilings, and is otherwise rebuilt for each read.
+     */
+    internal fun <T : Any> derived(key: String, bytes: (T) -> Long, build: () -> T): T = synchronized(derivedLock) {
+        @Suppress("UNCHECKED_CAST")
+        (derivedValues[key] as T?)?.let { return it }
+        val value = build()
+        val size = bytes(value).also { require(it >= 0) }
+        val charger = charge
+        if (charger == null) { provisionalBytes = Math.addExact(provisionalBytes, size); derivedValues[key] = value }
+        else if (charger(size)) derivedValues[key] = value
+        value
+    }
+
+    /** Hand later derived charges to [charger] and return the bytes already derived before admission. */
+    internal fun admitRetention(charger: (Long) -> Boolean): Long = synchronized(derivedLock) {
+        charge = charger
+        provisionalBytes
+    }
+
+    /** True when a derived value is currently retained; for retention checks. */
+    internal fun retainsDerived(key: String): Boolean = synchronized(derivedLock) { key in derivedValues }
 }
 
 internal class WebStructureRecord(val path: String, val sha256: String, val sizeBytes: Long)
+
+/** Published selectors of one entity kind, or of the modules, under one policy scope. */
+internal class WebPublishedSelectors(private val rows: Map<String, Int>) {
+    /** Map lookups made; lets checks prove a request resolved through this map. */
+    internal val lookups = java.util.concurrent.atomic.AtomicLong()
+
+    fun row(selector: String): Int? { lookups.incrementAndGet(); return rows[selector] }
+
+    /** Map nodes and boxed rows; the keys are the projection's own identity strings, already charged with it. */
+    val retainedBytes: Long = 128L + 96L * rows.size
+}
+
+/** Reads one manifest-committed record of the selected revision again, refused unless it still has its recorded digest. */
+internal fun interface WebStructureRecordReader {
+    fun read(record: WebStructureRecord, maximumBytes: Int): ByteArray
+    fun entity(record: WebStructureRecord, maximumBytes: Int, offset: Long,
+        policy: WebRedactionPolicy = WebRedactionPolicy.BASELINE): WebStructureEntityFields =
+        readWebStructureEntity(read(record, maximumBytes), offset, policy = policy)
+}
+
+/** One parse outcome; [value] is present only when [outcome] is `available`. */
+internal class WebStructureParse<T>(val value: T?, val outcome: WebStructureOutcome)
+
+/**
+ * One declared evidence record as read from the store, with its computed digest and parse. [record] is null when the
+ * record exceeded its byte bound. It is used only after [committed] matches it to the manifest entry that commits it.
+ */
+internal class WebStructureEvidence<T>(val record: StableRegularFile?, val computedSha256: String?, val parse: WebStructureParse<T>?) {
+    class Committed<T>(val sizeBytes: Long, val parse: WebStructureParse<T>)
+
+    /** Null when over its bound; a record whose bytes differ from the committed digest is refused as a changed revision. */
+    fun committed(entry: GeneratedFileEvidence): Committed<T>? {
+        if (record == null) return null
+        if (record.sha256 != entry.sha256 || computedSha256 != entry.sha256) revisionSourceChanged()
+        return Committed(record.bytes.size.toLong(), checkNotNull(parse))
+    }
+}
 
 /** Fixed-size accounting only; emitted on demand and never retained by an index or sent on the wire. */
 internal enum class WebStructureCharge {
@@ -278,22 +413,38 @@ internal object WebProgramStructureBuilder {
         return manifest.files.singleOrNull { it.path == path }?.takeIf { ProjectFileRole.EVIDENCE in it.roles }
     }
 
-    /** The reader supplies bytes already bounded by the store and checked against the manifest digest. */
+    /** Parse one model; the outcome is explicit for every failure, and nothing here depends on the manifest. */
+    fun parseModel(bytes: ByteArray): WebStructureParse<ParsedModel> = try {
+        WebStructureParse(ModelReader(bytes, RetainedBudget(0)).read(), WebStructureOutcome.AVAILABLE)
+    } catch (failure: WebStructureFailure) { WebStructureParse(null, WebStructureOutcome(failure.state, failure.reason)) }
+    catch (failure: Exception) {
+        if (failure is CancellationException || failure is InterruptedException) throw failure
+        WebStructureParse(null, WebStructureOutcome("invalid", "MODEL_MALFORMED"))
+    }
+
+    fun parsePlan(bytes: ByteArray): WebStructureParse<ModulePlan> = try {
+        val plan = ModulePlanJson.readCanonical(bytes, MAXIMUM_PLAN_BYTES) { parseCheckpoint() }
+        validatePlan(plan, emptyList(), RetainedBudget(0, "PLAN_RETAINED_BYTES_EXCEEDED"))
+        WebStructureParse(plan, WebStructureOutcome.AVAILABLE)
+    } catch (failure: WebStructureFailure) { WebStructureParse(null, WebStructureOutcome(failure.state, failure.reason)) }
+    catch (failure: Exception) {
+        if (failure is CancellationException || failure is InterruptedException) throw failure
+        WebStructureParse(null, if (planSchema(bytes)?.let { it != 2L } == true) WebStructureOutcome("unsupported", "PLAN_SCHEMA_UNSUPPORTED")
+            else WebStructureOutcome("invalid", "PLAN_MALFORMED"))
+    }
+
+    /**
+     * Bind the parsed records to the manifest that commits them. The callbacks are invoked only for a record the
+     * manifest commits; each returns the bytes already bounded by the store, whose digest is checked here.
+     */
     fun build(
         snapshot: WebRevisionSourceSnapshot,
         profile: ReconstructionProfile,
         manifest: SourceTreeManifest,
-        readEvidence: (GeneratedFileEvidence, Int) -> ByteArray?,
+        readModel: () -> WebStructureEvidence<ParsedModel>,
+        readPlan: () -> WebStructureEvidence<ModulePlan>,
         timing: ((String, Long) -> Unit)? = null,
-    ): WebProgramStructureIndex = buildDiagnosed(snapshot, profile, manifest, readEvidence, timing, null)
-
-    fun buildDiagnosed(
-        snapshot: WebRevisionSourceSnapshot,
-        profile: ReconstructionProfile,
-        manifest: SourceTreeManifest,
-        readEvidence: (GeneratedFileEvidence, Int) -> ByteArray?,
-        timing: ((String, Long) -> Unit)?,
-        retention: ((WebStructureRetention) -> Unit)?,
+        retention: ((WebStructureRetention) -> Unit)? = null,
     ): WebProgramStructureIndex {
         fun <T> measured(phase: String, action: () -> T): T {
             if (timing == null) return action()
@@ -318,28 +469,37 @@ internal object WebProgramStructureBuilder {
             planOutcome: WebStructureOutcome = WebStructureOutcome("not-recorded", "MODEL_UNAVAILABLE"), plan: WebStructureRecord? = null,
             tables: List<WebStructureTable> = emptyList(), modules: List<WebStructureModule> = emptyList(), unknown: Int = 0) =
             WebProgramStructureIndex(ref, snapshot.manifestSha256, snapshot.descriptorSha256, manifest.inputSha256,
-                snapshot.metadataVersion, outcome, model, schema, planOutcome, plan, tables, modules, fileIds, shared, unknown, retainedBytes).also {
+                snapshot.metadataVersion, outcome, model, schema, planOutcome, plan, tables, modules, fileIds, shared, unknown, retainedBytes,
+                manifest.profileId, manifest.profileSha256, evidenceFile(profile, manifest, "confidence-evidence"),
+                declaredPath(profile, "confidence-evidence") != null, manifest.unresolvedEntityIds.size,
+                manifest.unresolvedImplementationIds.size).also {
                     retention?.invoke(WebStructureRetention(retainedCharges).also { check(it.bytes == retainedBytes) })
                 }
         val modelFile = evidenceFile(profile, manifest, "program-model-evidence")
             ?: return result(WebStructureOutcome("not-recorded",
                 if (declaredPath(profile, "program-model-evidence") == null) "PROFILE_DECLARES_NO_MODEL" else "MODEL_NOT_RECORDED"))
-        val modelBytes = measured("read-model-evidence") { readEvidence(modelFile, MAXIMUM_MODEL_BYTES) }
+        val modelRead = measured("read-model-evidence") { readModel().committed(modelFile) }
             ?: return result(WebStructureOutcome("limit-exceeded", "MODEL_BYTES_EXCEEDED"))
-        val model = WebStructureRecord(modelFile.path, modelFile.sha256, modelBytes.size.toLong())
-        val implementationUnresolved = manifest.unresolvedImplementationIds.toHashSet()
-        val recoveryUnresolved = manifest.unresolvedEntityIds.toHashSet()
-        val parsed = try {
-            budget.charge(0) // Also admit the snapshot/file-identity baseline when the model is empty.
-            measured("parse-model") { ModelReader(modelBytes, implementationUnresolved, recoveryUnresolved, budget).read() }
-        }
-            catch (failure: WebStructureFailure) { return result(WebStructureOutcome(failure.state, failure.reason), model) }
-            catch (failure: Exception) {
-                if (failure is CancellationException || failure is InterruptedException) throw failure
-                return result(WebStructureOutcome("invalid", "MODEL_MALFORMED"), model)
-            }
+        val model = WebStructureRecord(modelFile.path, modelFile.sha256, modelRead.sizeBytes)
+        val parsed = modelRead.parse.value ?: return result(modelRead.parse.outcome, model)
         if (parsed.inputSha256 != manifest.inputSha256) {
             return result(WebStructureOutcome("invalid", "MODEL_INPUT_MISMATCH"), model, parsed.schemaVersion)
+        }
+        try {
+            // Admit the peak speculative parse together with snapshot identities before any discounts.
+            budget.charge(0)
+            val charges = parsed.retainedCharges
+            check(charges.sum() == parsed.retainedBytes)
+            for (category in WebStructureCharge.entries) budget.charge(charges[category.ordinal], category)
+        } catch (failure: WebStructureFailure) {
+            return result(WebStructureOutcome(failure.state, failure.reason), model)
+        }
+        val implementationUnresolved = manifest.unresolvedImplementationIds.toHashSet()
+        val recoveryUnresolved = manifest.unresolvedEntityIds.toHashSet()
+        for (table in parsed.tables) for (row in 0 until table.size) {
+            parseCheckpoint()
+            table.implementationUnresolved[row] = table.ids[row] in implementationUnresolved
+            table.recoveryUnresolved[row] = table.ids[row] in recoveryUnresolved
         }
         measured("canonicalize-references") {
             val functions = parsed.tables[WebStructureKind.FUNCTION.ordinal]
@@ -357,26 +517,23 @@ internal object WebProgramStructureBuilder {
         var plan: ModulePlan? = null
         var resolutions: List<List<IntArray>> = emptyList()
         if (planFile != null) {
-            val bytes = measured("read-plan-evidence") { readEvidence(planFile, MAXIMUM_PLAN_BYTES) }
-            if (bytes == null) planOutcome = WebStructureOutcome("limit-exceeded", "PLAN_BYTES_EXCEEDED")
+            val read = measured("read-plan-evidence") { readPlan().committed(planFile) }
+            if (read == null) planOutcome = WebStructureOutcome("limit-exceeded", "PLAN_BYTES_EXCEEDED")
             else {
-                planRecord = WebStructureRecord(planFile.path, planFile.sha256, bytes.size.toLong())
-                planOutcome = try {
-                    val candidate = measured("parse-canonical-plan") {
-                        ModulePlanJson.readCanonical(bytes, MAXIMUM_PLAN_BYTES, {}, timing)
+                planRecord = WebStructureRecord(planFile.path, planFile.sha256, read.sizeBytes)
+                planOutcome = read.parse.outcome
+                val candidate = read.parse.value
+                if (candidate != null) {
+                    planOutcome = try {
+                        val planBudget = RetainedBudget(retainedBytes, "PLAN_RETAINED_BYTES_EXCEEDED", retainedCharges)
+                        resolutions = measured("validate-plan") { validatePlan(candidate, parsed.tables, planBudget) }
+                        plan = candidate
+                        retainedBytes = planBudget.bytes
+                        retainedCharges = planBudget.charges()
+                        WebStructureOutcome.AVAILABLE
+                    } catch (failure: WebStructureFailure) {
+                        WebStructureOutcome(failure.state, failure.reason)
                     }
-                    val planBudget = RetainedBudget(retainedBytes, "PLAN_RETAINED_BYTES_EXCEEDED", retainedCharges)
-                    resolutions = measured("validate-plan") { validatePlan(candidate, parsed.tables, planBudget) }
-                    plan = candidate
-                    retainedBytes = planBudget.bytes
-                    retainedCharges = planBudget.charges()
-                    WebStructureOutcome.AVAILABLE
-                } catch (failure: WebStructureFailure) {
-                    WebStructureOutcome(failure.state, failure.reason)
-                } catch (failure: Exception) {
-                    if (failure is CancellationException || failure is InterruptedException) throw failure
-                    if (planSchema(bytes)?.let { it != 2L } == true) WebStructureOutcome("unsupported", "PLAN_SCHEMA_UNSUPPORTED")
-                    else WebStructureOutcome("invalid", "PLAN_MALFORMED")
                 }
             }
         }
@@ -426,6 +583,10 @@ internal object WebProgramStructureBuilder {
             parsed.tables.forEach { it.owners.fill(OWNER_NOT_RECORDED) }
         }
         return result(WebStructureOutcome.AVAILABLE, model, parsed.schemaVersion, planOutcome, planRecord, parsed.tables, modules, unknown)
+    }
+
+    private fun parseCheckpoint() {
+        if (Thread.currentThread().isInterrupted) throw CancellationException("Structure parsing was cancelled.")
     }
 
     /** Conservative retained allocation charge, including maps, lazy orders/collisions and array growth.
@@ -504,6 +665,7 @@ internal object WebProgramStructureBuilder {
         val ids = HashSet<String>()
         val resolutions = ArrayList<List<IntArray>>(plan.modules.size)
         for (module in plan.modules) {
+            parseCheckpoint()
             budget.charge(512, WebStructureCharge.PLAN_MODULES)
             moduleId(module.id)
             if (!ids.add(module.id)) throw WebStructureFailure("invalid", "PLAN_DUPLICATE_MODULE")
@@ -512,9 +674,10 @@ internal object WebProgramStructureBuilder {
                 if (owned.size > MAXIMUM_REFERENCES) throw WebStructureFailure("limit-exceeded", "PLAN_REFERENCES_EXCEEDED")
                 if (owned.isNotEmpty()) budget.charge(64, WebStructureCharge.PLAN_REFERENCE_LISTS)
                 IntArray(owned.size) { slot ->
+                    parseCheckpoint()
                     val id = owned[slot]
                     identifier(id)
-                    val row = tables[kind].index[id] ?: -1
+                    val row = tables.getOrNull(kind)?.index?.get(id) ?: -1
                     budget.charge(8, WebStructureCharge.PLAN_REFERENCE_SLOTS)
                     if (row < 0) budget.string(id, WebStructureCharge.PLAN_REFERENCE_STRINGS)
                     row
@@ -526,6 +689,7 @@ internal object WebProgramStructureBuilder {
         for (cycle in plan.dependencyCycles) {
             if (cycle.size < 2) invalid()
             for (id in cycle) {
+                parseCheckpoint()
                 moduleId(id, WebStructureCharge.PLAN_CYCLE_STRINGS)
                 if (id !in ids || !cycleMembers.add(id)) invalid()
             }
@@ -546,15 +710,12 @@ internal object WebProgramStructureBuilder {
 
     internal class WebStructureFailure(val state: String, val reason: String) : Exception(reason)
 
-    private class ParsedModel(val schemaVersion: Int, val inputSha256: String, val tables: List<WebStructureTable>)
+    /** Recorded columns of one model; manifest-derived flags are filled when the model is bound to its manifest. */
+    internal class ParsedModel(val schemaVersion: Int, val inputSha256: String, val tables: List<WebStructureTable>, val retainedBytes: Long,
+        val retainedCharges: LongArray)
 
     /** Closed-shape single pass; entity bodies are skipped after their scalar columns are recorded. */
-    private class ModelReader(
-        private val bytes: ByteArray,
-        private val implementationUnresolved: Set<String>,
-        private val recoveryUnresolved: Set<String>,
-        private val budget: RetainedBudget,
-    ) {
+    private class ModelReader(private val bytes: ByteArray, private val budget: RetainedBudget) {
         private var schema = 1
         private var references = 0
         private val byteEvidenceBudget = ReferencedDataByteEvidenceJson.Budget()
@@ -564,6 +725,7 @@ internal object WebProgramStructureBuilder {
         private var decodedStatus: WebExtractionStatus? = null
 
         fun read(): ParsedModel = MODEL_JSON.createParser(bytes).use { parser ->
+            parseCheckpoint()
             expect(parser.nextToken(), JsonToken.START_OBJECT)
             field(parser, "schemaVersion")
             expect(parser.nextToken(), JsonToken.VALUE_NUMBER_INT)
@@ -580,7 +742,8 @@ internal object WebProgramStructureBuilder {
             val types = table(parser, WebStructureKind.TYPE, MAXIMUM_GLOBALS_OR_TYPES)
             expect(parser.nextToken(), JsonToken.END_OBJECT)
             if (parser.nextToken() != null) malformed()
-            ParsedModel(schema, input, listOf(functions, globals, types))
+            parseCheckpoint()
+            ParsedModel(schema, input, listOf(functions, globals, types), budget.bytes, budget.charges())
         }
 
         private fun fieldBit(name: String): Int = when (name) {
@@ -622,7 +785,9 @@ internal object WebProgramStructureBuilder {
             val addresses = LongColumn(); val hasAddress = BooleanColumn(); val status = ArrayList<WebExtractionStatus>()
             val calls = ArrayList<Array<String>>(); val globals = ArrayList<Array<String>>(); val strings = IntColumn()
             val expectedFields = fields(kind)
+            val index = HashMap<String, Int>()
             while (true) {
+                parseCheckpoint()
                 val token = parser.nextToken()
                 if (token == JsonToken.END_ARRAY) break
                 expect(token, JsonToken.START_OBJECT)
@@ -636,9 +801,11 @@ internal object WebProgramStructureBuilder {
                 var assessmentState = ScalarState.ABSENT
                 var called: Array<String> = noIdentifiers; var referenced: Array<String> = noIdentifiers; var stringCount = 0
                 while (true) {
+                    parseCheckpoint()
                     val next = parser.nextToken()
                     if (next == JsonToken.END_OBJECT) break
                     expect(next, JsonToken.FIELD_NAME)
+                    // The closed field set is one map probe and a bit test per field, not a set per entity.
                     val key = parser.currentName()
                     val bit = fieldBit(key)
                     // currentName is decoded, so escaped aliases collide before their value is consumed.
@@ -673,6 +840,7 @@ internal object WebProgramStructureBuilder {
                 if (schema >= 2 && assessmentState != ScalarState.VALUE) malformed()
                 if (kind != WebStructureKind.TYPE && addressState != ScalarState.VALUE) malformed()
                 if (addressState != ScalarState.VALUE && addressState != ScalarState.NULL) malformed()
+                if (index.putIfAbsent(id, ids.size) != null) malformed()
                 ids += id; names += name
                 addresses.add(parsedAddress); hasAddress.add(addressState == ScalarState.VALUE)
                 if (labelState != ScalarState.VALUE) malformed()
@@ -682,8 +850,8 @@ internal object WebProgramStructureBuilder {
             val size = ids.size
             return WebStructureTable(kind, ids.toTypedArray(), names.toTypedArray(), addresses.toArray(),
                 hasAddress.toArray(), status.toTypedArray(), offsets.toArray(), IntArray(size) { OWNER_UNOWNED },
-                BooleanArray(size) { ids[it] in implementationUnresolved }, BooleanArray(size) { ids[it] in recoveryUnresolved },
-                calls.toTypedArray(), globals.toTypedArray(), strings.toArray())
+                BooleanArray(size), BooleanArray(size),
+                calls.toTypedArray(), globals.toTypedArray(), strings.toArray(), index)
         }
 
         private class LongColumn(initialCapacity: Int = 16) {
@@ -730,6 +898,7 @@ internal object WebProgramStructureBuilder {
             containers.add(HashSet())
             var tokens = 0
             while (containers.isNotEmpty()) {
+                parseCheckpoint()
                 val next = parser.nextToken() ?: malformed()
                 // Strict Jackson detects a duplicate in nextToken, before the scan's token/byte limits.
                 if (next == JsonToken.FIELD_NAME && !containers.last()!!.add(parser.currentName())) malformed()
@@ -816,6 +985,7 @@ internal object WebProgramStructureBuilder {
             if (parser.nextToken() == JsonToken.END_ARRAY) return noIdentifiers
             budget.charge(24, WebStructureCharge.MODEL_REFERENCE_ARRAYS)
             do {
+                parseCheckpoint()
                 if (parser.currentToken() != JsonToken.VALUE_STRING) malformed()
                 if (values.size >= MAXIMUM_REFERENCES) throw WebStructureFailure("limit-exceeded", "MODEL_REFERENCES_EXCEEDED")
                 if (references >= MAXIMUM_MODEL_REFERENCES) throw WebStructureFailure("limit-exceeded", "MODEL_REFERENCES_EXCEEDED")
@@ -832,6 +1002,7 @@ internal object WebProgramStructureBuilder {
             expect(parser.nextToken(), JsonToken.START_ARRAY)
             var count = 0
             while (parser.nextToken() != JsonToken.END_ARRAY) {
+                parseCheckpoint()
                 if (parser.currentToken() != JsonToken.VALUE_STRING) malformed()
                 count++
             }
@@ -839,6 +1010,17 @@ internal object WebProgramStructureBuilder {
         }
         private fun expect(actual: JsonToken?, expected: JsonToken) { if (actual != expected) malformed() }
         private fun malformed(): Nothing = throw WebStructureFailure("invalid", "MODEL_MALFORMED")
+
+        private companion object { val NONE = emptyArray<String>() }
+    }
+
+    /** Growable primitive column, so the single pass does not box one value per entity. */
+    private class Longs {
+        private var values = LongArray(1024)
+        private var size = 0
+        fun add(value: Long) { if (size == values.size) values = values.copyOf(size * 2); values[size++] = value }
+        operator fun get(index: Int): Long = values[index]
+        fun toArray(): LongArray = values.copyOf(size)
     }
 }
 
@@ -868,10 +1050,17 @@ internal class WebStructureEntityFields(
 internal fun readWebStructureEntity(bytes: ByteArray, offset: Long, maximumStrings: Int = 20,
     policy: WebRedactionPolicy = WebRedactionPolicy.BASELINE): WebStructureEntityFields {
     require(offset in 0 until bytes.size)
+    return java.io.ByteArrayInputStream(bytes, offset.toInt(), bytes.size - offset.toInt()).use {
+        readWebStructureEntity(it, maximumStrings, policy)
+    }
+}
+
+internal fun readWebStructureEntity(input: java.io.InputStream, maximumStrings: Int = 20,
+    policy: WebRedactionPolicy = WebRedactionPolicy.BASELINE): WebStructureEntityFields {
     val texts = LinkedHashMap<String, WebStructureText?>()
     val strings = ArrayList<WebStructureText>()
     var byteEvidence: String? = null
-    WebProgramStructureBuilder.JSON.createParser(bytes, offset.toInt(), bytes.size - offset.toInt()).use { parser ->
+    WebProgramStructureBuilder.JSON.createParser(input).disable(com.fasterxml.jackson.core.JsonParser.Feature.AUTO_CLOSE_SOURCE).use { parser ->
         require(parser.nextToken() == JsonToken.START_OBJECT)
         while (true) {
             val token = parser.nextToken()
@@ -919,7 +1108,10 @@ internal class WebProgramStructureCache(private val capacity: Int = 2,
         manifest: decompengine.repair.StableRegularFile, descriptor: decompengine.repair.StableRegularFile) {
         val manifest = manifest.copy(bytes = manifest.bytes.copyOf())
         val descriptor = descriptor.copy(bytes = descriptor.bytes.copyOf())
-        val retainedBytes: Long
+        /** The admitted index, its captures and every derived value the cache has charged since admission. */
+        var retainedBytes: Long
+            private set
+        internal fun charge(bytes: Long) { retainedBytes = Math.addExact(retainedBytes, bytes) }
         init {
             val reference = index.reference
             require(key.jobId == reference.jobId && key.runId == reference.runId &&
@@ -938,6 +1130,7 @@ internal class WebProgramStructureCache(private val capacity: Int = 2,
         }
     }
     private val entries = LinkedHashMap<Key, Entry>()
+    @Synchronized internal fun retained(): List<WebProgramStructureIndex> = entries.values.map { it.index }
     @Synchronized fun candidates(prefix: Prefix): List<Entry> = entries.values.filter { it.key.prefix == prefix }.asReversed()
     @Synchronized fun peek(key: Key): Entry? = entries[key]
     @Synchronized fun getEntry(key: Key): Entry? = entries[key]
@@ -947,12 +1140,36 @@ internal class WebProgramStructureCache(private val capacity: Int = 2,
         entries.remove(entry.key)
         entries[entry.key] = entry
     }
-    @Synchronized fun put(entry: Entry) {
-        entries.remove(entry.key)
-        if (entry.retainedBytes > maximumEntryBytes || entry.retainedBytes > maximumRetainedBytes) return
-        entries[entry.key] = entry
-        while (entries.size > capacity || entries.values.sumOf { it.retainedBytes } > maximumRetainedBytes) {
-            entries.remove(entries.keys.first())
+    fun put(entry: Entry) {
+        // The building read derived values before admission; they join the entry charge. Later derived values reach
+        // the cache only through [charge]. The index is not shared before admission, so no charge can interleave here.
+        val derived = entry.index.admitRetention { bytes -> charge(entry, bytes) }
+        synchronized(this) {
+            entries.remove(entry.key)
+            entry.charge(derived)
+            if (entry.retainedBytes > maximumEntryBytes || entry.retainedBytes > maximumRetainedBytes) return
+            entries[entry.key] = entry
+            while (entries.size > capacity || entries.values.sumOf { it.retainedBytes } > maximumRetainedBytes) {
+                entries.remove(entries.keys.first())
+            }
         }
     }
+
+    /**
+     * Charge a derived allocation to a retained entry. It is retained only when the entry stays within the entry
+     * ceiling; other entries are evicted, least recently used first, until the retained ceiling holds again.
+     */
+    @Synchronized private fun charge(entry: Entry, bytes: Long): Boolean {
+        if (entries[entry.key] !== entry || bytes < 0) return false
+        val charged = Math.addExact(entry.retainedBytes, bytes)
+        if (charged > maximumEntryBytes || charged > maximumRetainedBytes) return false
+        entry.charge(bytes)
+        while (entries.values.sumOf { it.retainedBytes } > maximumRetainedBytes) {
+            entries.remove(entries.keys.first { it != entry.key })
+        }
+        return true
+    }
+
+    /** Bytes currently charged to retained entries; for ceiling checks. */
+    @Synchronized internal fun retainedBytes(): Long = entries.values.sumOf { it.retainedBytes }
 }

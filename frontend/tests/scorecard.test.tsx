@@ -1,0 +1,1231 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
+import { beforeEach, expect, it, vi } from 'vitest';
+import type * as ClientModule from '../src/api/client';
+import type { Bootstrap, Run, Runs, ScorecardComparison, StructureScorecard } from '../src/api/generated';
+import { scorecardCopy as copy } from '../src/copy/scorecard';
+import { App } from '../src/app/App';
+import { createBrowserSession } from '../src/session/session';
+import { ApiClientError } from '../src/api/errors';
+import { structureCopy } from '../src/copy/structure';
+import { scorecardLocation, scorecardSearch } from '../src/structure/scorecardQuery';
+import { describesScorecard } from '../src/structure/Scorecard';
+
+const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
+import '../src/structure/contract';
+import { decodeResponse } from '../src/api/decode';
+vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
+const fixture = <T,>(name: string) => (JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as { data: T }).data;
+const bootstrap = fixture<Bootstrap>('bootstrap');
+const comparison = fixture<ScorecardComparison>('scorecard-comparison');
+const incompatible = fixture<ScorecardComparison>('scorecard-comparison-incompatible');
+const selected = comparison.binding;
+type ModuleScore = NonNullable<StructureScorecard['scorecard']>['modules']['items'][number];
+const cursorAt = (version: string, offset: number) => `${version}_${offset}_${'c'.repeat(32)}`;
+/** The producer's page for a request: the rows from the requested cursor's offset, continuing only after a full page. */
+function paged<T>(path: string, version: string, rows: readonly T[]) {
+  const values = new URLSearchParams(path.split('?')[1]);
+  const limit = Number(values.get('limit') ?? 50), cursor = values.get('cursor');
+  const start = cursor ? Number(cursor.split('_')[1]) : 0;
+  return { total: rows.length, items: rows.slice(start, start + limit),
+    page: { limit, snapshotVersion: version, nextCursor: start + limit < rows.length ? cursorAt(version, start + limit) : null } };
+}
+// The scorecard shown beside a comparison is that comparison's current side: the same records, scope, reconciliation,
+// measures and module scores. The structure fixture supplies the definition, labels and source fields.
+const recorded = fixture<StructureScorecard>('structure-scorecard');
+const moduleScore = (moduleId: string, measure: ModuleScore['metric'] | Omit<ModuleScore['metric'], 'id' | 'unit' | 'recomputed' | 'source'>): ModuleScore => ({
+  ...recorded.scorecard!.modules.items[0]!, moduleId, selector: moduleId,
+  metric: { ...recorded.scorecard!.modules.items[0]!.metric, ...measure, recomputed: measure.value } });
+const moduleRows = comparison.modules.items.map(item => moduleScore(item.moduleId, item.current!));
+const card: StructureScorecard = { ...recorded, binding: selected, sourceSha256: comparison.current.sourceSha256,
+  manifestSha256: comparison.current.manifestSha256, model: comparison.current.model, plan: comparison.current.plan,
+  confidence: comparison.current.confidence, scorecard: { ...recorded.scorecard!, scope: comparison.current.scope!,
+    reconciliation: comparison.current.reconciliation,
+    metrics: recorded.scorecard!.metrics.map(metric => ({ ...metric, ...comparison.metrics.find(item => item.id === metric.id)!.current,
+      recomputed: null })),
+    modules: paged('', recorded.structureVersion, moduleRows) } };
+// A second page follows the first 50 modules.
+const manyRows = [...moduleRows, ...Array.from({ length: 49 }, (_, index) => moduleScore(`module_${index + 3}`, moduleRows[0]!.metric))];
+/**
+ * The producer's order of the same modules, given in identity order: reversed for module/desc; for a score sort, measured
+ * scores ascending with ties in identity order, reversed for desc (so ties then fall in reverse identity order), and
+ * unmeasured rows last in identity order.
+ */
+function sortModules(rows: readonly ModuleScore[], sort: 'module' | 'score', order: 'asc' | 'desc'): readonly ModuleScore[] {
+  if (sort === 'module') return order === 'asc' ? rows : [...rows].reverse();
+  const score = (row: ModuleScore) => row.metric.state === 'measured' && row.metric.value !== null ? Number(row.metric.value) : null;
+  const measured = rows.filter(row => score(row) !== null).sort((a, b) => score(a)! - score(b)!);
+  return [...order === 'asc' ? measured : measured.reverse(), ...rows.filter(row => score(row) === null)];
+}
+// The server echoes the requested ordering and returns that ordering's page of the same modules. With the fixture's tied
+// scores, a descending ordering leads with a different module than identity order, so a stale ordering shows the wrong one.
+const ordered = (path: string, value: StructureScorecard = card, rows: readonly ModuleScore[] = moduleRows): StructureScorecard => {
+  const values = new URLSearchParams(path.split('?')[1]);
+  const query = { sort: (values.get('sort') ?? 'module') as 'module' | 'score', order: (values.get('order') ?? 'asc') as 'asc' | 'desc' };
+  if (!value.scorecard) return { ...value, query };
+  return { ...value, query, scorecard: { ...value.scorecard, modules: paged(path, value.structureVersion, sortModules(rows, query.sort, query.order)) } };
+};
+/** The module named by the first row of the displayed scorecard's module table. */
+const leadingModule = () => within(within(screen.getByRole('table', { name: copy.modulesTitle })).getAllByRole('row')[1]!).getByRole('link').textContent;
+const run = { ...fixture<Run>('run-completed-unaccepted'), jobId: selected.jobId, runId: selected.runId, resultRevisionId: selected.revisionId, acceptance: 'rejected' } as Run;
+const revision = `/nested/jobs/${selected.jobId}/runs/${selected.runId}/revisions/${selected.revisionId}`;
+const api = `/jobs/${selected.jobId}/runs/${selected.runId}/revisions/${selected.revisionId}`;
+const runs: Runs = { jobId: selected.jobId, page: { limit: 50, nextCursor: null, snapshotVersion: 'version_runs' }, items: [run,
+  { ...run, runId: 'run_1', resultRevisionId: 'revision_1', acceptance: 'not-evaluated' },
+  { ...run, runId: 'run_5', resultRevisionId: 'revision_5' }, { ...run, runId: 'run_6', resultRevisionId: null }] };
+beforeEach(() => { transport.get.mockReset(); });
+
+async function session() {
+  const value = createBrowserSession({
+    bootstrap: () => Promise.resolve({ ...bootstrap, basePath: '/nested/', sessionExpiresAt: new Date(Date.now() + 60000).toISOString() }),
+    exchange: vi.fn(), logout: () => Promise.resolve(),
+  }, '/nested');
+  await value.initialize({ kind: 'absent' });
+  return value;
+}
+
+function serve(compare: ScorecardComparison = comparison, rows: readonly ModuleScore[] = moduleRows) {
+  const currentCard = { ...card, scorecard: { ...card.scorecard!,
+    scope: { ...card.scorecard!.scope, modules: rows.length } } };
+  transport.get.mockImplementation((kind, path) => {
+    const result = path.includes('run_5') ? incompatible : compare;
+    return Promise.resolve({ data: kind === 'structureScorecard' ? ordered(path, currentCard, rows) : kind === 'run' ? run : kind === 'runs' ? runs
+      : { ...result, structureVersion: card.structureVersion, current: { ...result.current, structureVersion: card.structureVersion },
+        modules: result === compare ? paged(path, card.structureVersion, compare.modules.items) : result.modules } });
+  });
+}
+
+it('states every measure with its state, recorded value, fraction and source, and never presents unmeasured as zero', async () => {
+  const auth = await session();
+  serve(comparison, manyRows);
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const measures = await screen.findByRole('table', { name: copy.measuresTitle });
+    expect(transport.get).toHaveBeenCalledWith('structureScorecard', `${api}/scorecard?limit=50`, expect.anything());
+    const score = within(measures).getByRole('row', { name: new RegExp(copy.metrics['structural-recovery-score'].replace(/[()]/g, '\\$&')) });
+    expect(within(score).getByText(copy.states.measured)).toBeTruthy();
+    expect(within(score).getByText('1.0000')).toBeTruthy();
+    expect(within(score).getByText('4 of 4')).toBeTruthy();
+    expect(within(score).getByText('confidence report · projectScore')).toBeTruthy();
+    const calibrated = within(measures).getByRole('row', { name: new RegExp(copy.metrics['calibrated-confidence']) });
+    expect(within(calibrated).getByText(`${copy.states.unmeasured}: ${copy.reasons.UNCALIBRATED}`)).toBeTruthy();
+    expect(within(calibrated).queryByText('0')).toBeNull();
+    // Acceptance comes from the attempt record, and no threshold applies to the heuristic.
+    await screen.findByText(copy.acceptanceStates.rejected);
+    expect(screen.getByText(/No validator threshold applies/)).toBeTruthy();
+    const download = screen.getByRole('link', { name: copy.download });
+    expect(download.getAttribute('href'))
+      .toBe(`/nested/api/v1${api}/records/confidence?structureVersion=${card.structureVersion}`);
+    const workbenchUrl = location.href;
+    expect(fireEvent.click(download)).toBe(true);
+    expect(location.href).toBe(workbenchUrl);
+    expect(download.getAttribute('download')).toBe('confidence.json');
+    // The chart is supplementary: an image with a text alternative, followed by the same values in a table.
+    expect(screen.getByRole('img', { name: copy.chartLabel })).toBeTruthy();
+    const modules = screen.getByRole('table', { name: copy.modulesTitle });
+    expect(within(modules).getByRole('link', { name: 'core' }).getAttribute('href')).toBe(`${revision}/modules/core?structureVersion=${card.structureVersion}`);
+    const reconciliation = screen.getByRole('table', { name: copy.reconciliationTitle });
+    expect(within(reconciliation).getByRole('row', { name: new RegExp(copy.reconciliationRows.project) }).textContent).toContain('4');
+    expect(screen.getByText(copy.nonAdditive)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: copy.next }));
+    await waitFor(() => expect(new URLSearchParams(location.search).get('cursor')).toBe(cursorAt(card.structureVersion, 50)));
+  } finally { auth.dispose(); }
+});
+
+it.each(['not-evaluated', 'unavailable', 'wrong job'] as const)('updates attempt acceptance on explicit Refresh after %s', async initial => {
+  const auth = await session();
+  let attemptReads = 0;
+  transport.get.mockImplementation((kind, path) => {
+    if (kind === 'run') {
+      expect(path).toBe(`/jobs/${selected.jobId}/runs/${selected.runId}`);
+      attemptReads++;
+      if (attemptReads === 1 && initial === 'unavailable') return Promise.reject(new ApiClientError('timeout'));
+      if (attemptReads === 1 && initial === 'wrong job') return Promise.resolve({ data: { ...run, jobId: 'f'.repeat(32) } });
+      return Promise.resolve({ data: { ...run, acceptance: attemptReads === 1 ? 'not-evaluated' : 'accepted' } });
+    }
+    return Promise.resolve({ data: kind === 'structureScorecard' ? card : runs });
+  });
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('table', { name: copy.measuresTitle });
+    await screen.findByText(initial === 'not-evaluated' ? copy.acceptanceStates['not-evaluated'] : copy.acceptanceUnavailable);
+    fireEvent.click(screen.getByRole('button', { name: structureCopy.refresh }));
+    await screen.findByText(copy.acceptanceStates.accepted);
+    expect(attemptReads).toBe(2);
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard')).toHaveLength(2);
+  } finally { auth.dispose(); }
+});
+
+it('keeps focused Refresh available to the keyboard and ignores activation while a read is pending', async () => {
+  const auth = await session();
+  serve();
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('table', { name: copy.measuresTitle });
+    const refresh = screen.getByRole<HTMLButtonElement>('button', { name: structureCopy.refresh });
+    let finish!: (result: { data: StructureScorecard }) => void;
+    const pending = new Promise<{ data: StructureScorecard }>(resolve => { finish = resolve; });
+    transport.get.mockImplementation(kind => kind === 'structureScorecard'
+      ? pending : Promise.resolve({ data: kind === 'run' ? run : runs }));
+    refresh.focus();
+    refresh.click();
+    await screen.findByText(structureCopy.loading);
+    expect(refresh.disabled).toBe(false);
+    expect(refresh.getAttribute('aria-disabled')).toBe('true');
+    expect(document.activeElement).toBe(refresh);
+    refresh.click();
+    finish({ data: card });
+    await screen.findByRole('table', { name: copy.measuresTitle });
+    expect(document.activeElement).toBe(refresh);
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard')).toHaveLength(2);
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'run')).toHaveLength(2);
+  } finally { auth.dispose(); }
+});
+
+it('compares only compatible attempts with exact deltas and withholds deltas for an incompatible baseline', async () => {
+  const auth = await session();
+  serve();
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const select = await screen.findByRole('combobox', { name: copy.baseline });
+    // The attempt itself and attempts without a result revision are not offered as baselines.
+    expect(within(select).getAllByRole('option').map(option => option.getAttribute('value'))).toEqual(['', 'run_1/revision_1', 'run_5/revision_5']);
+    fireEvent.change(select, { target: { value: 'run_1/revision_1' } });
+    fireEvent.click(screen.getByRole('button', { name: copy.compare }));
+    await waitFor(() => expect(location.search).toBe('?baselineRunId=run_1&baselineRevisionId=revision_1'));
+    await screen.findByText(copy.compatibility.compatible);
+    expect(transport.get).toHaveBeenCalledWith('scorecardComparison',
+      `${api}/scorecard-comparison?baselineRunId=run_1&baselineRevisionId=revision_1&limit=50&structureVersion=${card.structureVersion}`, expect.anything());
+    const measures = screen.getAllByRole('table', { name: copy.measuresTitle })[1]!;
+    const score = within(measures).getByRole('row', { name: new RegExp(copy.metrics['structural-recovery-score'].replace(/[()]/g, '\\$&')) });
+    expect(score.textContent).toContain('0.3500 (numerator 1.4, denominator 0)');
+    const calibrated = within(measures).getByRole('row', { name: new RegExp(copy.metrics['calibrated-confidence']) });
+    expect(calibrated.textContent).toContain(`${copy.deltaStates['not-comparable']}: CURRENT_UNMEASURED`);
+    const modules = screen.getByRole('table', { name: copy.moduleComparisonTitle });
+    expect(within(modules).getByRole('link', { name: 'core' }).getAttribute('href'))
+      .toBe(`${revision}/modules/core?structureVersion=${card.structureVersion}`);
+
+    fireEvent.change(screen.getByRole('combobox', { name: copy.baseline }), { target: { value: 'run_5/revision_5' } });
+    fireEvent.click(screen.getByRole('button', { name: copy.compare }));
+    await screen.findByText(copy.compatibility.incompatible);
+    const checks = screen.getByRole('table', { name: copy.checksTitle });
+    expect(within(checks).getByRole('row', { name: new RegExp(copy.checks['model-schema']) }).textContent).toContain(copy.checkStates.differs);
+    const withheld = screen.getAllByRole('table', { name: copy.measuresTitle })[1]!;
+    expect(within(withheld).getAllByText(`${copy.deltaStates.withheld}: INCOMPATIBLE_BASELINE`).length).toBe(incompatible.metrics.length);
+    fireEvent.click(screen.getByRole('button', { name: copy.clearComparison }));
+    await waitFor(() => expect(location.search).toBe(''));
+  } finally { auth.dispose(); }
+});
+
+it('synchronizes the baseline selector on Back and Forward without discarding unsubmitted selections', async () => {
+  const auth = await session();
+  serve();
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const select = await screen.findByRole('combobox', { name: copy.baseline });
+    fireEvent.change(select, { target: { value: 'run_1/revision_1' } });
+    fireEvent.click(screen.getByRole('button', { name: copy.compare }));
+    await screen.findByText(copy.compatibility.compatible);
+    fireEvent.change(select, { target: { value: 'run_5/revision_5' } });
+    // A local choice is not submitted until Compare, even if another read rerenders the view.
+    await waitFor(() => expect(select).toHaveProperty('value', 'run_5/revision_5'));
+    expect(new URLSearchParams(location.search).get('baselineRunId')).toBe('run_1');
+    fireEvent.click(screen.getByRole('button', { name: copy.compare }));
+    await screen.findByText(copy.compatibility.incompatible);
+    history.back();
+    await waitFor(() => expect(new URLSearchParams(location.search).get('baselineRunId')).toBe('run_1'));
+    await screen.findByText(copy.compatibility.compatible);
+    await waitFor(() => expect(select).toHaveProperty('value', 'run_1/revision_1'));
+    history.forward();
+    await screen.findByText(copy.compatibility.incompatible);
+    await waitFor(() => expect(select).toHaveProperty('value', 'run_5/revision_5'));
+    fireEvent.click(screen.getByRole('button', { name: copy.clearComparison }));
+    await waitFor(() => expect(select).toHaveProperty('value', ''));
+    history.back();
+    await screen.findByText(copy.compatibility.incompatible);
+    await waitFor(() => expect(select).toHaveProperty('value', 'run_5/revision_5'));
+  } finally { auth.dispose(); }
+});
+
+it('lists older attempts on request instead of treating the newest page as every baseline', async () => {
+  const auth = await session();
+  const cursor = `${'a'.repeat(64)}_50_${'b'.repeat(32)}`;
+  const newest: Runs = { ...runs, page: { ...runs.page, nextCursor: cursor }, items: [run, { ...run, runId: 'run_6', resultRevisionId: null }] };
+  const older: Runs = { ...runs, items: [{ ...run, runId: 'run_1', resultRevisionId: 'revision_1' }] };
+  transport.get.mockImplementation((kind, path) => Promise.resolve({ data: kind === 'structureScorecard' ? card : kind === 'run' ? run
+    : kind === 'runs' ? (path.includes('cursor=') ? older : newest) : comparison }));
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    fireEvent.click(await screen.findByRole('button', { name: copy.showOlderAttempts }));
+    expect(screen.queryByText(copy.noBaselines)).toBeNull();
+    const select = await screen.findByRole('combobox', { name: copy.baseline });
+    expect(transport.get).toHaveBeenCalledWith('runs', `/jobs/${selected.jobId}/runs?limit=50&cursor=${cursor}`, expect.anything());
+    expect(within(select).getAllByRole('option').map(option => option.getAttribute('value'))).toEqual(['', 'run_1/revision_1']);
+    expect(screen.queryByRole('button', { name: copy.showOlderAttempts })).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+it('retains a bookmarked older baseline across reload, paginated listing and Back/Forward', async () => {
+  const auth = await session();
+  const cursor = `${'a'.repeat(64)}_50_${'b'.repeat(32)}`;
+  const newest: Runs = { ...runs, items: [run, ...Array.from({ length: 49 }, (_, index) => ({
+    ...run, runId: `run_recent_${index}`, resultRevisionId: null,
+  }))], page: { ...runs.page, nextCursor: cursor } };
+  const older: Runs = { ...runs, items: runs.items.filter(item => item.runId === 'run_1' || item.runId === 'run_5') };
+  transport.get.mockImplementation((kind, path) => {
+    const result = path.includes('baselineRunId=run_5') ? incompatible : comparison;
+    return Promise.resolve({ data: kind === 'structureScorecard' ? card : kind === 'run' ? run
+      : kind === 'runs' ? (path.includes('cursor=') ? older : newest)
+        : { ...result, structureVersion: card.structureVersion, current: { ...result.current, structureVersion: card.structureVersion } } });
+  });
+  history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
+  const expectBaseline = async (value: string) => {
+    const select = await screen.findByRole('combobox', { name: copy.baseline });
+    await waitFor(() => expect(select).toHaveProperty('value', value), { timeout: 1000 });
+    const [runId, revisionId] = value.split('/');
+    const option = within(select).getByRole('option', { name: `${runId} (revision ${revisionId})` });
+    expect(option).toHaveProperty('selected', true);
+    expect(within(select).getAllByRole('option').filter(item => item.getAttribute('value') === value)).toHaveLength(1);
+    return select;
+  };
+  try {
+    let view = render(<App basePath="/nested" session={auth} />);
+    await screen.findByText(copy.compatibility.compatible);
+    await expectBaseline('run_1/revision_1');
+    // Reload the bookmark before fetching the older page: the URL identity must still have an option.
+    view.unmount();
+    view = render(<App basePath="/nested" session={auth} />);
+    await screen.findByText(copy.compatibility.compatible);
+    await expectBaseline('run_1/revision_1');
+    // Search-only navigation to a different unloaded baseline and browser Back/Forward do not remount.
+    history.pushState(null, '', `${revision}/scorecard?baselineRunId=run_5&baselineRevisionId=revision_5`);
+    dispatchEvent(new PopStateEvent('popstate'));
+    await screen.findByText(copy.compatibility.incompatible);
+    await expectBaseline('run_5/revision_5');
+    history.back();
+    await screen.findByText(copy.compatibility.compatible);
+    await expectBaseline('run_1/revision_1');
+    history.forward();
+    await screen.findByText(copy.compatibility.incompatible);
+    await expectBaseline('run_5/revision_5');
+    fireEvent.click(screen.getByRole('button', { name: copy.showOlderAttempts }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: copy.showOlderAttempts })).toBeNull());
+    const select = await expectBaseline('run_5/revision_5');
+    expect(within(select).getAllByRole('option').map(option => option.getAttribute('value')))
+      .toEqual(['', 'run_1/revision_1', 'run_5/revision_5']);
+    fireEvent.change(select, { target: { value: 'run_1/revision_1' } });
+    fireEvent.click(screen.getByRole('button', { name: copy.compare }));
+    await screen.findByText(copy.compatibility.compatible);
+    await expectBaseline('run_1/revision_1');
+    view.unmount();
+  } finally { auth.dispose(); }
+});
+
+it('keeps inventory navigation after a changed pinned scorecard and refreshes to current records', async () => {
+  const auth = await session();
+  transport.get.mockImplementation((kind, path) => kind === 'structureScorecard' && path.includes('structureVersion=')
+    ? Promise.reject(new ApiClientError('http_error', { status: 409, serverCode: 'STRUCTURE_CHANGED' }))
+    : Promise.resolve({ data: kind === 'structureScorecard' ? ordered(path) : kind === 'run' ? run : kind === 'runs' ? runs : comparison }));
+  history.replaceState(null, '', `${revision}/scorecard?sort=score&structureVersion=${'8'.repeat(64)}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect((await screen.findByRole('alert')).textContent).toContain(structureCopy.expired);
+    expect(screen.getByRole('link', { name: structureCopy.browseFunctions }).getAttribute('href')).toBe(`${revision}/functions`);
+    expect(screen.getByRole('link', { name: structureCopy.browseModules }).getAttribute('href')).toBe(`${revision}/modules`);
+    fireEvent.click(screen.getByRole('button', { name: structureCopy.refresh }));
+    await screen.findByRole('table', { name: copy.measuresTitle });
+    expect(location.search).toBe('?sort=score');
+  } finally { auth.dispose(); }
+});
+
+it.each(['response-generation', 'current-generation', 'server-changed'])('requires explicit refresh when a comparison finds changed records (%s)', async failure => {
+  const auth = await session();
+  let refreshed = false;
+  const latest = { ...card, structureVersion: comparison.structureVersion };
+  transport.get.mockImplementation((kind) => {
+    if (kind === 'scorecardComparison' && !refreshed) {
+      if (failure === 'server-changed') return Promise.reject(new ApiClientError('http_error', { status: 409, serverCode: 'STRUCTURE_CHANGED' }));
+      return Promise.resolve({ data: failure === 'current-generation' ? { ...comparison, structureVersion: card.structureVersion } : comparison });
+    }
+    return Promise.resolve({ data: kind === 'structureScorecard' ? (refreshed ? latest : card)
+      : kind === 'run' ? run : kind === 'runs' ? runs : comparison });
+  });
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const select = await screen.findByRole('combobox', { name: copy.baseline });
+    fireEvent.change(select, { target: { value: 'run_1/revision_1' } });
+    fireEvent.click(screen.getByRole('button', { name: copy.compare }));
+    expect((await screen.findByRole('alert')).textContent).toContain(structureCopy.expired);
+    expect(screen.queryByText(copy.compatibility.compatible)).toBeNull();
+    expect(screen.getAllByRole('table', { name: copy.measuresTitle })).toHaveLength(1);
+    expect(screen.getByRole('link', { name: copy.download }).getAttribute('href')).toContain(card.structureVersion);
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard')).toHaveLength(1);
+    expect(transport.get).toHaveBeenCalledWith('scorecardComparison',
+      `${api}/scorecard-comparison?baselineRunId=run_1&baselineRevisionId=revision_1&limit=50&structureVersion=${card.structureVersion}`, expect.anything());
+    refreshed = true;
+    fireEvent.click(screen.getByRole('button', { name: structureCopy.refresh }));
+    await screen.findByText(copy.compatibility.compatible);
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard')).toHaveLength(2);
+    expect(transport.get).toHaveBeenCalledWith('scorecardComparison',
+      `${api}/scorecard-comparison?baselineRunId=run_1&baselineRevisionId=revision_1&limit=50&structureVersion=${latest.structureVersion}`, expect.anything());
+    expect(screen.getByRole('link', { name: copy.download }).getAttribute('href')).toContain(latest.structureVersion);
+  } finally { auth.dispose(); }
+});
+
+it.each([
+  { pagedCard: false, expired: false },
+  { pagedCard: false, expired: true },
+  { pagedCard: true, expired: false },
+  { pagedCard: true, expired: true },
+])('refreshes both first pages after comparison pagination (paged card: $pagedCard, expired: $expired)', async ({ pagedCard, expired }) => {
+  const auth = await session();
+  const latestVersion = 'e'.repeat(64);
+  const oldCursor = `${card.structureVersion}_1_${'b'.repeat(32)}`;
+  let cardReads = 0;
+  let changed = expired;
+  transport.get.mockImplementation((kind, path) => {
+    if (kind === 'structureScorecard') return Promise.resolve({ data: ordered(path, {
+      ...card, structureVersion: ++cardReads === 1 ? card.structureVersion : latestVersion,
+    }) });
+    if (kind === 'scorecardComparison') {
+      const values = new URLSearchParams(path.split('?')[1]);
+      if (changed && values.has('cursor')) return Promise.reject(new ApiClientError('http_error', { status: 410, serverCode: 'CURSOR_EXPIRED' }));
+      const version = changed ? latestVersion : card.structureVersion;
+      return Promise.resolve({ data: { ...comparison, structureVersion: version, current: { ...comparison.current, structureVersion: version },
+        modules: paged(path, version, comparison.modules.items) } });
+    }
+    return Promise.resolve({ data: kind === 'run' ? run : runs });
+  });
+  const paging = pagedCard ? `&cursor=${oldCursor}&structureVersion=${card.structureVersion}` : '';
+  history.replaceState(null, '', `${revision}/scorecard?sort=score&order=desc&baselineRunId=run_1&baselineRevisionId=revision_1&compareCursor=${oldCursor}${paging}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    if (expired) expect((await screen.findByRole('alert')).textContent).toContain(structureCopy.expired);
+    else await screen.findByText(copy.compatibility.compatible);
+    changed = true;
+    fireEvent.click(screen.getByRole('button', { name: structureCopy.refresh }));
+    await waitFor(() => expect(new URLSearchParams(location.search).has('compareCursor')).toBe(false), { timeout: 1000 });
+    await waitFor(() => expect(cardReads).toBe(2));
+    await screen.findByText(copy.compatibility.compatible);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(location.search).toBe('?sort=score&order=desc&baselineRunId=run_1&baselineRevisionId=revision_1');
+    expect(screen.getByRole('combobox', { name: copy.baseline })).toHaveProperty('value', 'run_1/revision_1');
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard').at(-1)?.[1])
+      .toBe(`${api}/scorecard?limit=50&sort=score&order=desc`);
+    const comparisonCalls = transport.get.mock.calls.filter(([kind]) => kind === 'scorecardComparison');
+    expect(comparisonCalls).toHaveLength(2);
+    expect(comparisonCalls[0]?.[1]).toContain(`cursor=${oldCursor}`);
+    expect(comparisonCalls[1]?.[1])
+      .toBe(`${api}/scorecard-comparison?baselineRunId=run_1&baselineRevisionId=revision_1&limit=50&structureVersion=${latestVersion}`);
+    expect(screen.getByRole('link', { name: copy.download }).getAttribute('href')).toContain(latestVersion);
+  } finally { auth.dispose(); }
+});
+
+it.each(['?sort=value', '?baselineRunId=run_1', '?compareCursor=x', '?unknown=1', '?sort=score&sort=module'])(
+  'recovers malformed scorecard locations inside the structure view (%s)', async search => {
+    const auth = await session();
+    history.replaceState(null, '', `${revision}/scorecard${search}`);
+    try {
+      render(<App basePath="/nested" session={auth} />);
+      expect((await screen.findByRole('alert')).textContent).toBe(structureCopy.invalid);
+      expect(screen.getByRole('heading', { name: structureCopy.scorecardTitle })).toBeTruthy();
+      expect(screen.getByRole('link', { name: structureCopy.returnJobs }).getAttribute('href')).toBe('/nested/');
+      expect(transport.get).not.toHaveBeenCalled();
+    } finally { auth.dispose(); }
+  });
+
+it('keeps scorecard state in a strict URL', () => {
+  const query = scorecardLocation('?sort=score&order=desc&baselineRunId=run_1&baselineRevisionId=revision_1');
+  expect(query).toEqual({ sort: 'score', order: 'desc', baseline: { runId: 'run_1', revisionId: 'revision_1' } });
+  expect(scorecardSearch(query)).toBe('?sort=score&order=desc&baselineRunId=run_1&baselineRevisionId=revision_1');
+  for (const search of ['?sort=value', '?baselineRunId=run_1', '?compareCursor=x', '?unknown=1', '?sort=score&sort=module']) {
+    expect(() => scorecardLocation(search)).toThrow();
+  }
+});
+
+it('restores both module sort controls on Back and Forward', async () => {
+  const auth = await session();
+  serve();
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const sort = await screen.findByRole('combobox', { name: copy.sort });
+    fireEvent.change(sort, { target: { value: 'score' } });
+    fireEvent.change(screen.getByRole('combobox', { name: copy.order }), { target: { value: 'desc' } });
+    fireEvent.click(screen.getByRole('button', { name: copy.applySort }));
+    await waitFor(() => expect(location.search).toBe('?sort=score&order=desc'));
+    await waitFor(() => expect(leadingModule()).toBe('util'));
+    history.back();
+    await waitFor(() => expect(location.search).toBe(''));
+    await waitFor(() => expect(leadingModule()).toBe('core'));
+    await waitFor(() => expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard').at(-1)?.[1]).toBe(`${api}/scorecard?limit=50`));
+    expect({ sort: screen.getByRole<HTMLSelectElement>('combobox', { name: copy.sort }).value,
+      order: screen.getByRole<HTMLSelectElement>('combobox', { name: copy.order }).value }).toEqual({ sort: 'module', order: 'asc' });
+    history.forward();
+    await waitFor(() => expect(location.search).toBe('?sort=score&order=desc'));
+    await waitFor(() => expect(leadingModule()).toBe('util'));
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard').at(-1)?.[1])
+      .toBe(`${api}/scorecard?limit=50&sort=score&order=desc`);
+    expect(screen.getByRole<HTMLSelectElement>('combobox', { name: copy.sort }).value).toBe('score');
+    expect(screen.getByRole<HTMLSelectElement>('combobox', { name: copy.order }).value).toBe('desc');
+  } finally { auth.dispose(); }
+});
+
+/** Holds scorecard reads until released, answering every other read as `serve()` does. */
+function hold() {
+  const initial = transport.get.getMockImplementation()!;
+  let release!: () => void;
+  const wait = new Promise<void>(resolve => { release = resolve; });
+  transport.get.mockImplementation(async (...args) => {
+    if (args[0] === 'structureScorecard') await wait;
+    return initial(...args);
+  });
+  return () => release();
+}
+
+async function heldRefreshKeepsFocus() {
+  const refresh = screen.getByRole<HTMLButtonElement>('button', { name: structureCopy.refresh });
+  const release = hold();
+  transport.get.mockClear();
+  refresh.focus();
+  fireEvent.click(refresh);
+  await screen.findByText(structureCopy.loading);
+  fireEvent.click(refresh);
+  release();
+  await screen.findByRole('table', { name: copy.measuresTitle });
+  await waitFor(() => expect(screen.queryByText(structureCopy.loading)).toBeNull());
+  expect(transport.get.mock.calls.filter(([kind]) => kind === 'structureScorecard')).toHaveLength(1);
+  expect(document.activeElement).toBe(refresh);
+}
+
+it('moves focus to the module heading after a genuine sort move, and no later Refresh moves it again', async () => {
+  const auth = await session();
+  serve();
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    fireEvent.change(await screen.findByRole('combobox', { name: copy.sort }), { target: { value: 'score' } });
+    fireEvent.change(screen.getByRole('combobox', { name: copy.order }), { target: { value: 'desc' } });
+    const apply = screen.getByRole('button', { name: copy.applySort });
+    apply.focus();
+    fireEvent.click(apply);
+    await waitFor(() => expect(leadingModule()).toBe('util'));
+    await waitFor(() => expect(document.activeElement?.textContent).toBe(copy.modulesTitle));
+    await heldRefreshKeepsFocus();
+  } finally { auth.dispose(); }
+});
+
+it('moves focus to the module heading after a page move', async () => {
+  const auth = await session();
+  serve(comparison, manyRows);
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const next = await screen.findByRole('button', { name: copy.next });
+    next.focus();
+    fireEvent.click(next);
+    await waitFor(() => expect(location.search).toContain('cursor='));
+    await waitFor(() => expect(document.activeElement?.textContent).toBe(copy.modulesTitle));
+  } finally { auth.dispose(); }
+});
+
+it.each([false, true])('records no focus move for an unchanged sort, so a later Refresh keeps focus (comparison %s)', async active => {
+  const auth = await session();
+  serve();
+  history.replaceState(null, '', `${revision}/scorecard${active ? '?baselineRunId=run_1&baselineRevisionId=revision_1' : ''}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const apply = await screen.findByRole('button', { name: copy.applySort });
+    if (active) await screen.findByText(copy.compatibility.compatible);
+    const reads = transport.get.mock.calls.length;
+    apply.focus();
+    fireEvent.click(apply);
+    expect(transport.get.mock.calls).toHaveLength(reads);
+    expect(document.activeElement).toBe(apply);
+    await heldRefreshKeepsFocus();
+  } finally { auth.dispose(); }
+});
+
+/** Lets passive effects, which run after paint, settle before focus is inspected. */
+const afterPaint = () => act(async () => {
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+});
+
+/** Records the text of every element that receives focus until stopped. */
+function recordFocus() {
+  const events: string[] = [];
+  const collect = (event: FocusEvent) => events.push((event.target as Element).textContent ?? '');
+  document.addEventListener('focusin', collect);
+  return { events, stop: () => document.removeEventListener('focusin', collect) };
+}
+
+it('abandons a sort focus request when Back interrupts its read, even when Forward returns to the requested sort', async () => {
+  const auth = await session();
+  serve();
+  history.replaceState(null, '', `${revision}/scorecard`);
+  const focus = recordFocus();
+  try {
+    // Two distinct held reads: the interrupted sort read, and the read Forward starts for the same sort.
+    const respond = transport.get.getMockImplementation()!;
+    const held: (() => void)[] = [];
+    transport.get.mockImplementation(async (...args) => {
+      if (args[0] === 'structureScorecard' && args[1].includes('sort=score')) await new Promise<void>(resolve => held.push(resolve));
+      return respond(...args);
+    });
+    render(<App basePath="/nested" session={auth} />);
+    fireEvent.change(await screen.findByRole('combobox', { name: copy.sort }), { target: { value: 'score' } });
+    const apply = screen.getByRole('button', { name: copy.applySort });
+    apply.focus();
+    fireEvent.click(apply);
+    await waitFor(() => expect(held).toHaveLength(1));
+    await screen.findByText(structureCopy.loading);
+    history.back();
+    await waitFor(() => expect(location.search).toBe(''));
+    await screen.findByRole('table', { name: copy.modulesTitle });
+    await act(() => Promise.resolve().then(held[0]));
+    await afterPaint();
+    history.forward();
+    await waitFor(() => expect(held).toHaveLength(2));
+    await screen.findByText(structureCopy.loading);
+    const focusBeforeCompletion = document.activeElement;
+    await act(() => Promise.resolve().then(held[1]));
+    // Tied scores ascending keep identity order, so the settled read is the module table without the loading state.
+    await screen.findByRole('table', { name: copy.modulesTitle });
+    await waitFor(() => expect(screen.queryByText(structureCopy.loading)).toBeNull());
+    await afterPaint();
+    expect({ search: location.search, focusMoved: document.activeElement !== focusBeforeCompletion,
+      headingFocused: focus.events.includes(copy.modulesTitle) })
+      .toEqual({ search: '?sort=score', focusMoved: false, headingFocused: false });
+  } finally {
+    focus.stop();
+    auth.dispose();
+  }
+});
+
+it('leaves focus where it was deliberately moved while a sort read is pending', async () => {
+  const auth = await session();
+  serve();
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    fireEvent.change(await screen.findByRole('combobox', { name: copy.sort }), { target: { value: 'score' } });
+    const release = hold();
+    const apply = screen.getByRole('button', { name: copy.applySort });
+    apply.focus();
+    fireEvent.click(apply);
+    await screen.findByText(structureCopy.loading);
+    const elsewhere = screen.getByRole('link', { name: structureCopy.browseModules });
+    elsewhere.focus();
+    release();
+    await screen.findByRole('table', { name: copy.modulesTitle });
+    await waitFor(() => expect(screen.queryByText(structureCopy.loading)).toBeNull());
+    expect(document.activeElement).toBe(elsewhere);
+  } finally { auth.dispose(); }
+});
+
+const comparisonCursor = `${comparison.structureVersion}_50_${'2'.repeat(32)}`;
+
+/** A decoded 51-module comparison in two pages; every second-page read is held until released, then answers or fails. */
+function servePagedComparison(failSecond = false) {
+  const sample = comparison.modules.items[0]!;
+  const items = Array.from({ length: 51 }, (_, index) => {
+    const id = `module_${String(index + 1).padStart(2, '0')}`;
+    return { ...sample, moduleId: id, selector: id };
+  });
+  const envelope = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/scorecard-comparison.json'), 'utf8')) as object;
+  const sides = structuredClone(comparison);
+  sides.current.scope!.modules = items.length;
+  sides.baseline.scope!.modules = items.length;
+  const currentCard = structuredClone(card);
+  currentCard.scorecard!.scope.modules = items.length;
+  currentCard.structureVersion = sides.structureVersion;
+  const currentRows = items.map(item => moduleScore(item.moduleId, item.current!));
+  const page = (second: boolean) => decodeResponse(JSON.stringify({ ...envelope, data: { ...sides, modules: {
+    total: 51, items: second ? items.slice(50) : items.slice(0, 50),
+    page: { ...comparison.modules.page, nextCursor: second ? null : comparisonCursor },
+  } } }), 'scorecardComparison');
+  const firstPage = page(false), secondPage = page(true);
+  const held: (() => void)[] = [];
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind === 'scorecardComparison') {
+      const second = path.includes('cursor=');
+      if (second) await new Promise<void>(resolve => held.push(resolve));
+      if (second && failSecond) throw new ApiClientError('http_error', { status: 410, serverCode: 'CURSOR_EXPIRED' });
+      return second ? secondPage : firstPage;
+    }
+    return { data: kind === 'structureScorecard' ? ordered(path, currentCard, currentRows)
+      : kind === 'run' ? run : runs };
+  });
+  return held;
+}
+
+const comparisonPages = () => within(screen.getByRole('navigation', { name: copy.moduleComparisonTitle }));
+
+/** Focuses a comparison pager button, activates it and waits for the held page read. */
+async function moveComparisonPage(held: (() => void)[], name: string) {
+  const button = await waitFor(() => comparisonPages().getByRole('button', { name }));
+  const reads = held.length;
+  button.focus();
+  fireEvent.click(button);
+  await waitFor(() => expect(held).toHaveLength(reads + 1));
+  expect(screen.queryByRole('table', { name: copy.moduleComparisonTitle })).toBeNull();
+}
+
+it('returns keyboard focus to the module comparison heading of the requested comparison page', async () => {
+  const auth = await session();
+  const held = servePagedComparison();
+  history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
+  const focus = recordFocus();
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('navigation', { name: copy.moduleComparisonTitle });
+    await moveComparisonPage(held, copy.next);
+    expect(location.search).toContain(`compareCursor=${comparisonCursor}`);
+    await act(() => Promise.resolve().then(held[0]));
+    await screen.findByRole('link', { name: 'module_51' });
+    await afterPaint();
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: copy.moduleComparisonTitle }));
+    // The first page is answered at once; focus returns to the same heading of that page, not the pager.
+    const first = comparisonPages().getByRole('button', { name: copy.first });
+    first.focus();
+    fireEvent.click(first);
+    await within(screen.getByRole('region', { name: copy.compareTitle })).findByRole('link', { name: 'module_01' });
+    await afterPaint();
+    expect({ search: location.search, focused: document.activeElement?.textContent,
+      breakdownFocused: focus.events.includes(copy.modulesTitle) })
+      .toEqual({ search: '?baselineRunId=run_1&baselineRevisionId=revision_1', focused: copy.moduleComparisonTitle, breakdownFocused: false });
+  } finally {
+    focus.stop();
+    auth.dispose();
+  }
+});
+
+it('leaves focus where it was deliberately moved while a comparison page read is pending', async () => {
+  const auth = await session();
+  const held = servePagedComparison();
+  history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await moveComparisonPage(held, copy.next);
+    const elsewhere = screen.getByRole('link', { name: structureCopy.browseModules });
+    elsewhere.focus();
+    await act(() => Promise.resolve().then(held[0]));
+    await screen.findByRole('link', { name: 'module_51' });
+    await afterPaint();
+    expect(document.activeElement).toBe(elsewhere);
+  } finally { auth.dispose(); }
+});
+
+it('abandons a comparison focus request when Back interrupts its read, even when Forward returns to the requested page', async () => {
+  const auth = await session();
+  const held = servePagedComparison();
+  history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
+  const focus = recordFocus();
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await moveComparisonPage(held, copy.next);
+    history.back();
+    await waitFor(() => expect(location.search).not.toContain('compareCursor'));
+    await within(screen.getByRole('region', { name: copy.compareTitle })).findByRole('link', { name: 'module_01' });
+    await act(() => Promise.resolve().then(held[0]));
+    await afterPaint();
+    history.forward();
+    await waitFor(() => expect(held).toHaveLength(2));
+    const focusBeforeCompletion = document.activeElement;
+    await act(() => Promise.resolve().then(held[1]));
+    await screen.findByRole('link', { name: 'module_51' });
+    await afterPaint();
+    expect({ focusMoved: document.activeElement !== focusBeforeCompletion, headingFocused: focus.events.includes(copy.moduleComparisonTitle) })
+      .toEqual({ focusMoved: false, headingFocused: false });
+  } finally {
+    focus.stop();
+    auth.dispose();
+  }
+});
+
+it('moves focus to the comparison heading when the requested comparison page fails', async () => {
+  const auth = await session();
+  const held = servePagedComparison(true);
+  history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await moveComparisonPage(held, copy.next);
+    await act(() => Promise.resolve().then(held[0]));
+    const section = screen.getByRole('region', { name: copy.compareTitle });
+    await within(section).findByRole('alert');
+    await afterPaint();
+    expect(document.activeElement).toBe(within(section).getByRole('heading', { name: copy.compareTitle }));
+  } finally { auth.dispose(); }
+});
+
+it('gives focus to the later sort move, not the comparison page it interrupts', async () => {
+  const auth = await session();
+  const held = servePagedComparison();
+  history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
+  const focus = recordFocus();
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await moveComparisonPage(held, copy.next);
+    fireEvent.change(screen.getByRole('combobox', { name: copy.sort }), { target: { value: 'score' } });
+    const apply = screen.getByRole('button', { name: copy.applySort });
+    apply.focus();
+    fireEvent.click(apply);
+    await waitFor(() => expect(location.search).toContain('sort=score'));
+    // The sorted card remounts the comparison, which rereads the same requested page.
+    await waitFor(() => expect(held).toHaveLength(2));
+    await act(() => Promise.resolve().then(held[1]));
+    await screen.findByRole('link', { name: 'module_51' });
+    await afterPaint();
+    expect({ focused: document.activeElement?.textContent, comparisonFocused: focus.events.includes(copy.moduleComparisonTitle) })
+      .toEqual({ focused: copy.modulesTitle, comparisonFocused: false });
+  } finally {
+    focus.stop();
+    auth.dispose();
+  }
+});
+
+it.each(['jobId', 'runId', 'revisionId'] as const)('refuses a decoded comparison whose current side names another %s', async field => {
+  const auth = await session();
+  const envelope = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/scorecard-comparison.json'), 'utf8')) as { data: ScorecardComparison };
+  envelope.data.current.binding[field] = `${field === 'jobId' ? 'job' : field === 'runId' ? 'run' : 'revision'}_other`;
+  const text = JSON.stringify(envelope);
+  transport.get.mockImplementation((kind, path) => Promise.resolve(kind === 'scorecardComparison' ? decodeResponse(text, 'scorecardComparison')
+    : { data: kind === 'structureScorecard' ? ordered(path, { ...card, structureVersion: comparison.structureVersion }) : kind === 'run' ? run : runs }));
+  history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('alert');
+    expect(screen.queryByText(copy.compatibility.compatible)).toBeNull();
+    expect(screen.queryByRole('table', { name: copy.moduleComparisonTitle })).toBeNull();
+    expect(screen.getAllByRole('table', { name: copy.measuresTitle })).toHaveLength(1);
+  } finally { auth.dispose(); }
+});
+
+it('shows a decoded comparison whose current side names the selected revision', async () => {
+  const auth = await session();
+  const text = readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/scorecard-comparison.json'), 'utf8');
+  transport.get.mockImplementation((kind, path) => Promise.resolve(kind === 'scorecardComparison' ? decodeResponse(text, 'scorecardComparison')
+    : { data: kind === 'structureScorecard' ? ordered(path, { ...card, structureVersion: comparison.structureVersion }) : kind === 'run' ? run : runs }));
+  history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByText(copy.compatibility.compatible);
+  } finally { auth.dispose(); }
+});
+
+it.each([
+  { search: '?sort=score&order=desc', echoed: { sort: 'module', order: 'asc' } },
+  { search: '?sort=score&order=desc', echoed: { sort: 'score', order: 'asc' } },
+  { search: '?sort=score&order=desc', echoed: { sort: 'module', order: 'desc' } },
+  { search: '', echoed: { sort: 'score', order: 'asc' } },
+  { search: '?order=desc', echoed: { sort: 'module', order: 'asc' } },
+])('refuses a decoded scorecard echoing $echoed.sort/$echoed.order for "$search"', async ({ search, echoed }) => {
+  const auth = await session();
+  const envelope = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/structure-scorecard.json'), 'utf8')) as { data: StructureScorecard };
+  envelope.data.binding = selected;
+  envelope.data.query = echoed as StructureScorecard['query'];
+  const text = JSON.stringify(envelope);
+  transport.get.mockImplementation(kind => Promise.resolve(kind === 'structureScorecard' ? decodeResponse(text, 'structureScorecard')
+    : { data: kind === 'run' ? run : runs }));
+  history.replaceState(null, '', `${revision}/scorecard${search}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('alert');
+    expect(screen.queryByRole('table', { name: copy.modulesTitle })).toBeNull();
+    expect(screen.queryByRole('table', { name: copy.measuresTitle })).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+it.each([
+  { search: '', echoed: { sort: 'module', order: 'asc' } },
+  { search: '?sort=score&order=desc', echoed: { sort: 'score', order: 'desc' } },
+  { search: '?order=desc', echoed: { sort: 'module', order: 'desc' } },
+])('shows a decoded scorecard echoing the requested ordering for "$search"', async ({ search, echoed }) => {
+  const auth = await session();
+  const envelope = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/structure-scorecard.json'), 'utf8')) as { data: StructureScorecard };
+  envelope.data.binding = selected;
+  envelope.data.query = echoed as StructureScorecard['query'];
+  // The page the producer returns for the view's limit of 50.
+  envelope.data.scorecard!.modules = card.scorecard!.modules;
+  const text = JSON.stringify(envelope);
+  transport.get.mockImplementation(kind => Promise.resolve(kind === 'structureScorecard' ? decodeResponse(text, 'structureScorecard')
+    : { data: kind === 'run' ? run : runs }));
+  history.replaceState(null, '', `${revision}/scorecard${search}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('table', { name: copy.modulesTitle });
+  } finally { auth.dispose(); }
+});
+
+it('states the recorded unit of every measure, for ratios and counts, in this attempt and in a comparison', async () => {
+  const auth = await session();
+  serve();
+  history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByText(copy.compatibility.compatible);
+    const [measures, compared] = screen.getAllByRole('table', { name: copy.measuresTitle }) as [HTMLElement, HTMLElement];
+    const metricRow = (table: HTMLElement, id: keyof typeof copy.metrics) =>
+      within(table).getByRole('row', { name: new RegExp(`^${copy.metrics[id].replace(/[()]/g, '\\$&')}`) });
+    for (const table of [measures, compared]) {
+      const headers = within(table).getAllByRole('columnheader').map(header => header.textContent);
+      expect(headers[1]).toBe(copy.columns.unit);
+      expect(within(metricRow(table, 'structural-recovery-score')).getByRole('cell', { name: copy.units.ratio })).toBeTruthy();
+      expect(within(metricRow(table, 'generation-completion')).getByRole('cell', { name: copy.units.count })).toBeTruthy();
+    }
+    // The count keeps its recorded numerator and denominator; it has no recorded ratio value.
+    expect(metricRow(measures, 'generation-completion').textContent).toContain('2 of 2');
+    for (const metric of card.scorecard!.metrics) {
+      expect(within(metricRow(measures, metric.id)).getByRole('cell', { name: copy.units[metric.unit] })).toBeTruthy();
+    }
+    for (const metric of comparison.metrics) {
+      expect(within(metricRow(compared, metric.id)).getByRole('cell', { name: copy.units[metric.unit] })).toBeTruthy();
+    }
+  } finally { auth.dispose(); }
+});
+
+/** A 51-module scorecard whose second page read is held until it is answered or failed. */
+function servePagedScorecard() {
+  serve();
+  const loaded = transport.get.getMockImplementation()!;
+  const cursor = `${card.structureVersion}_50_${'2'.repeat(32)}`;
+  const held: { resolve: (value: unknown) => void; reject: (reason: unknown) => void }[] = [];
+  transport.get.mockImplementation(async (...args) => {
+    if (args[0] !== 'structureScorecard') return loaded(...args);
+    if (args[1].includes('cursor=')) return new Promise((resolve, reject) => { held.push({ resolve, reject }); });
+    const first = card.scorecard!;
+    const items = Array.from({ length: 50 }, (_, index) => ({ ...first.modules.items[0]!, moduleId: `module_${index + 1}` }));
+    return { data: { ...card, scorecard: { ...first, modules: { ...first.modules, total: 51, items,
+      page: { ...first.modules.page, nextCursor: cursor } } } } };
+  });
+  return held;
+}
+
+const expired = () => new ApiClientError('http_error', { status: 410, serverCode: 'CURSOR_EXPIRED' });
+
+async function pageScorecard(held: unknown[]) {
+  const next = within(await screen.findByRole('navigation', { name: copy.pages })).getByRole('button', { name: copy.next });
+  next.focus();
+  fireEvent.click(next);
+  await waitFor(() => expect(held).toHaveLength(1));
+}
+
+it('moves keyboard focus to Refresh when the requested module page has expired', async () => {
+  const auth = await session();
+  const held = servePagedScorecard();
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await pageScorecard(held);
+    await act(() => { held[0]!.reject(expired()); });
+    await screen.findByRole('alert');
+    await afterPaint();
+    expect(screen.queryByRole('heading', { name: copy.modulesTitle })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: structureCopy.refresh }));
+  } finally { auth.dispose(); }
+});
+
+it('leaves focus where it was deliberately moved while an expiring module page was pending', async () => {
+  const auth = await session();
+  const held = servePagedScorecard();
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await pageScorecard(held);
+    const elsewhere = screen.getByRole('link', { name: structureCopy.browseModules });
+    elsewhere.focus();
+    await act(() => { held[0]!.reject(expired()); });
+    await screen.findByRole('alert');
+    await afterPaint();
+    expect(document.activeElement).toBe(elsewhere);
+  } finally { auth.dispose(); }
+});
+
+it('abandons the expired page focus request when Back interrupts its read', async () => {
+  const auth = await session();
+  const held = servePagedScorecard();
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await pageScorecard(held);
+    const focus = recordFocus();
+    history.back();
+    await waitFor(() => expect(location.search).toBe(''));
+    await screen.findByRole('heading', { name: copy.modulesTitle });
+    await act(() => { held[0]!.reject(expired()); });
+    await afterPaint();
+    focus.stop();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(focus.events).toEqual([]);
+  } finally { auth.dispose(); }
+});
+
+it('refuses a comparison reply that omits a blocking identity check and moves the baseline to another input', async () => {
+  const auth = await session();
+  serve();
+  const loaded = transport.get.getMockImplementation()!;
+  const envelope = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/scorecard-comparison.json'), 'utf8')) as { data: ScorecardComparison };
+  envelope.data.compatibility.checks = envelope.data.compatibility.checks.filter(item => item.id !== 'input-binary');
+  envelope.data.baseline.scope!.inputSha256 = 'f'.repeat(64);
+  envelope.data.structureVersion = card.structureVersion;
+  envelope.data.current.structureVersion = card.structureVersion;
+  transport.get.mockImplementation(async (...args) => args[0] === 'scorecardComparison'
+    ? decodeResponse(JSON.stringify(envelope), 'scorecardComparison') : loaded(...args));
+  history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const compare = await screen.findByRole('region', { name: copy.compareTitle });
+    await within(compare).findByRole('alert');
+    expect(within(compare).queryByText(copy.compatibility.compatible)).toBeNull();
+    expect(within(compare).queryByRole('table', { name: copy.measuresTitle })).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+/** Serves the decoded producer reply for each comparison read, after `change` edits that reply's envelope. */
+function serveDecoded(change: (data: ScorecardComparison, path: string) => void, scorecard: StructureScorecard = card, rows = moduleRows) {
+  transport.get.mockImplementation((kind, path) => {
+    if (kind !== 'scorecardComparison') return Promise.resolve({ data: kind === 'structureScorecard' ? ordered(path, scorecard, rows) : kind === 'run' ? run : runs });
+    const envelope = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/scorecard-comparison.json'), 'utf8')) as { data: ScorecardComparison };
+    envelope.data.structureVersion = scorecard.structureVersion;
+    envelope.data.current.structureVersion = scorecard.structureVersion;
+    envelope.data.modules.page.snapshotVersion = scorecard.structureVersion;
+    change(envelope.data, path);
+    return Promise.resolve(decodeResponse(JSON.stringify(envelope), 'scorecardComparison'));
+  });
+}
+
+async function comparisonOutcome(search = '?baselineRunId=run_1&baselineRevisionId=revision_1') {
+  const auth = await session();
+  history.replaceState(null, '', `${revision}/scorecard${search}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const compare = await screen.findByRole('region', { name: copy.compareTitle });
+    await waitFor(() => expect(within(compare).queryByText(structureCopy.loading)).toBeNull());
+    await waitFor(() => expect(within(compare).queryByRole('alert') ?? within(compare).queryByText(copy.compatibility.compatible)
+      ?? within(compare).queryByText(copy.compatibility.unavailable)).not.toBeNull());
+    return { refused: within(compare).queryByRole('alert') !== null, shown: within(compare).queryByRole('table', { name: copy.checksTitle }) !== null,
+      modules: within(compare).queryByRole('table', { name: copy.moduleComparisonTitle }) !== null };
+  } finally { auth.dispose(); }
+}
+
+it('shows a decoded comparison whose current side is the scorecard displayed with it', async () => {
+  serveDecoded(() => undefined);
+  expect(await comparisonOutcome()).toEqual({ refused: false, shown: true, modules: true });
+  expect(transport.get.mock.calls.filter(([kind]) => kind === 'scorecardComparison')).toHaveLength(1);
+});
+
+it.each<[string, (data: ScorecardComparison) => void]>([
+  // The R6 reproductions: another confidence digest, and an internally consistent but different current measure.
+  ['names another current confidence digest', data => { data.current.confidence.sha256 = 'f'.repeat(64); }],
+  ['states another current structural recovery score with a matching delta', data => {
+    const metric = data.metrics.find(item => item.id === 'structural-recovery-score')!;
+    metric.current = { ...metric.current, value: '0.9000', numerator: '3.6' };
+    metric.delta = { ...metric.delta, value: '0.2500', numerator: '1.0' };
+  }],
+  ['names another current model record', data => { data.current.model.sizeBytes = '1'; }],
+  ['claims a matching interpretation that differs from the displayed scorecard', data => {
+    const check = data.compatibility.checks.find(item => item.id === 'score-interpretation')!;
+    check.current = check.baseline = 'structural-recovery/v2/uncalibrated';
+  }],
+  ['claims a matching formula that differs from the displayed scorecard', data => {
+    const check = data.compatibility.checks.find(item => item.id === 'score-formula')!;
+    check.current = check.baseline = 'other-formula';
+  }],
+  ['names another current plan digest', data => { data.current.plan.sha256 = 'f'.repeat(64); }],
+  ['names another current manifest', data => { data.current.manifestSha256 = 'f'.repeat(64); }],
+  ['states another current reconciliation', data => { data.current.reconciliation!.reconciles = false; }],
+  ['states a different current score for a module shown on this page', data => {
+    const core = data.modules.items[0]!;
+    core.current = { ...core.current!, value: '0.9000', numerator: '1.8' };
+    core.delta = { ...core.delta, value: '0.1000', numerator: '0.2' };
+  }],
+  ['omits the current score of a module shown on this page', data => {
+    const util = data.modules.items[1]!;
+    Object.assign(util, { presence: 'baseline-only', current: null,
+      delta: { state: 'not-comparable', reason: 'MODULE_NOT_IN_BOTH_PLANS', value: null, numerator: null, denominator: null } });
+  }],
+  ['pairs fewer modules than the current scorecard records', data => {
+    data.modules.items = data.modules.items.slice(0, 1); data.modules.total = 1;
+  }],
+  // The R6 reproduction for the echoed page limit.
+  ['echoes a page limit the view did not request', data => { data.modules.page.limit = 200; }],
+])('refuses a decoded comparison that %s', async (_, change) => {
+  serveDecoded(change);
+  expect(await comparisonOutcome()).toEqual({ refused: true, shown: false, modules: false });
+});
+
+it('checks the comparison against the scorecard page of each ordering', async () => {
+  // A comparison of three modules in both plans; the score/desc page lists them in another order.
+  const extra = moduleScore('zeta', comparison.modules.items[0]!.current!);
+  const threeModules = structuredClone(card);
+  threeModules.scorecard!.scope.modules = 3;
+  serveDecoded(data => {
+    data.modules.items.push({ ...data.modules.items[0]!, moduleId: 'zeta', selector: 'zeta' });
+    data.modules.total = 3;
+    data.current.scope!.modules = 3;
+    data.baseline.scope!.modules = 3;
+  }, threeModules, [...moduleRows, extra]);
+  const auth = await session();
+  history.replaceState(null, '', `${revision}/scorecard?baselineRunId=run_1&baselineRevisionId=revision_1`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByText(copy.compatibility.compatible);
+    fireEvent.change(screen.getByRole('combobox', { name: copy.sort }), { target: { value: 'score' } });
+    fireEvent.change(screen.getByRole('combobox', { name: copy.order }), { target: { value: 'desc' } });
+    fireEvent.click(screen.getByRole('button', { name: copy.applySort }));
+    await waitFor(() => expect(location.search).toContain('sort=score'));
+    await waitFor(() => expect(leadingModule()).toBe('zeta'));
+    await screen.findByText(copy.compatibility.compatible);
+    // The comparison remounts with the scorecard's read, as before; checking it adds no read of its own.
+    expect(transport.get.mock.calls.filter(([kind]) => kind === 'scorecardComparison')).toHaveLength(2);
+  } finally { auth.dispose(); }
+});
+
+it('compares an unrecorded current confidence report only as unavailable', async () => {
+  const unrecorded = { state: 'not-recorded', stateReason: 'CONFIDENCE_NOT_RECORDED', path: null, sha256: null, sizeBytes: null, schemaVersion: null } as const;
+  // The producer's reply when the current revision has no confidence report: no scope, measures, modules or deltas.
+  const withoutReport = (data: ScorecardComparison) => {
+    data.compatibility.state = 'unavailable';
+    Object.assign(data.current, { confidence: unrecorded, scope: null, reconciliation: null });
+    for (const check of data.compatibility.checks) {
+      if (['confidence-schema', 'score-interpretation', 'score-formula'].includes(check.id)) Object.assign(check, { current: null, state: 'not-recorded' });
+    }
+    data.metrics = [];
+    data.modules = { total: 0, items: [], page: { ...data.modules.page, nextCursor: null } };
+  };
+  serveDecoded(withoutReport, { ...card, confidence: unrecorded, scorecard: null });
+  expect(await comparisonOutcome()).toEqual({ refused: false, shown: true, modules: false });
+  expect(screen.getByText(copy.compatibility.unavailable)).toBeTruthy();
+  // The same reply is refused beside a scorecard that has its report.
+  cleanup();
+  serveDecoded(withoutReport);
+  expect(await comparisonOutcome()).toEqual({ refused: true, shown: false, modules: false });
+});
+
+it.each(['compatible', 'incompatible'] as const)('refuses an available %s comparison that pairs none of the displayed measures', async state => {
+  expect(card.scorecard!.metrics.length).toBeGreaterThan(0);
+  serveDecoded(data => { data.compatibility.state = state; data.metrics = []; });
+  expect(await comparisonOutcome()).toEqual({ refused: true, shown: false, modules: false });
+  // The producer's compatible reply, pairing every displayed measure, is shown.
+  if (state === 'compatible') {
+    cleanup();
+    serveDecoded(() => undefined);
+    expect((await comparisonOutcome()).refused).toBe(false);
+  }
+});
+
+it('refuses a comparison with one side unavailable that still pairs measures', async () => {
+  serveDecoded(data => { data.compatibility.state = 'unavailable'; });
+  expect((await comparisonOutcome()).refused).toBe(true);
+});
+
+it.each<[string, string, (data: ScorecardComparison, path: string) => void]>([
+  ['the R6 reproduction: a total with no rows', '', data => { data.modules.items = []; data.modules.total = 4167; }],
+  ['a final page at another offset', `&compareCursor=${cursorAt(comparison.structureVersion, 50)}`, data => {
+    data.modules.total = 51;
+    data.modules.items = data.modules.items.slice(0, 1).map(item => ({ ...item, moduleId: 'module_50', selector: 'module_50' }));
+  }],
+  ['a final page with fewer rows than remain after the requested offset', `&compareCursor=${cursorAt(comparison.structureVersion, 50)}`, data => {
+    data.modules.total = 52;
+    data.modules.items = data.modules.items.slice(0, 1).map(item => ({ ...item, moduleId: 'module_50', selector: 'module_50' }));
+  }],
+  ['a continuation that skips a page', '', data => {
+    const sample = data.modules.items[0]!;
+    data.modules.items = [...data.modules.items, ...Array.from({ length: 48 }, (_, index) => ({ ...sample, moduleId: `module_${index}`, selector: `module_${index}` }))];
+    data.modules.total = 200;
+    data.modules.page.nextCursor = cursorAt(data.structureVersion, 100);
+  }],
+])('refuses a comparison module page with %s', async (_, cursor, change) => {
+  serveDecoded(change);
+  const outcome = await comparisonOutcome(`?baselineRunId=run_1&baselineRevisionId=revision_1${cursor}`);
+  expect(outcome).toEqual({ refused: true, shown: false, modules: false });
+  // Opening the first-page URL again loads its rows.
+  if (cursor) {
+    cleanup();
+    serveDecoded(() => undefined);
+    expect(await comparisonOutcome()).toEqual({ refused: false, shown: true, modules: true });
+  }
+});
+
+/** The fixture's union of three modules: core in both plans, zeta in the current plan only and gone in the baseline only. */
+const unseenCurrentModule = (data: ScorecardComparison) => {
+  const [core] = data.modules.items;
+  data.modules.total = 3;
+  data.modules.items = [core!, { ...core!, moduleId: 'zeta', selector: 'zeta', presence: 'current-only', baseline: null,
+    delta: { state: 'not-comparable', reason: 'MODULE_NOT_IN_BOTH_PLANS', value: null, numerator: null, denominator: null } },
+  { ...core!, moduleId: 'gone', selector: 'gone', presence: 'baseline-only', current: null,
+    delta: { state: 'not-comparable', reason: 'MODULE_NOT_IN_BOTH_PLANS', value: null, numerator: null, denominator: null } }];
+};
+
+it('refuses a comparison measuring a current module that the complete current scorecard does not list', async () => {
+  // The memberships fit both plan counts, but the displayed scorecard lists all its modules, and zeta is not one of them.
+  serveDecoded(unseenCurrentModule);
+  expect(await comparisonOutcome()).toEqual({ refused: true, shown: false, modules: false });
+  // Beside a scorecard page that does not list every module, an unlisted current module cannot be checked.
+  const decoded = decodeResponse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/scorecard-comparison.json'), 'utf8'), 'scorecardComparison').data;
+  const shown = structuredClone(decoded);
+  unseenCurrentModule(shown);
+  const pagedCard = structuredClone(card);
+  pagedCard.structureVersion = decoded.structureVersion;
+  pagedCard.scorecard!.modules = { ...pagedCard.scorecard!.modules, items: pagedCard.scorecard!.modules.items.slice(0, 1),
+    page: { ...pagedCard.scorecard!.modules.page, limit: 1, nextCursor: cursorAt(decoded.structureVersion, 1) } };
+  const completeCard = { ...pagedCard, scorecard: { ...pagedCard.scorecard!, modules: card.scorecard!.modules } };
+  expect(describesScorecard(decoded, completeCard)).toBe(true);
+  expect(describesScorecard(shown, completeCard)).toBe(false);
+  expect(describesScorecard(shown, pagedCard)).toBe(true);
+});
+
+it('admits the final comparison page at the requested offset', async () => {
+  // The current plan's two modules are both baseline modules too, so a 51st module is in the baseline plan only.
+  const sample = comparison.modules.items[0]!;
+  serveDecoded(data => {
+    data.baseline.scope!.modules = 51;
+    data.modules.total = 51;
+    data.modules.items = [{ ...sample, moduleId: 'module_50', selector: 'module_50', presence: 'baseline-only', current: null,
+      delta: { state: 'not-comparable', reason: 'MODULE_NOT_IN_BOTH_PLANS', value: null, numerator: null, denominator: null } }];
+  });
+  expect(await comparisonOutcome(`?baselineRunId=run_1&baselineRevisionId=revision_1&compareCursor=${cursorAt(card.structureVersion, 50)}`))
+    .toEqual({ refused: false, shown: true, modules: true });
+  expect(screen.getByText('Showing 51–51 of 51 modules in either plan.')).toBeTruthy();
+});
+
+it.each([0, 4167])('checks an empty comparison page against a baseline with %i modules', async baselineModules => {
+  const emptyCard = structuredClone(card);
+  emptyCard.scorecard!.scope.modules = 0;
+  serveDecoded(data => {
+    data.current.scope!.modules = 0;
+    data.baseline.scope!.modules = baselineModules;
+    data.modules.items = [];
+    data.modules.total = 0;
+  }, emptyCard, []);
+  const bothEmpty = baselineModules === 0;
+  expect(await comparisonOutcome()).toEqual({ refused: !bothEmpty, shown: bothEmpty, modules: false });
+  expect(screen.queryByText(/modules in either plan/)).toBeNull();
+});
+
+it.each<[string, (value: StructureScorecard) => void]>([
+  ['echoes another page limit', value => { value.scorecard!.modules.page.limit = 200; }],
+  ['lists no rows of its total', value => { value.scorecard!.modules.items = []; }],
+  ['continues although it lists every row', value => { value.scorecard!.modules.page.nextCursor = cursorAt(value.structureVersion, 50); }],
+])('refuses a scorecard module page that %s', async (_, change) => {
+  const auth = await session();
+  transport.get.mockImplementation((kind, path) => {
+    const value = ordered(path);
+    if (kind === 'structureScorecard') change(value);
+    return Promise.resolve({ data: kind === 'structureScorecard' ? value : kind === 'run' ? run : runs });
+  });
+  history.replaceState(null, '', `${revision}/scorecard`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('alert');
+    expect(screen.queryByRole('table', { name: copy.modulesTitle })).toBeNull();
+  } finally { auth.dispose(); }
+});

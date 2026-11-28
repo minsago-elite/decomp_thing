@@ -86,7 +86,7 @@ object StructureAllocationDiagnostic {
                 val built = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<WebProgramStructureIndex, Boolean>())
                 var phaseAllocated = allocated()
                 val pages = WebProgramStructurePages { job, run, revision, project ->
-                    val measuredProject: (WebProgramStructureIndex, () -> ByteArray) -> JsonObject = { index, model ->
+                    val measuredProject: (WebProgramStructureIndex, WebStructureRecordReader) -> JsonObject = { index, records ->
                         projected = index
                         if (built.add(index)) {
                             val sourceRoot = root.resolve("$job/reports/runs/$run/source-tree")
@@ -109,7 +109,7 @@ object StructureAllocationDiagnostic {
                                 put("maximumEntryBytes", 96L * 1024 * 1024)
                             }
                         }
-                        project(index, model)
+                        project(index, records)
                     }
                     if (mode == "service") service.readProgramStructure(job, run, revision, measuredProject)
                     else {

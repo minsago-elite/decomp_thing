@@ -405,13 +405,19 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
         runtimeProcesses: report?.runtimeProcesses ?? null,
         shutdownConfirmed, processTreeForced, timedOut, error: outcome.timeout ? 'Cold sample timed out'
           : outcome.error ? String(outcome.error.message).slice(0, 512)
+          : !report ? `Child exited with code ${exitCode ?? 'unknown'} without a retained report; primary failure unavailable`
+          // A #1882 publication failure leaves a bounded failure record whose facts are scrubbed previews.
+          : report.reportPublication?.status === 'failed'
+            ? `Child report publication failed; primary failure: ${firstDiagnosticLine(report.error?.preview) ?? 'unavailable'}`
           : !sourceHeadMatches ? 'Child report did not match the declared pull-request head SHA'
           : !sourceBaseMatches ? 'Child report did not match the declared pull-request base SHA'
           : !revisionBindingMatches ? 'Child report did not bind the source commit to the declared pull-request revisions'
           : !browserIdentityVerified ? 'Child report did not verify the reviewed browser installation'
           : report?.forcedShutdown === true ? 'The packaged driver had to force Chrome or the JVM to stop'
-          : evidence?.failures?.[0] ?? (processTreeForced ? 'Forced process-group kill was required after the packaged driver exited'
+          : evidence?.failures?.[0] ?? (report.status !== 'passed' ? firstDiagnosticLine(report.error) : null) ?? (processTreeForced ? 'Forced process-group kill was required after the packaged driver exited'
             : evidence?.profileApplied !== profile.name ? 'Child report did not confirm the requested profile' : null),
+        failureClass: passed ? null : outcome.timeout ? 'timeout' : outcome.error ? 'launch' : !report ? 'report-unavailable'
+          : report.reportPublication?.status === 'failed' ? 'report-publication' : 'reported',
         diagnostic });
       if (!shutdownConfirmed) break; // Never overlap another run with an unconfirmed child process tree.
       if (interrupted) break;
@@ -466,6 +472,12 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
     passed: summary.successfulSamples === count && summary.rawFailedRequests === 0 && identityConsistent && runDirectoriesUnique
       && processIdentitiesPresent && processIdentitiesUnique
       && Number.isFinite(summary.nearestRankP95FirstPageMs) && summary.nearestRankP95FirstPageMs <= profile.firstPageLimitMs };
+}
+
+function firstDiagnosticLine(value) {
+  if (typeof value !== 'string') return null;
+  const line = value.slice(0, 1024).split('\n').find(part => part.trim());
+  return line ? line.trim().slice(0, 512) : null;
 }
 
 const reportDigest = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -556,4 +568,33 @@ async function main() {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   main().catch(error => { console.error(String(error?.stack ?? error).slice(0, 4096)); process.exitCode = 1; });
+}
+
+// The caller supplies the retained stderr tail. IDs stay decimal strings across the JVM/JS boundary.
+export function structureServerTimingSummary(output) {
+  const limit = 512;
+  const timings = [], manifestStages = [], terminals = [];
+  let overflow = 0, manifestOverflow = 0, terminalOverflow = 0;
+  const phases = /^web-structure-timing phase=([a-z0-9-]{1,64}) elapsedNanos=(\d{1,19})(?: invocationId=([1-9]\d{0,18}))?\r?$/gm;
+  for (const [,phase,duration,invocationId] of output.matchAll(phases)) {
+    const elapsedNanos = Number(duration);
+    if (timings.length === limit || !Number.isSafeInteger(elapsedNanos)) { overflow++; continue; }
+    timings.push(invocationId ? { phase, elapsedNanos, invocationId } : { phase, elapsedNanos });
+  }
+  const stages = /^web-structure-manifest-timing stage=(manifest-(?:root|file-fields|file-evidence-init|path-order|construct|profile-policy)) elapsedNanos=(\d{1,19}) segments=([1-9]\d{0,18}) invocationId=([1-9]\d{0,18})\r?$/gm;
+  for (const [,stage,duration,count,invocationId] of output.matchAll(stages)) {
+    const elapsedNanos = Number(duration), segments = Number(count);
+    if (manifestStages.length === limit || !Number.isSafeInteger(elapsedNanos) || !Number.isSafeInteger(segments)) {
+      manifestOverflow++;
+      continue;
+    }
+    manifestStages.push({ stage, elapsedNanos, segments, invocationId });
+  }
+  const outcomes = /^web-structure-timing-terminal invocationId=([1-9]\d{0,18}) status=(ok|failed|refused|interrupted|cancelled)\r?$/gm;
+  for (const [,invocationId,status] of output.matchAll(outcomes)) {
+    if (terminals.length === limit) { terminalOverflow++; continue; }
+    terminals.push({ invocationId, status });
+  }
+  return { timings, limit, overflow, manifestStages, manifestLimit: limit, manifestOverflow,
+    terminals, terminalLimit: limit, terminalOverflow };
 }

@@ -61,7 +61,7 @@ internal fun canonicalSpaDocumentPath(base: String, path: String): String? {
         "${base}runtime/" -> "${base}runtime"
         "${base}upload/" -> "${base}upload"
         else -> path.takeIf { it.startsWith("${base}jobs/") &&
-            it.removePrefix("${base}jobs/").matches(Regex("[0-9a-f]{32}(?:/runs(?:/$id(?:/(?:activity|evidence|logs)|/revisions/$id/(?:(?:sources|source-files|globals|types)/$id|source-search|source-diff(?:/file)?|(?:functions|modules)(?:/$id)?))?)?)?/?")) }?.removeSuffix("/")
+            it.removePrefix("${base}jobs/").matches(Regex("[0-9a-f]{32}(?:/runs(?:/$id(?:/(?:activity|evidence|logs)|/revisions/$id/(?:(?:sources|source-files|globals|types)/$id|source-search|source-diff(?:/file)?|(?:functions|modules)(?:/$id)?|graph|scorecard))?)?)?/?")) }?.removeSuffix("/")
     }
 }
 
@@ -338,6 +338,8 @@ class UploadServer(
         logDownloadPhases = logDownloadPhases) }
     /** Admitted artifact downloads that have not yet released their stream; test evidence helper. */
     internal fun activeArtifactDownloads(): Int = api?.artifactDownloads?.activeCount() ?: 0
+    /** Admitted HTTP handlers still running, including post-response audit appends; for test quiescence only. */
+    internal fun activeRequestCount(): Int = synchronized(lifecycleLock) { activeRequests }
     // A request that finds every worker and queue slot taken is answered by this tiny pool with a stable 429
     // instead of a reset connection. It has no queue, so overload still never buffers more than the main pool does;
     // when it too is busy the rejection propagates and the dispatcher closes the connection, as before.
@@ -670,6 +672,9 @@ class UploadServer(
             } else false
         }
     }
+
+    /** Download leases held for [jobId] and admitted artifact reads; for delivery checks. */
+    internal fun activeDownloads(jobId: String): Pair<Int, Int> = jobs.activeDownloadLeases(jobId) to (api?.artifactDownloads?.activeCount() ?: 0)
 
     private fun route(exchange: HttpExchange) {
         if (!withActiveRequest { routeAdmitted(exchange) }) exchange.close()
@@ -1531,10 +1536,7 @@ private fun HttpExchange.sendUntrustedAttachment(
     filename: String,
 ) {
     responseHeaders.set("Content-Disposition", attachmentDisposition(filename))
-    responseHeaders.set(
-        "Content-Security-Policy",
-        "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'",
-    )
+    // sendBytes applies the shared sandboxed WEB_INERT_CONTENT_SECURITY_POLICY to every attachment.
     sendBytes(status, body, contentType)
 }
 

@@ -1,7 +1,7 @@
 import { runPath } from '../app/paths';
 import type { SourceSelection } from '../app/paths';
 
-export type StructureList = 'functions' | 'modules';
+export type StructureList = 'functions' | 'modules' | 'graph' | 'scorecard';
 export type StructureItem = 'modules' | 'functions' | 'globals' | 'types';
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 function invalidUrl(): never { throw new Error('The application resource URL is invalid.'); }
@@ -13,7 +13,7 @@ function revisionPath(basePath: string, selected: SourceSelection): string {
 
 /** Revision-scoped structure views. Query values are validated by the structure navigation parser. */
 export function structureListPath(basePath: string, selected: SourceSelection, view: StructureList, search = ''): string {
-  if (view !== 'functions' && view !== 'modules') return invalidUrl();
+  if (!['functions', 'modules', 'graph', 'scorecard'].includes(view)) return invalidUrl();
   if (search !== '' && (!search.startsWith('?') || search.length > 4096)) return invalidUrl();
   return `${revisionPath(basePath, selected)}/${view}${search}`;
 }

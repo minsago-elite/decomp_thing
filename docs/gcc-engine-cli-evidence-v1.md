@@ -4,6 +4,27 @@ This is a narrow source-contract record for issue #291, captured against source
 revision `bf2501568f39ab52b23492dfc37839bb81895587`. It records repository facts
 only; it is not a hosted execution receipt or a production qualification claim.
 
+## Normal-CLI admission before START
+
+`GccBundledCliCommand.admit` is the only pre-START path, and `run` uses it. It re-parses the argv,
+binds the output, inputs and journal directory identities in `invocation.json`, authenticates the
+selected engine, retained profile closure, Ghidra archive, bundled deployment and host containment
+tools into the production intent, rechecks a full export's structural policy, and returns the
+coordinator's prepared owner once the dedicated scratch lease is held. No worker has started then.
+
+`GccBundledCliAdmissionTest` drives that path with genuine checked inputs: cc1 decoded from
+`artifacts/gcc-cc1.stripped.xz`, the driver binary, the exporter-17 profile and the pinned archive.
+The hosted oracle shard provisions the root-owned bundled runtime and a bounded ext4 slot. There,
+fresh-plan, same-owner-resume and driver full-export selections each reach a prepared owner. Its
+intent holds only authenticated identities and its journal has no START record. The owner refuses
+every other selection, and an ordinary scratch directory is refused after the durable intent but
+before any lease. On any host, an untrusted development runtime is refused before the journal or
+lease. Genuine bytes substituted for another engine, or for the archive, are refused before staging.
+
+This is admission evidence only. It does not run an export or the planner, and it does not
+establish cold recovery (#981), whole-operation resource accounting (#982) or installed-CLI
+execution (#984).
+
 ## Full-export policy consistency before worker admission
 
 For a normal full-recovery export, the CLI authenticates its fixed structural input set and

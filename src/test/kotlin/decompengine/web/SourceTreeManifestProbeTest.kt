@@ -168,6 +168,65 @@ class SourceTreeManifestProbeTest {
         assertEquals(0L, probe.snapshot(0).getValue("measuredNanos").jsonPrimitive.long)
     }
 
+    @Test fun `production timing closes partial intervals and counts transitions`() {
+        var now = 0L
+        val lines = mutableListOf<String>()
+        val timing = WebStructureTiming({ now }, lines::add)
+        timing.start(SourceTreeManifestStage.FILE_FIELDS)
+        now = 10
+        timing.start(SourceTreeManifestStage.FILE_FIELDS)
+        now = 25
+        timing.end()
+        timing.end()
+        now = 100
+        timing.start(SourceTreeManifestStage.FILE_EVIDENCE_INIT)
+        now = 112
+        timing.finish("failed")
+        assertEquals(listOf(
+            "web-structure-manifest-timing stage=manifest-file-fields elapsedNanos=25 segments=2",
+            "web-structure-manifest-timing stage=manifest-file-evidence-init elapsedNanos=12 segments=1",
+        ), lines.dropLast(1).map { it.substringBefore(" invocationId=") })
+        assertTrue(lines.last().endsWith(" status=failed"))
+    }
+
+    @Test fun `production timing emits the failing fields constructor and policy segments`() {
+        val cases = listOf(
+            document().firstFile("roles" to JsonNull) to SourceTreeManifestStage.FILE_FIELDS,
+            document().firstFile("sha256" to JsonPrimitive("bad")) to SourceTreeManifestStage.FILE_EVIDENCE_INIT,
+            document().firstFile("roles" to JsonArray(listOf(JsonPrimitive("evidence")))) to SourceTreeManifestStage.PROFILE_POLICY,
+        )
+        for ((record, stage) in cases) {
+            val lines = mutableListOf<String>()
+            val timing = WebStructureTiming({ 1L }, lines::add)
+            val baseline = assertFails { SourceTreeManifestReader.parse(record, profile) }
+            val measured = assertFails {
+                try { SourceTreeManifestReader.parse(record, profile, timing) } finally { timing.finish("failed") }
+            }
+            assertEquals(baseline.javaClass, measured.javaClass)
+            assertEquals(baseline.message, measured.message)
+            assertTrue(lines.any { "stage=${stage.marker} elapsedNanos=0 segments=1 " in it })
+            assertTrue(lines.size <= SourceTreeManifestStage.entries.size + 1)
+        }
+    }
+
+    @Test fun `diagnostic output failures preserve ordinary outcomes and propagate interruption`() {
+        val timing = WebStructureTiming({ 0L }) { throw AssertionError("diagnostic sink") }
+        timing.phase("project-page", 1)
+        timing.start(SourceTreeManifestStage.ROOT)
+        timing.finish("ok")
+        val interrupted = java.io.InterruptedIOException()
+        try {
+            val broken = WebStructureTiming({ 0L }) { throw interrupted }
+            assertSame(interrupted, assertFails { broken.finish("ok") })
+            assertTrue(Thread.currentThread().isInterrupted)
+        } finally {
+            Thread.interrupted()
+        }
+        val cancelled = java.util.concurrent.CancellationException()
+        val broken = WebStructureTiming({ 0L }) { throw cancelled }
+        assertSame(cancelled, assertFails { broken.phase("read-input", 0) })
+    }
+
     @EnabledIfSystemProperty(named = "decompengine.structure.attributionFixture", matches = ".+")
     @Test fun `pinned manifest preserves all values and counts all 8338 files`() {
         val root = Path.of(System.getProperty("decompengine.structure.attributionFixture"))

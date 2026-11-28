@@ -312,6 +312,20 @@ it('shows module ownership, progress, source links and owned entities without re
   } finally { auth.dispose(); }
 });
 
+it('keeps the module filter and its Show all modules link when the filtered inventory is not recorded', async () => {
+  const auth = await session();
+  transport.get.mockRejectedValue(new ApiClientError('http_error', { status: 404, serverCode: 'MODULE_NOT_FOUND' }));
+  history.replaceState(null, '', `${revision}/functions?module=missing`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect((await screen.findByRole('alert')).textContent).toContain(copy.missing);
+    expect(screen.queryByRole('table', { name: copy.functionsTitle })).toBeNull();
+    const clear = screen.getByRole('link', { name: copy.clearModule });
+    expect(clear.getAttribute('href')).toBe(`${revision}/functions`);
+    expect(clear.closest('p')?.textContent).toContain('missing');
+  } finally { auth.dispose(); }
+});
+
 it('refuses a newer manifest generation after following an entity generated-source link', async () => {
   const auth = await session();
   const detail = fixture<EntityDetail>('entity-detail-function-references');

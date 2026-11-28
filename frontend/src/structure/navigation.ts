@@ -1,4 +1,4 @@
-import type { EntityDetail, FunctionInventory, ModuleDetail, ModuleInventory } from '../api/generated';
+import type { EntityDetail, FunctionInventory, ModuleDetail, ModuleInventory, StructureNeighborhood, StructureScorecard } from '../api/generated';
 import { ApiClientError, withApiFailureReference } from '../api/errors';
 import { structureCopy as copy } from '../copy/structure';
 import type { SourceSelection } from '../app/paths';
@@ -110,6 +110,14 @@ export function listLocation(search: string, extra: readonly string[] = []): { c
   return { ...(cursor === undefined ? {} : { cursor }), ...(version === undefined ? {} : { version }), ...(kind === undefined ? {} : { kind }) };
 }
 
+export function revisionReadRoute(selected: SourceSelection): string { return revisionRoute(selected); }
+
+/** The download route of one cited structure record, pinned to the structure version that was displayed. */
+export function structureRecordRoute(selected: SourceSelection, record: 'program-model' | 'module-plan' | 'confidence', version: string): string {
+  if (!VERSION.test(version)) invalid();
+  return `${revisionRoute(selected)}/records/${record}?structureVersion=${version}`;
+}
+
 export function structureReadRoute(selected: SourceSelection, item: 'modules' | StructureItem, selector: string | null,
   options: { cursor?: string; version?: string; kind?: string; limit?: number } = {}): string {
   if (selector !== null && !ID.test(selector)) invalid();
@@ -122,7 +130,7 @@ export function structureReadRoute(selected: SourceSelection, item: 'modules' | 
   return `${revisionRoute(selected)}/${item}${selector === null ? '' : `/${selector}`}${text ? `?${text}` : ''}`;
 }
 
-type StructureDocument = FunctionInventory | ModuleInventory | ModuleDetail | EntityDetail;
+type StructureDocument = FunctionInventory | ModuleInventory | ModuleDetail | EntityDetail | StructureNeighborhood | StructureScorecard;
 
 /** A response must belong to the exact selected revision and, when pinned, the exact record version. */
 export function bindStructure<T extends StructureDocument>(data: T, selected: SourceSelection, version?: string): T {

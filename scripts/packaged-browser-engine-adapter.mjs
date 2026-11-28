@@ -14,6 +14,39 @@ export function enginePageReady({ rendered, checks = [] }) {
       element.getClientRects().length > 0 && element.textContent.includes(check.text)));
 }
 
+// Poll the fixed audit predicates in the driver so the page only has to answer a DOM read.
+// The deadline also covers an evaluation whose execution context stops responding.
+export async function waitForEngineExpression(target, expression, label, { timeout = 20000, interval = 50 } = {}) {
+  let expired = false;
+  let lastObservation;
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      expired = true;
+      reject(new Error(`Timed out waiting for ${label} after ${timeout} ms`, { cause: lastObservation }));
+    }, timeout);
+  });
+
+  async function poll() {
+    while (!expired) {
+      try {
+        if (await target.evaluate(expression)) return;
+        lastObservation = false;
+      } catch (error) {
+        if (!/Execution context was destroyed|Cannot find context with specified id/.test(error.message)) throw error;
+        lastObservation = error;
+      }
+      if (!expired) await new Promise(resolve => setTimeout(resolve, interval));
+    }
+  }
+
+  try {
+    await Promise.race([poll(), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Playwright 1.58.2's WebKit screenshot path injects `body {}` in its isolated utility world
  * while synchronizing animations. The enforced CSP correctly blocks that driver-only style;

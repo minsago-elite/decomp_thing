@@ -7,7 +7,7 @@ import { readFile, mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promi
 import { createHash } from 'node:crypto';
 import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { COLD_PROFILES, STRUCTURE_QUALIFICATION_SOURCE_FILES, applyStructureProfile, makeChromeThrottlingCommands, summarizeColdSamples, runColdSamples,
+import { structureServerTimingSummary, COLD_PROFILES, STRUCTURE_QUALIFICATION_SOURCE_FILES, applyStructureProfile, makeChromeThrottlingCommands, summarizeColdSamples, runColdSamples,
   verifyStructureQualificationSource, verifyStructureSourceRevision, verifyStructureBrowser } from './packaged-browser-structure-cold.mjs';
 import { liveProcessGroupMembers, readChildReport, waitForProcessGroupExit } from './packaged-browser-structure-cold.mjs';
 import { publishReport } from './packaged-browser-restart.mjs';
@@ -679,4 +679,59 @@ test('timeout sends SIGTERM then SIGKILL to a real launcher and descendant that 
   const stat = await readFile(`/proc/${descendantPid}/stat`, 'utf8').catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
   const state = stat === null ? null : stat.slice(stat.lastIndexOf(') ') + 2, stat.lastIndexOf(') ') + 3);
   assert.ok(stat === null || state === 'Z', 'the real descendant must be gone or reaped after timeout escalation');
+});
+
+test('missing, unpublished and failed child reports keep the first actual failure instead of a provenance mismatch', async () => {
+  let launches = 0;
+  const reports = [
+    null,
+    // #1882 publication failure records: bounded previews of the scrubbed facts, never the full report.
+    { status:'failed', mode:'structure-cold', statusBeforePublication:'failed', reportPublication:{ status:'failed', primaryReportRetained:false },
+      error:{ bytes:64, sha256:'b'.repeat(64), preview:'AssertionError: first inventory page failed\n    at private/stack', complete:true } },
+    { status:'failed', mode:'structure-cold', statusBeforePublication:'failed', reportPublication:{ status:'failed', primaryReportRetained:false } },
+    { status:'failed', driverCommit:'a'.repeat(40), driverPullRequestHeadCommit:'d'.repeat(40), driverPullRequestBaseCommit:'f'.repeat(40),
+      sourceIdentity:{ verified:true, commit:'a'.repeat(40), sourceSha256:'e'.repeat(64), files:[{path:'scripts/web-test-browser.json',sha256:'d'.repeat(64)}],
+        revisionBinding:revisionBinding('a'.repeat(40),'d'.repeat(40),'f'.repeat(40)) }, browserIdentity:approvedBrowserIdentity, tools:{chromeSha256:'c'.repeat(64)},
+      error:'Error: Inventory request returned 503\n    at private/stack' },
+    { status:'failed', driverCommit:'a'.repeat(40), driverPullRequestHeadCommit:'0'.repeat(40), error:'Error: unrelated' },
+  ];
+  const result = await runColdSamples({ driver:'/unused/driver.mjs', driverArgs:[], profile:'loopback', expectedHeadCommit:'d'.repeat(40), expectedBaseCommit:'f'.repeat(40),
+    spawnImpl: () => { launches++; return fakeChild(1, 'private diagnostic'); },
+    reportReader: async () => { const report = reports[(launches - 1) % reports.length]; return report && { path:`/tmp/r-${launches}.json`, sha256:String(launches), report }; } });
+  const [missing, capped, cappedUnknown, reported, mismatched] = result.samples;
+  assert.equal(missing.failureClass, 'report-unavailable');
+  assert.equal(missing.error, 'Child exited with code 1 without a retained report; primary failure unavailable');
+  assert.equal(capped.failureClass, 'report-publication');
+  assert.equal(capped.error, 'Child report publication failed; primary failure: AssertionError: first inventory page failed');
+  assert.equal(cappedUnknown.error, 'Child report publication failed; primary failure: unavailable');
+  assert.equal(reported.failureClass, 'reported');
+  assert.equal(reported.error, 'Error: Inventory request returned 503');
+  assert.equal(mismatched.error, 'Child report did not match the declared pull-request head SHA');
+  assert.ok(result.samples.every(sample => sample.status === 'failed' && sample.shutdownConfirmed === true));
+  assert.equal(result.passed, false);
+  assert.ok(!JSON.stringify(result).includes('private'));
+});
+
+test('server timings preserve legacy phases and explicit IDs across interleaved requests', () => {
+  const id = '9223372036854775807';
+  const records = [
+    'web-structure-timing phase=project-page elapsedNanos=7',
+    `web-structure-timing phase=read-input elapsedNanos=1 invocationId=${id}`,
+    'web-structure-timing-terminal invocationId=2 status=refused',
+    `web-structure-manifest-timing stage=manifest-root elapsedNanos=3 segments=2 invocationId=${id}`,
+    `web-structure-timing-terminal invocationId=${id} status=ok`,
+  ];
+  const malformed = [records[1] + '1', records[3] + 'x', records[4] + 'ay', 'noise ' + records[0]];
+  const r = structureServerTimingSummary([...records, ...malformed].join('\r\n'));
+  assert.deepEqual(r.timings, [{phase:'project-page',elapsedNanos:7}, {phase:'read-input',elapsedNanos:1,invocationId:id}]);
+  assert.deepEqual(r.manifestStages, [{stage:'manifest-root',elapsedNanos:3,segments:2,invocationId:id}]);
+  assert.deepEqual(r.terminals, [{invocationId:'2',status:'refused'}, {invocationId:id,status:'ok'}]);
+  const over = structureServerTimingSummary((records.slice(1,4).join('\n') + '\n').repeat(514) +
+    'web-structure-timing phase=project-page elapsedNanos=9007199254740992\n');
+  assert.deepEqual([over.timings.length,over.manifestStages.length,over.terminals.length], [512,512,512]);
+  assert.deepEqual([over.overflow,over.manifestOverflow,over.terminalOverflow], [3,2,2]);
+  const unsafe = structureServerTimingSummary(records[0].replace("elapsedNanos=7","elapsedNanos=9007199254740992"));
+  assert.equal(unsafe.timings.length,0);
+  assert.equal(unsafe.overflow,1);
+  assert.equal(structureServerTimingSummary(records[3].replace('segments=2','segments=9007199254740992')).manifestStages.length,0);
 });

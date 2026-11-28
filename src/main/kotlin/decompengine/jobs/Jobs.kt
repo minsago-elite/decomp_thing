@@ -431,6 +431,15 @@ class JobStore internal constructor(
         }
     }
 
+    internal fun streamCommittedArtifact(jobId: String, relativePath: String, maximumBytes: Long,
+        sha256: String, size: Long, consume: (java.io.InputStream) -> Unit) {
+        jobDirectory(jobId)
+        requireCanonicalReportPath(relativePath)
+        contained("artifact") {
+            decompengine.repair.readCommittedStableRegularFile(root, "$jobId/$relativePath", maximumBytes, sha256, size, consume)
+        }
+    }
+
     internal fun compareArtifact(
         jobId: String, relativePath: String, maximumBytes: Long, expected: StableRegularFile,
         cancellationCheck: () -> Unit = {},

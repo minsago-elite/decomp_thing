@@ -77,6 +77,7 @@ internal class WebApiController(
     private val artifactContent = WebArtifactContent(artifactStore)
     private val revisionValidationReports = WebRevisionValidationReports(jobs::readRecordedValidationReport)
     private val programStructure = WebProgramStructurePages { job, run, revision, project -> jobs.readProgramStructure(job, run, revision, project) }
+    private val structureRecords = WebStructureRecordDelivery(jobs::streamRunArtifact)
     private val eventStream = WebEventStream(access, streamResources, progressPages, read = { jobId, runId ->
         readWebProgress(jobs, jobId, runId).second
     }, clock = clock, deleted = { jobId -> jobs.deletedJob(jobId) != null })
@@ -115,6 +116,10 @@ internal class WebApiController(
         "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/modules(?:/[^/]+)?",
         "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/globals/[^/]+",
         "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/types/[^/]+",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/graph",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/scorecard",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/scorecard-comparison",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/records/[^/]+",
         "jobs/[^/]+/runs/[^/]+/logs/build(?:/content)?",
     ).map(::Regex)
 
@@ -196,6 +201,8 @@ internal class WebApiController(
                     if (!acceptsWebMediaType(exchange, "application/octet-stream")) {
                         throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns application/octet-stream.")
                     }
+                    // Refused before either guard: closing an exchange drains an unread request body.
+                    requireNoDownloadBody(exchange)
                     val parts = resource.split('/')
                     jobs.downloadLease(parts[1]).use {
                         artifactDownloads.admit(session.sessionId) { artifactContent.send(exchange, parts[1], parts[3]) }
@@ -309,7 +316,7 @@ internal class WebApiController(
                         val query = WebSourceChunkQuery.parse(exchange.requestURI.rawQuery)
                         val content = jobs.readRevisionSourceFile(parts[1], parts[3], parts[5], parts[7], WebSourceReadPurpose.PREVIEW, query.metadataVersion)
                         sendWebApiResponse(exchange, 200, "sourceChunk", content.chunk(query))
-                    } else jobs.downloadLease(parts[1]).use {
+                    } else requireNoDownloadBody(exchange).let { jobs.downloadLease(parts[1]) }.use {
                         val metadataVersion = parseWebSourceDownloadVersion(exchange.requestURI.rawQuery)
                         if (!acceptsWebMediaType(exchange, "application/octet-stream")) {
                             throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns application/octet-stream.")
@@ -317,6 +324,38 @@ internal class WebApiController(
                         val content = jobs.readRevisionSourceFile(parts[1], parts[3], parts[5], parts[7], WebSourceReadPurpose.DOWNLOAD, metadataVersion)
                         sendWebAttachment(exchange, content.download(), content.downloadName, content.verifiedDownloadHeaders())
                     }
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/records/[^/]+")) -> {
+                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
+                    if (exchange.requestHeaders.keys.any { it.equals("Range", true) || it.startsWith("If-", true) }) {
+                        throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "Structure record downloads do not support Range or conditional headers.")
+                    }
+                    if (!acceptsWebMediaType(exchange, "application/octet-stream")) {
+                        throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns application/octet-stream.")
+                    }
+                    // Refused before either guard: closing an exchange drains an unread request body.
+                    requireNoDownloadBody(exchange)
+                    val parts = resource.split('/')
+                    // The job lease and the shared download admission are held until delivery ends, so deletion
+                    // cannot remove a record mid-response and slow clients cannot hold unbounded deliveries.
+                    jobs.downloadLease(parts[1]).use {
+                        artifactDownloads.admit(session.sessionId) {
+                            val record = programStructure.record(parts[1], parts[3], parts[5], parts[7], exchange.requestURI.rawQuery)
+                            structureRecords.send(exchange, parts[1], record)
+                        }
+                    }
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/(?:graph|scorecard|scorecard-comparison)")) -> {
+                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
+                    requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    val query = exchange.requestURI.rawQuery
+                    val (kind, value) = when (parts[6]) {
+                        "graph" -> "structureNeighborhood" to programStructure.neighborhood(parts[1], parts[3], parts[5], query, WebRedactionPolicy.of(exchange))
+                        "scorecard" -> "structureScorecard" to programStructure.scorecard(session.sessionId, parts[1], parts[3], parts[5], query, WebRedactionPolicy.of(exchange))
+                        else -> "scorecardComparison" to programStructure.comparison(session.sessionId, parts[1], parts[3], parts[5], query, WebRedactionPolicy.of(exchange))
+                    }
+                    sendWebApiResponse(exchange, 200, kind, value)
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/(?:functions|modules)(?:/[^/]+)?|jobs/[^/]+/runs/[^/]+/revisions/[^/]+/(?:globals|types)/[^/]+")) -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
@@ -329,7 +368,7 @@ internal class WebApiController(
                     }
                     val (kind, value) = when {
                         parts.size == 7 && parts[6] == "functions" -> "functionInventory" to programStructure.functions(session.sessionId, parts[1], parts[3], parts[5], query, WebRedactionPolicy.of(exchange))
-                        parts.size == 7 -> "moduleInventory" to programStructure.modules(session.sessionId, parts[1], parts[3], parts[5], query)
+                        parts.size == 7 -> "moduleInventory" to programStructure.modules(session.sessionId, parts[1], parts[3], parts[5], query, WebRedactionPolicy.of(exchange))
                         parts[6] == "modules" -> "moduleDetail" to programStructure.module(session.sessionId, parts[1], parts[3], parts[5], parts[7], query, WebRedactionPolicy.of(exchange))
                         else -> "entityDetail" to programStructure.entity(WebStructureKind.entries.single { it.route == parts[6] },
                             parts[1], parts[3], parts[5], parts[7], query, WebRedactionPolicy.of(exchange))
@@ -552,6 +591,10 @@ internal class WebApiController(
                     } else sendWebApiResponse(exchange, 200, "job", value)
                 }
             }
+        } catch (failure: WebResponseAborted) {
+            // Headers and part of the body were sent: no denial can follow. Let the listener drop the connection, so the
+            // client sees a body short of its declared length promptly instead of waiting on an open connection.
+            throw failure
         } catch (failure: WebAccessDenied) {
             access.sendDenied(exchange, withResourceMethods(failure, resource))
         } catch (_: decompengine.jobs.UploadIdempotencyConflict) {
@@ -714,22 +757,62 @@ private fun applicationBuildId(): String {
     return digest.digest().joinToString("") { "%02x".format(it) }
 }
 
-/** Bounded in-memory attachment: inert octet stream, encoded filename, and bodyless HEAD. */
-private fun sendWebAttachment(exchange: HttpExchange, bytes: ByteArray, fileName: String, headers: Map<String, String>) {
+/**
+ * Bounded in-memory attachment: inert octet stream, encoded filename, and bodyless HEAD. It keeps the shared
+ * [WEB_INERT_CONTENT_SECURITY_POLICY] from [webApiHeaders], the same policy as digest-bound artifact content.
+ */
+private fun sendWebAttachment(exchange: HttpExchange, bytes: ByteArray, fileName: String, headers: Map<String, String>) =
+    sendWebAttachment(exchange, bytes.size.toLong(), fileName, headers) { it.write(bytes) }
+
+/** The shared inert attachment response; [write] supplies exactly [size] body bytes and is skipped for HEAD. */
+internal fun sendWebAttachment(exchange: HttpExchange, size: Long, fileName: String, headers: Map<String, String>,
+    write: (java.io.OutputStream) -> Unit) {
     val name = java.net.URLEncoder.encode(fileName, Charsets.UTF_8).replace("+", "%20").replace("*", "%2A")
     webApiHeaders(exchange, UUID.randomUUID().toString())
     exchange.responseHeaders.set("Content-Type", "application/octet-stream")
     exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"source.bin\"; filename*=UTF-8''$name")
-    exchange.responseHeaders.set("Content-Security-Policy", "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'")
-    exchange.responseHeaders.set("Content-Length", bytes.size.toString())
+    exchange.responseHeaders.set("Content-Length", size.toString())
     headers.forEach { (key, value) -> exchange.responseHeaders.set(key, value) }
+    var aborted = false
     try {
-        if (exchange.requestMethod == "HEAD" || bytes.isEmpty()) exchange.sendResponseHeaders(200, -1)
+        if (exchange.requestMethod == "HEAD" || size == 0L) exchange.sendResponseHeaders(200, -1)
         else {
-            exchange.sendResponseHeaders(200, bytes.size.toLong())
-            exchange.responseBody.use { it.write(bytes) }
+            exchange.sendResponseHeaders(200, size)
+            try { abortAfterHeaders { val output = exchange.responseBody; write(output); output.flush() } }
+            catch (failure: WebResponseAborted) { aborted = true; throw failure }
         }
-    } finally { exchange.close() }
+    } finally {
+        // An aborted body is never closed here: closing the stream or exchange can block draining an unread request
+        // body while the delivery guards are still held. The listener drops the connection once they unwind.
+        if (!aborted) exchange.close()
+    }
+}
+
+/**
+ * A failure after the status line and part of a fixed-length body were sent. Writers neither close the response nor the
+ * exchange for it, and the controller rethrows it, so the delivery guards unwind first and the listener then drops the
+ * connection. Closing the exchange instead can leave the connection open with the declared length unmet, or block
+ * draining an unread request body.
+ */
+internal class WebResponseAborted(cause: Throwable) : RuntimeException("response aborted after its headers were sent", cause)
+
+/** Runs a post-header body writer, turning any failure into [WebResponseAborted]; interruption is kept. */
+internal inline fun <T> abortAfterHeaders(write: () -> T): T = try { write() } catch (failure: Throwable) {
+    if (failure is InterruptedException) Thread.currentThread().interrupt()
+    if (failure is WebResponseAborted) throw failure
+    throw WebResponseAborted(failure)
+}
+
+/**
+ * Download requests carry no body. Any declared body, or a chunked one, exceeds that limit and is refused before the
+ * job lease or download admission is taken, so no later close can drain it while either guard is held.
+ */
+internal fun requireNoDownloadBody(exchange: HttpExchange) {
+    val headers = exchange.requestHeaders
+    val declared = headers["Content-Length"].orEmpty().any { it.trim() != "0" }
+    if (declared || headers.containsKey("Transfer-Encoding")) {
+        throw WebAccessDenied(413, "BODY_TOO_LARGE", "Download requests carry no request body.")
+    }
 }
 
 /** Strict bounded `archiveVerificationRequest` body: the one archive digest the caller displayed. */
