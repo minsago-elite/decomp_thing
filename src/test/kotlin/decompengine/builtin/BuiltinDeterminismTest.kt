@@ -270,6 +270,8 @@ class BuiltinDeterminismTest {
         assertEquals(listOf("read-1", "edit-1"), toolResults(first.finalInspection.records).map { it.getValue("callId").jsonPrimitive.content })
         assertEquals(logicalJournal(first.finalInspection.records), logicalJournal(second.finalInspection.records))
         assertEquals(outcomeProjection(first.finalReceipt), outcomeProjection(second.finalReceipt))
+        assertTrue(first.emittedEvents.isNotEmpty())
+        assertEquals(first.emittedEvents, second.emittedEvents)
         listOf(first, second).forEach { run ->
             assertEquals(210L, run.finalReceipt.requireResult().usage?.inputTokens)
             assertEquals(49L, run.finalReceipt.requireResult().usage?.outputTokens)
@@ -278,8 +280,8 @@ class BuiltinDeterminismTest {
             assertEquals(listOf(expectedChange("candidate-source")), evidence(run.finalReceipt).candidateChanges.map(::changeProjection))
             assertEquals(listOf(expectedChange("candidate-source")), run.finalReceipt.requireResult().changes.map(::changeProjection))
         }
-        verifyOutcomeClock(first.finalReceipt, first.request)
-        verifyOutcomeClock(second.finalReceipt, second.request)
+        verifyOutcomeClock(first.finalReceipt)
+        verifyOutcomeClock(second.finalReceipt)
         assertEquals(first.finalBytes, second.finalBytes)
         assertEquals(2, first.finalInspection.records.count { kind(it) == "CHECKPOINT" })
         assertEquals(first.initialCommitment.records, first.checkpointReference.records)
@@ -289,7 +291,7 @@ class BuiltinDeterminismTest {
     @Test fun `suspend resume matches uninterrupted semantic outputs without replaying completed tools`() {
         val workspace = directory.resolve("resume-workspace/project")
         val resumed = runCheckpointed("resumed", workspace)
-        val resumedCalls = resumed.provider.calls.map { it.messages }
+        val resumedCalls = resumed.provider.calls.map { it.copy(overallTimeout = Duration.ZERO) }
         val resumedResults = toolResults(resumed.finalInspection.records)
         val resumedEvidence = evidence(resumed.finalReceipt)
         val resumedOutcome = outcomeProjection(resumed.finalReceipt)
@@ -319,7 +321,7 @@ class BuiltinDeterminismTest {
         assertEquals(2, directProvider.consumed)
         assertEquals(1, directCounters.contextReads)
         assertEquals(1, directCounters.edits)
-        assertEquals(resumedCalls, directProvider.calls.map { it.messages })
+        assertEquals(resumedCalls, directProvider.calls.map { it.copy(overallTimeout = Duration.ZERO) })
         assertEquals(resumedResults, toolResults(directInspection.records))
         assertEquals(resumedEvents, directEvents)
         assertEquals(resumedOutcome, outcomeProjection(directReceipt))
@@ -331,8 +333,8 @@ class BuiltinDeterminismTest {
         assertEquals(49L, directReceipt.requireResult().usage?.outputTokens)
         assertEquals(2, directReceipt.requireResult().usage?.toolCalls)
         assertEquals(listOf(expectedChange("candidate-source")), directReceipt.requireResult().changes.map(::changeProjection))
-        verifyOutcomeClock(resumed.finalReceipt, resumed.request)
-        verifyOutcomeClock(directReceipt, directRequest)
+        verifyOutcomeClock(resumed.finalReceipt)
+        verifyOutcomeClock(directReceipt)
         assertEquals(resumedChanges, directReceipt.requireResult().changes)
         assertEquals(resumedBytes, directBytes)
         assertEquals(1, resumed.finalInspection.records.count { kind(it) == "RESUME" })
@@ -581,11 +583,15 @@ class BuiltinDeterminismTest {
     private fun expectedChange(text: String) = changeProjection(AgentFileChange(
         sourcePath, AgentFileChangeKind.MODIFIED, hash("old".toByteArray()), hash(text.toByteArray()), text.toByteArray().size.toLong()))
 
-    private fun verifyOutcomeClock(receipt: AgentExecutionReceipt, request: AgentExecutionRequest) {
+    /**
+     * Reported elapsed time is measured after cleanup and the terminal journal write, so a scheduler pause or slow
+     * fsync can legitimately exceed the work deadline. Only its presence and sign are semantic.
+     */
+    private fun verifyOutcomeClock(receipt: AgentExecutionReceipt) {
         val result = receipt.requireResult()
         val usage = result.usage ?: error("returned usage is missing")
         val wallClock = usage.wallClock ?: error("returned wall-clock usage is missing")
-        assertTrue(!wallClock.isNegative && wallClock <= request.limits.wallClockTimeout)
+        assertFalse(wallClock.isNegative)
     }
 
     private fun changeProjection(change: AgentFileChange) =
