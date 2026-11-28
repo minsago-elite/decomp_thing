@@ -795,6 +795,9 @@ construction. Environment, argv, runtime-mount, staging-root, empty-anchor, comm
 canonical-metadata collections also have explicit aggregate count and byte ceilings before materialization. A checkpoint failure
 enters the same proven cleanup path; cleanup itself is intentionally non-cancellable and retains resources if absence
 cannot be proved.
+Each runtime manifest and snapshot copy refuses on any host mount event in its own window. Before a boundary's first
+authorization commit, and during trusted provisioning, a refused unit may be rebuilt from a fresh scope at most twice;
+see [host mount churn during ACP sandbox setup](acp-host-mount-churn.md).
 If cancellation wins immediately after `systemd-run` starts but before it publishes `ControlGroup`, cleanup first
 terminates the still-unreleased process and accepts success only when the exact unit is `not-found` and a bounded,
 exhaustive cgroup-v2 hierarchy walk proves that no directory bearing that random unit name remains. A discovered path
