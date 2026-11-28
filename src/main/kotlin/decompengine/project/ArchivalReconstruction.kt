@@ -733,8 +733,8 @@ private fun moveExportCandidate(candidate: Path, target: Path) {
  * which it reaches only with no children left. Nothing is signalled through a ProcessHandle, and the
  * retained inventory serves resource monitoring alone.
  *
- * Elsewhere only the retained observations are covered, and each retained handle is signalled only
- * after its PID and start instant are read again. Start instants have clock-tick resolution, so this
+ * Elsewhere, a best-effort fallback that is not race-free: only the retained observations are covered,
+ * and each retained handle is signalled only after its PID and start instant are read again. Start instants have clock-tick resolution, so this
  * fallback cannot tell apart a PID reused within one tick; a handle that fails the recheck is not
  * signalled and keeps cleanup unconfirmed.
  */
