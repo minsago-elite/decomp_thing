@@ -700,12 +700,12 @@ class UploadServer(
      * Waits up to [requestShutdownTimeoutMs], extended once to [auditShutdownTimeoutMs] when only post-response
      * audit appends remained at the request deadline (see [WebRequestDrain]). The request timeout is a floor for
      * the audit deadline. Other shutdown phases (streams, archive verifiers, jobs, Git) wait separately.
+     * The drain starts once, under the lock; concurrent or later stop calls share its deadlines and decision.
      */
     private fun awaitRequestDrain(onInterrupt: () -> Unit): WebRequestDrain.Outcome {
-        val started = System.nanoTime()
         synchronized(lifecycleLock) {
-            requestDrain.begin(started + TimeUnit.MILLISECONDS.toNanos(requestShutdownTimeoutMs),
-                started + TimeUnit.MILLISECONDS.toNanos(auditShutdownTimeoutMs))
+            requestDrain.begin(TimeUnit.MILLISECONDS.toNanos(requestShutdownTimeoutMs),
+                TimeUnit.MILLISECONDS.toNanos(auditShutdownTimeoutMs))
             while (true) {
                 requestDrain.decide()?.let { return it }
                 val remaining = requestDrain.waitNanos()

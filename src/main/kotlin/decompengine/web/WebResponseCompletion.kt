@@ -10,14 +10,16 @@ import java.net.InetSocketAddress
 import java.net.URI
 
 /**
- * Delegating exchange that confirms a response completed: its headers were sent and, when it has a body,
- * that body stream was closed without any write, flush or close failure. A status code alone is not
- * completion: headers can be sent and a later body write fail while a dispatcher swallows the failure,
- * closes the exchange and returns normally. Closing the exchange itself never confirms completion.
+ * Delegating exchange that confirms a response completed. Only two shapes qualify: a bodyless response
+ * (`-1`, HEAD, 204 or 304) whose headers were sent, and a fixed-length response whose body stream closed
+ * without any write, flush or close failure (the JDK's fixed-length close fails when bytes are missing).
+ * A chunked response (declared length 0) never qualifies: the JDK's chunked close can swallow a failure
+ * writing its terminating chunk. A status code alone is not completion either: headers can be sent and a
+ * later body write fail while a dispatcher swallows it and returns. Closing the exchange never confirms it.
  */
 internal class WebResponseCompletion(private val delegate: HttpExchange) : HttpExchange() {
     @Volatile private var failed = false
-    @Volatile private var headersSent = false
+    @Volatile private var fixedLengthBody = false
     @Volatile private var completed = false
     private var body: TrackedBody? = null
 
@@ -25,9 +27,9 @@ internal class WebResponseCompletion(private val delegate: HttpExchange) : HttpE
 
     override fun sendResponseHeaders(rCode: Int, responseLength: Long) {
         tracked { delegate.sendResponseHeaders(rCode, responseLength) }
-        headersSent = true
         // These responses carry no body: the JDK finishes them once their headers are written.
         if (responseLength == -1L || delegate.requestMethod == "HEAD" || rCode == 204 || rCode == 304) completed = true
+        else if (responseLength > 0) fixedLengthBody = true
     }
 
     override fun getResponseBody(): OutputStream {
@@ -45,7 +47,7 @@ internal class WebResponseCompletion(private val delegate: HttpExchange) : HttpE
         override fun flush() = tracked { output.flush() }
         override fun close() {
             tracked { output.close() }
-            if (headersSent && !failed) completed = true
+            if (fixedLengthBody && !failed) completed = true
         }
     }
 

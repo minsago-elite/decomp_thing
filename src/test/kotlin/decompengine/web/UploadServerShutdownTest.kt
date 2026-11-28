@@ -244,6 +244,42 @@ class UploadServerShutdownTest {
         }
     }
 
+    @Test fun `concurrent stop calls share one drain deadline and decision`() {
+        val root = createTempDirectory("web-concurrent-stop-")
+        val server = UploadServer("127.0.0.1", 0, root, requestShutdownTimeoutMs = 100, auditShutdownTimeoutMs = 2000)
+        val worker = Executors.newSingleThreadExecutor(); val callers = Executors.newFixedThreadPool(2)
+        val appending = CountDownLatch(1); val release = CountDownLatch(1)
+        server.start()
+        try {
+            holdAuditAppends(server, appending, release)
+            val request = worker.submit<Boolean> { server.withActiveRequest {
+                server.postResponseAuditAppend {
+                    server.audit.record(WebAuditActor.OPERATOR, WebAuditAction.SUPPORT_EXPORT, WebAuditTarget(),
+                        WebAuditOutcome.ACCEPTED, 200, null, null)
+                }
+            } }
+            assertTrue(appending.await(10, TimeUnit.SECONDS), "the audit append was reached")
+            val started = System.nanoTime()
+            val first = callers.submit<WebStopOutcome> { server.stop() }
+            // The second caller arrives well inside the first caller's audit extension. A reset would restart
+            // the 2 s audit bound from here (about 3.5 s in); sharing ends both at the first caller's deadline.
+            assertFailsWith<TimeoutException> { first.get(1500, TimeUnit.MILLISECONDS) }
+            val second = callers.submit<WebStopOutcome> { server.stop() }
+            assertEquals(WebStopOutcome.AUDIT_PENDING, first.get(10, TimeUnit.SECONDS))
+            assertEquals(WebStopOutcome.AUDIT_PENDING, second.get(10, TimeUnit.SECONDS))
+            val elapsed = elapsedMs(started)
+            assertTrue(elapsed < 3000, "a later stop reset the shared drain deadline: $elapsed ms")
+            release.countDown()
+            assertTrue(request.get(10, TimeUnit.SECONDS))
+            assertTrue(server.awaitStoreRelease(10_000), "the finished append released the store")
+            assertWholeAuditEntry(root, WebAuditAction.SUPPORT_EXPORT)
+        } finally {
+            release.countDown(); worker.shutdownNow(); callers.shutdownNow()
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS) && callers.awaitTermination(10, TimeUnit.SECONDS))
+            server.stop(); root.toFile().deleteRecursively()
+        }
+    }
+
     @Test fun `stop waits for an admitted handler and retains ownership until it leaves`() = checkDrain(false)
 
     @Test fun `interrupted stop still drains admitted handlers and restores the interrupt flag`() = checkDrain(true)

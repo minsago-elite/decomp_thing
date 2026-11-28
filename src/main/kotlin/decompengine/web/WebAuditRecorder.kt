@@ -68,22 +68,18 @@ internal class WebAuditRecorder(
             val revisionId = source?.revisionId?.let { confirmedOr(it, ::revisionCommitment) }
                 ?: location?.third?.takeIf { it == target.revisionId && !policy.leaks(it) }
                 ?: target.revisionId?.let(::revisionCommitment)
-            // Attribution and field preparation above are ordinary request work; only the durable append is scoped.
-            val append = { log.record(
-                actor = sessionId?.let(WebAuditActor::browserSession) ?: WebAuditActor.UNAUTHENTICATED,
-                action = action,
-                target = WebAuditTarget(
-                    jobId = jobId,
-                    runId = runId,
-                    expectedVersion = strongVersion(exchange.requestHeaders["If-Match"])?.let(::versionCommitment),
-                    resultVersion = if (status < 400) strongVersion(headers["ETag"])?.takeUnless(policy::leaks) else null,
-                    revisionId = revisionId,
-                ),
-                outcome = outcome,
-                status = status,
-                reasonCode = reason ?: if (outcome == WebAuditOutcome.FAILED) "INTERNAL_ERROR" else null,
-                requestId = headers.getFirst("X-Request-ID"),
-            ); Unit }
+            val actor = sessionId?.let(WebAuditActor::browserSession) ?: WebAuditActor.UNAUTHENTICATED
+            val recordedTarget = WebAuditTarget(
+                jobId = jobId,
+                runId = runId,
+                expectedVersion = strongVersion(exchange.requestHeaders["If-Match"])?.let(::versionCommitment),
+                resultVersion = if (status < 400) strongVersion(headers["ETag"])?.takeUnless(policy::leaks) else null,
+                revisionId = revisionId,
+            )
+            val reasonCode = reason ?: if (outcome == WebAuditOutcome.FAILED) "INTERNAL_ERROR" else null
+            val requestId = headers.getFirst("X-Request-ID")
+            // Every argument is prepared above as ordinary request work; only the durable append itself is scoped.
+            val append = { log.record(actor, action, recordedTarget, outcome, status, reasonCode, requestId); Unit }
             if (postResponse) postResponseAppend(append) else append()
         }
     }

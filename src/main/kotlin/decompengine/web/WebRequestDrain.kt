@@ -27,12 +27,19 @@ internal class WebRequestDrain(private val clock: () -> Long = System::nanoTime)
     fun enterAudit() { observe(); audits++ }
     fun exitAudit() { observe(); audits-- }
 
-    /** Starts a drain with absolute [clock] deadlines; [auditDeadline] is at least [requestDeadline]. */
-    fun begin(requestDeadline: Long, auditDeadline: Long) {
-        draining = true
-        this.requestDeadline = requestDeadline
-        this.auditDeadline = if (auditDeadline - requestDeadline > 0) auditDeadline else requestDeadline
+    /**
+     * Starts the drain once. Its deadlines are measured from this call, made under the caller's lock, so
+     * observation is enabled atomically with them; no transition can slip past an earlier sampled start.
+     * Overlapping and later callers share the same deadlines and decision: it is never reset. The audit
+     * timeout is at least the request timeout.
+     */
+    fun begin(requestTimeoutNanos: Long, auditTimeoutNanos: Long) {
+        if (draining) return
+        val now = clock()
+        requestDeadline = now + requestTimeoutNanos
+        auditDeadline = now + maxOf(requestTimeoutNanos, auditTimeoutNanos)
         auditExtension = null
+        draining = true
     }
 
     private fun observe() {

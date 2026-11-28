@@ -42,6 +42,13 @@ class WebAuditRecorderTest {
                         exchange.sendResponseHeaders(200, 10)
                         exchange.responseBody.use { it.write("ok".toByteArray()) }
                     } catch (_: java.io.IOException) { exchange.close() }
+                    // A chunked body completes normally, but its close cannot confirm the terminating chunk.
+                    "/chunked" -> { exchange.sendResponseHeaders(200, 0); exchange.responseBody.use { it.write("ok".toByteArray()) } }
+                    // The response completes, then the handler throws: a failed handler is never scoped.
+                    "/thrown-after-response" -> {
+                        exchange.sendResponseHeaders(200, 2); exchange.responseBody.use { it.write("ok".toByteArray()) }
+                        error("handler failed after responding")
+                    }
                     // The failed path throws before any response is sent.
                     else -> error("handler failed before responding")
                 }
@@ -59,9 +66,11 @@ class WebAuditRecorderTest {
             val incomplete = client.sendAsync(HttpRequest.newBuilder(URI("$origin/incomplete")).POST(HttpRequest.BodyPublishers.noBody()).build(),
                 HttpResponse.BodyHandlers.discarding())
             assertTrue(post("/failed").let { it.isFailure || it.getOrThrow() >= 500 })
+            assertEquals(200, post("/chunked").getOrThrow())
+            assertEquals(200, post("/thrown-after-response").getOrThrow())
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
-            while (log.read().entries.size < 3 && System.nanoTime() < deadline) Thread.sleep(10)
-            assertEquals(3, log.read().entries.size)
+            while (log.read().entries.size < 5 && System.nanoTime() < deadline) Thread.sleep(10)
+            assertEquals(5, log.read().entries.size)
             assertEquals(listOf(1), scoped.toList(), "only the completed response's append is post-response work")
             incomplete.cancel(true)
         } finally {
