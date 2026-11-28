@@ -67,11 +67,13 @@ owns its process tree.
 
 The supervisor makes itself a child subreaper, so descendants the worker orphans
 are reparented to it, not to init. Before the launch permit it requires `/proc` to
-be procfs whose `/proc/self` is the supervisor, so `/proc` belongs to its own PID
-namespace, and it requires pidfd signalling. It starts the worker only after the
-parent's launch permit and signals only its own children: it opens a pidfd for each
-child PID, confirms that PID's parent is still the supervisor, and signals through
-the pidfd. A child keeps its PID until the supervisor reaps it, so a PID reused by
+be procfs whose `/proc/self` is the supervisor and whose `NStgid` lists exactly one
+PID, so `/proc` belongs to its own PID namespace rather than an ancestor where the
+same number may name it, and it requires pidfd signalling and `waitid` on a pidfd.
+It starts the worker only after the parent's launch permit and signals only its own
+children: procfs proposes PIDs whose parent is the supervisor, and each is signalled
+through a pidfd only after a non-consuming `waitid` on that exact pidfd shows it is
+the supervisor's own child. A child keeps its PID until the supervisor reaps it, so a PID reused by
 another process, even within the same clock tick, is never signalled. Its standard input is the control channel: `T`
 sends SIGTERM to its children, `K` kills them until none remain, and end of file
 acts as `K`, so the tree cannot outlive the application. Once the worker exits,

@@ -8,10 +8,11 @@
  * The supervisor becomes a child subreaper before it starts the worker, so every descendant the
  * worker orphans is reparented here instead of to init. It signals only its own children, found by
  * their parent PID in its own procfs: before the permit it requires /proc to be procfs whose
- * /proc/self is this process, so /proc belongs to this PID namespace. Each signal goes through a pidfd
- * opened for that PID and is sent only if the PID's parent is still this supervisor. A child keeps its
- * PID until this process reaps it, and this process reaps only in its own loop, so the pidfd names
- * that child and a signal can never reach a process that reused a PID.
+ * /proc/self is this process and whose NStgid lists exactly one PID, so /proc belongs to this PID
+ * namespace rather than an ancestor where the same number may name it. Each signal goes through a
+ * pidfd opened for that PID and is sent only if a non-consuming waitid on that exact pidfd succeeds,
+ * which only this process's own child allows. A child keeps its PID until this process reaps it, and
+ * this process reaps only in its own loop, so a signal can never reach a process that reused a PID.
  *
  * Standard input is the parent's control channel:
  *   "1\n"  the launch permit. The worker starts only after it and receives the same two bytes on a
@@ -70,6 +71,9 @@
 #ifndef SYS_pidfd_send_signal
 #define SYS_pidfd_send_signal 424
 #endif
+#ifndef P_PIDFD
+#define P_PIDFD 3
+#endif
 #define RESCAN_MILLIS 20
 #define MAXIMUM_LEFTOVER_GRACE_MILLIS 1000
 
@@ -115,9 +119,24 @@ static int pidfd_signal(int pidfd, int signal_number) {
 }
 
 /*
- * Signals every process whose parent is this supervisor. The pidfd is opened for the PID first and
- * used only if that PID's parent is still this supervisor: an unreaped child keeps its PID, so the
- * descriptor then names that child. Returns -1 if /proc cannot be enumerated.
+ * Whether [pidfd] names a child of this process. Only a child can be waited on; WNOWAIT leaves its
+ * state, and ECHILD means the descriptor names some other process. Returns -1 when waitid fails
+ * for another reason.
+ */
+static int own_child(int pidfd) {
+    siginfo_t info;
+    memset(&info, 0, sizeof info);
+    int result;
+    do result = waitid((idtype_t)P_PIDFD, (id_t)pidfd, &info, WEXITED | WNOHANG | WNOWAIT | __WALL);
+    while (result < 0 && errno == EINTR);
+    if (result == 0) return 1;
+    return errno == ECHILD ? 0 : -1;
+}
+
+/*
+ * Signals every process whose parent is this supervisor. Procfs only proposes candidates: the pidfd
+ * opened for each PID is signalled only if waitid on that exact descriptor proves it is our child.
+ * Returns -1 if /proc cannot be enumerated.
  */
 static int signal_children(int signal_number) {
     DIR *proc = opendir("/proc");
@@ -130,7 +149,7 @@ static int signal_children(int signal_number) {
         if (parent_of((pid_t)pid) != self_pid) continue;
         int pidfd = open_pidfd((pid_t)pid);
         if (pidfd < 0) continue;
-        if (parent_of((pid_t)pid) == self_pid) pidfd_signal(pidfd, signal_number);
+        if (own_child(pidfd) == 1) pidfd_signal(pidfd, signal_number);
         close(pidfd);
     }
     closedir(proc);
@@ -150,8 +169,39 @@ static void require_own_procfs_and_pidfd(void) {
     link[count] = '\0';
     snprintf(expected, sizeof expected, "%d", (int)self_pid);
     if (strcmp(link, expected) != 0) fail_before_worker(EXIT_SUPERVISOR_FAILURE, "/proc belongs to another PID namespace");
+    /*
+     * NStgid lists this process's PID in each namespace from the procfs's own down to ours. A procfs
+     * of an ancestor namespace lists more than one, even when its first number happens to equal ours.
+     */
+    char status[8192];
+    int fd = open("/proc/self/status", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) fail_before_worker(EXIT_SUPERVISOR_FAILURE, "/proc/self/status cannot be read");
+    size_t length = 0;
+    while (length < sizeof status - 1) {
+        ssize_t read_count = read(fd, status + length, sizeof status - 1 - length);
+        if (read_count < 0 && errno == EINTR) continue;
+        if (read_count <= 0) break;
+        length += (size_t)read_count;
+    }
+    close(fd);
+    status[length] = '\0';
+    char *line = strncmp(status, "NStgid:", 7) == 0 ? status : strstr(status, "\nNStgid:");
+    if (line == NULL) fail_before_worker(EXIT_SUPERVISOR_FAILURE, "/proc/self/status has no NStgid");
+    if (*line == '\n') line++;
+    char *end = strchr(line, '\n');
+    if (end != NULL) *end = '\0';
+    int levels = 0;
+    for (char *token = strtok(line + 7, " \t"); token != NULL; token = strtok(NULL, " \t")) {
+        levels++;
+        if (levels > 1 || strcmp(token, expected) != 0) {
+            fail_before_worker(EXIT_SUPERVISOR_FAILURE, "/proc belongs to an ancestor PID namespace");
+        }
+    }
+    if (levels != 1) fail_before_worker(EXIT_SUPERVISOR_FAILURE, "/proc/self/status has no NStgid");
     int pidfd = open_pidfd(self_pid);
     if (pidfd < 0 || pidfd_signal(pidfd, 0) != 0) fail_before_worker(EXIT_SUPERVISOR_FAILURE, "pidfd signalling is unavailable");
+    /* This process is not its own child, so waitid on its pidfd must report ECHILD, not EINVAL. */
+    if (own_child(pidfd) != 0) fail_before_worker(EXIT_SUPERVISOR_FAILURE, "waitid on a pidfd is unavailable");
     close(pidfd);
 }
 
@@ -324,7 +374,7 @@ int main(int argc, char **argv) {
         if (killing && signal_children(SIGKILL) != 0) {
             /* Without /proc the worker itself can still be killed; adopted children wait for it. */
             failed = 1;
-            if (worker_pidfd >= 0) pidfd_signal(worker_pidfd, SIGKILL);
+            if (worker_pidfd >= 0 && own_child(worker_pidfd) == 1) pidfd_signal(worker_pidfd, SIGKILL);
         }
 
         struct pollfd ready[2] = {{events, POLLIN, 0}, {control_open ? STDIN_FILENO : -1, POLLIN, 0}};

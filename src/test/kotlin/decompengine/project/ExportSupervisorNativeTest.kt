@@ -70,7 +70,9 @@ class ExportSupervisorNativeTest {
             "(trap '' TERM; while :; do (trap '' TERM; exec sleep 30) & echo \$! >> '$spawned'; sleep 0.02; done) & " +
                 "exec sleep 30")) { supervisor ->
             permit(supervisor)
-            while (!spawned.exists() || spawned.readLines().size < 5) Thread.sleep(10)
+            val ready = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+            while ((!spawned.exists() || spawned.readLines().size < 5) && System.nanoTime() < ready) Thread.sleep(10)
+            assertTrue(spawned.exists() && spawned.readLines().size >= 5, "the child did not start forking grandchildren")
 
             supervisor.outputStream.write('K'.code)
             supervisor.outputStream.flush()
@@ -152,6 +154,42 @@ class ExportSupervisorNativeTest {
             supervisor().toString(), "0") + worker)
         assertEquals(121 to true, notProc.first to notProc.second.contains("/proc is not procfs"), notProc.second)
         assertFalse(marker.exists(), "no worker may start without the supervisor's own procfs")
+    }
+
+    @Test
+    fun `an ancestor procfs at an equal PID number starts no worker`() = inControlTemporaryDirectory { root ->
+        requireNamespaces()
+        // Namespace A mounts its own /proc. A nested PID namespace B keeps A's /proc, and both ns_last_pid
+        // values place the supervisor at PID 300 in A and in B, so /proc/self matches getpid() there.
+        val driver = """
+            set -eu
+            sup=${'$'}1 work=${'$'}2 q=300
+            mkfifo "${'$'}work/ready" "${'$'}work/go"
+            printf '1\n' > "${'$'}work/permit"
+            unshare -pf /bin/sh -c '
+                sup=${'$'}1 work=${'$'}2 q=${'$'}3
+                echo > "${'$'}work/ready"
+                read go < "${'$'}work/go"
+                echo ${'$'}((q - 1)) > /proc/sys/kernel/ns_last_pid
+                "${'$'}sup" 0 /bin/sh -c "touch \"\${'$'}0/worker-started\"" "${'$'}work" < "${'$'}work/permit" 2> "${'$'}work/stderr" &
+                s=${'$'}!
+                status=0
+                wait ${'$'}s || status=${'$'}?
+                echo "inner=${'$'}s status=${'$'}status" > "${'$'}work/result"
+            ' inner "${'$'}sup" "${'$'}work" "${'$'}q" &
+            read ready < "${'$'}work/ready"
+            echo ${'$'}((q - 1)) > /proc/sys/kernel/ns_last_pid
+            echo > "${'$'}work/go"
+            wait
+            cat "${'$'}work/result"
+        """.trimIndent()
+        val result = driverResult(driver, root)
+        val diagnostic = root.resolve("stderr").readText()
+        assertEquals("300", result.getValue("inner"), "the supervisor must hold PID 300 in the inner namespace: $result")
+        assertEquals("121", result.getValue("status"), diagnostic)
+        // This check runs after the /proc/self comparison, so reaching it shows the numbers were equal.
+        assertTrue(diagnostic.contains("/proc belongs to an ancestor PID namespace"), diagnostic)
+        assertFalse(root.resolve("worker-started").exists(), "no worker may start over an ancestor procfs")
     }
 
     @Test
