@@ -7,8 +7,11 @@ import java.time.Duration
 import kotlin.collections.associateBy
 import kotlin.collections.single
 import kotlin.io.path.createTempDirectory
+import kotlin.io.path.ExperimentalPathApi
+import kotlin.io.path.deleteRecursively
 import kotlin.io.path.writeText
 import kotlin.io.path.writeBytes
+import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -696,7 +699,20 @@ class WorkspaceSnapshotLimitsTest {
         }.dimension)
     }
 
-    private fun workspace(): Path = createTempDirectory("ws-").also {
+    private val workspaces = mutableListOf<Path>()
+
+    @OptIn(ExperimentalPathApi::class)
+    @AfterTest
+    fun deleteWorkspaces() {
+        workspaces.forEach { it.deleteRecursively() }
+        workspaces.clear()
+    }
+
+    /** Repository-local fixture root: tests must not create files outside the repository. */
+    private fun workspace(): Path = createTempDirectory(
+        Files.createDirectories(Path.of("build", "test-tmp", "workspace-snapshot-limits").toAbsolutePath()), "ws-",
+    ).also {
+        workspaces += it
         Files.createDirectory(it.resolve("src"))
     }
 
