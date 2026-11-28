@@ -55,22 +55,28 @@ interface DurableWebWorkflowContinuation {
     /** Read only the workflow's fixed, bounded checkpoint files and return a detached capture. */
     fun capture(request: DurableWebWorkflowCheckpointRequest): VerifiedWebCheckpoint?
     /**
-     * Cancellation can arrive after the service's last ownership check and before this call begins. An
-     * implementation must therefore perform no side effect (process, session, network or file write)
-     * except inside [DurableWebWorkflowContinuationFence.launch], and must not catch what that call throws.
+     * Cancellation or shutdown can arrive after the service's last ownership check and before this call
+     * begins. An implementation must therefore perform no side effect (process, session, network or file
+     * write) except inside the `run` callback of [DurableWebWorkflowContinuationFence.launch], and must not
+     * catch what that call throws.
      */
     fun continueFrom(context: DurableWebWorkflowContext, checkpoint: VerifiedWebCheckpoint,
         fence: DurableWebWorkflowContinuationFence): DurableWebWorkflowOutcome
 }
 
 /**
- * Atomically rechecks the continuation's ownership, cancellation and publication state and, only if it still
- * holds, runs [start] under the same service lock. Cancellation therefore either refuses the launch (the
- * call throws and [start] never runs) or is delivered afterwards as an interrupt to the launched work.
- * [start] must only begin bounded work, such as starting and registering a process, and must not block.
+ * Serializes a continuation's first side effect with cancellation and shutdown through a service-owned launch
+ * permit. [launch] rechecks ownership, cancellation and publication state under the service monitor and grants
+ * the permit under the lock that publishes the shutdown signal. [prepare] runs while the permit is granted and
+ * must be inert and bounded: it may build the work, for example a process description, but must not start it,
+ * block, or call back into the service. [run] then starts and awaits the work outside every service lock.
+ *
+ * A refused launch throws, and neither [prepare] nor [run] starts anything. Cancellation or shutdown signalled
+ * after the grant interrupts the thread running [run], which must stop the work it started and must not catch
+ * what [launch] throws. Each continuation may launch once.
  */
 interface DurableWebWorkflowContinuationFence {
-    fun <T> launch(start: () -> T): T
+    fun <W, T> launch(prepare: () -> W, run: (W) -> T): T
 }
 
 /**

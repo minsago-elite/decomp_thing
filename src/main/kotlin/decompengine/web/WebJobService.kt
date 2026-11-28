@@ -58,12 +58,37 @@ internal fun <T> withWebUploadPublicationOutcome(
     throw WebJobServiceException("RECOVERY_REQUIRED", "Upload publication is uncertain. Inspect storage before retrying.", failure)
 }
 
-/** Terminal publication and shutdown signalling share this fence, independently of cleanup locks. */
-internal class WebCompletionPublicationFence(private val publishShutdown: () -> Unit) {
+/**
+ * Terminal publication, shutdown signalling and continuation launch permits share this fence, independently
+ * of cleanup locks. A permit is granted only before the shutdown signal, under the same lock that publishes
+ * it, so shutdown either refuses a launch or finds its permit and interrupts the holder. At most
+ * [maximumLaunches] permits are outstanding at once.
+ */
+internal class WebCompletionPublicationFence(private val maximumLaunches: Int = 1, private val publishShutdown: () -> Unit) {
+    init { require(maximumLaunches in 1..64) }
     private val mutex = ReentrantLock(true)
-    fun signalShutdown() = mutex.withLock { publishShutdown() }
+    private var shutdownSignalled = false
+    private val launches = LinkedHashSet<WebLaunchPermit<*>>()
+    fun signalShutdown() = mutex.withLock {
+        shutdownSignalled = true
+        try { publishShutdown() } finally { launches.forEach { it.holder.interrupt() } }
+    }
     fun <T> publishCompletion(publish: () -> T): T = mutex.withLock { publish() }
+
+    /**
+     * Grants the calling thread a permit, or returns null after the shutdown signal or at capacity. [prepare]
+     * runs under the fence and must be inert and bounded; it must not wait for, or call back into, the service.
+     */
+    fun <W> grantLaunch(prepare: () -> W): WebLaunchPermit<W>? = mutex.withLock {
+        if (shutdownSignalled || launches.size >= maximumLaunches) null
+        else WebLaunchPermit(Thread.currentThread(), prepare()).also { launches += it }
+    }
+
+    /** The holder releases its permit after the launched work returns; shutdown no longer interrupts it. */
+    fun releaseLaunch(permit: WebLaunchPermit<*>) = mutex.withLock { launches.remove(permit); Unit }
 }
+
+internal class WebLaunchPermit<W>(val holder: Thread, val prepared: W)
 
 internal fun selectWebLegacyCompletion(status: String, message: String, stopped: Boolean): Pair<String, String> =
     if (status == "complete" && stopped) "failed" to "Server stopped before the operation reported completion"
@@ -342,7 +367,7 @@ class WebJobService(
     @Volatile private var initialized = false
     @Volatile private var stopping = false
     @Volatile private var closed = false
-    private val completionPublication = WebCompletionPublicationFence { stopping = true }
+    private val completionPublication = WebCompletionPublicationFence(maximumInFlight) { stopping = true }
     private val retentionJobs = java.util.ArrayDeque<String>()
     private val retentionRuns = java.util.ArrayDeque<Pair<String, String>>()
     private var retentionCycleActive = false
@@ -681,6 +706,8 @@ class WebJobService(
 
     /** Test seam: runs inside each physical listing read, where no service monitor may be held. */
     @Volatile internal var listingReadObserver: (String) -> Unit = {}
+    /** Test seam: runs under the service monitor after the continuation's last ownership check, before its permit. */
+    @Volatile internal var continuationLaunchObserver: () -> Unit = {}
 
     /**
      * Complete bounded HTML collection. Reads never acquire ownership or retain workflow histories.
@@ -2111,16 +2138,28 @@ class WebJobService(
             if (!stillOwned() || capture == null || capture.sha256 != recovery.checkpointSha256 || capture.restores != recovery.restores) {
                 return refused
             }
-            // Cancellation may land between that check and the adapter's first side effect; the fence repeats
-            // it under the service monitor, atomically with the launch, so a cancelled successor starts nothing.
+            // Cancellation or shutdown may land between that check and the adapter's first side effect. The fence
+            // repeats the check under the service monitor (which orders cancellation) and grants a launch permit
+            // under the completion fence (which orders the shutdown signal). Neither lock is held while [run]
+            // starts or waits, so cancellation and shutdown can interrupt the permit holder.
             var launchRefused = false
+            var launched = false
             val fence = object : DurableWebWorkflowContinuationFence {
-                override fun <T> launch(start: () -> T): T = synchronized(this@WebJobService) {
-                    if (!stillOwned()) {
-                        launchRefused = true
-                        throw ContinuationLaunchRefused()
+                override fun <W, T> launch(prepare: () -> W, run: (W) -> T): T {
+                    val permit = synchronized(this@WebJobService) {
+                        try {
+                            if (launched || !stillOwned()) throw ContinuationLaunchRefused()
+                            launched = true
+                            continuationLaunchObserver()
+                            // The held monitor guards every other ownership fact. Only the shutdown signal can
+                            // change without it, and the permit is refused once that signal is published.
+                            completionPublication.grantLaunch(prepare) ?: throw ContinuationLaunchRefused()
+                        } catch (failure: Throwable) {
+                            launchRefused = true
+                            throw failure
+                        }
                     }
-                    start()
+                    return try { run(permit.prepared) } finally { completionPublication.releaseLaunch(permit) }
                 }
             }
             val outcome = try { continuation.continueFrom(context, capture, fence) }
