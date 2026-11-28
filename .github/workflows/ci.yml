@@ -209,6 +209,10 @@ jobs:
           node --test scripts/packaged-browser-restart.test.mjs
           node --check scripts/packaged-browser-cdp-diagnostics.mjs
           node --test scripts/packaged-browser-cdp-diagnostics.test.mjs
+          node --check scripts/packaged-browser-session-semantics.mjs
+          node --test scripts/packaged-browser-session-semantics.test.mjs
+          node --check scripts/packaged-browser-capture.mjs
+          node --test scripts/packaged-browser-capture.test.mjs
           node --test scripts/packaged-browser-native-download.test.mjs
       - name: Build archives and verify browser expiry and distribution contents
         env:
@@ -586,6 +590,7 @@ jobs:
             build/test-results/test
             build/reports/junit-signatures
             build/web-job-recovery-inventory.json
+            build/reports/web-resource-baseline
             build/reports/tests/v3BoundaryFinalStagingIsolated
             build/test-results/v3BoundaryFinalStagingIsolated
             build/reports/tests/v3BoundaryPublicationIsolated
@@ -614,6 +619,22 @@ jobs:
           python3 -B scripts/ci-observe-host-mount-events.py stop
           --workspace "$GITHUB_WORKSPACE"
           --session "${{ github.run_id }}-${{ github.run_attempt }}-kotlin-${{ matrix.shard }}"
+      - name: Summarize host mount churn restart telemetry
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: >-
+          bash scripts/ci-summarize-host-mount-churn-restarts.sh
+          "build/acp-host-mount-churn-restarts/github-${{ github.run_id }}-${{ github.run_attempt }}"
+      - name: Retain per-run host mount churn restart counts
+        uses: actions/upload-artifact@v7
+        if: always()
+        continue-on-error: true
+        with:
+          name: kotlin-${{ matrix.shard }}-host-mount-churn-restarts-${{ github.run_attempt }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: build/acp-host-mount-churn-restarts/github-${{ github.run_id }}-${{ github.run_attempt }}/
       - name: Retain passive host mount diagnostics
         uses: actions/upload-artifact@v7
         if: always()

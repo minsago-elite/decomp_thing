@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import vm from 'node:vm';
+import { recordCleanupTruth } from './packaged-browser-capture.mjs';
 import { assertGracefulShutdown, bootstrapHashExpression, assertOnlyPinWrites, boundReport, findBootstrap, hasOpenEventStream, isProgressReadUrl, matchingResponse, publishAtomically, publishReport, scrubTokens, summarizeRequests, MAX_REPORT_BYTES, MAX_REPORT_PARTS, REPORT_PART_BYTES } from './packaged-browser-restart.mjs';
 
 const origin = 'http://127.0.0.1:4000';
@@ -116,6 +117,200 @@ test('still rejects an oversized report after duplicate CSP policy encoding', ()
   assert.throws(() => boundReport(report, 1000), /exceeds its byte bound/);
 });
 
+test('references non-diagnostic evidence that cannot fit and keeps a short diagnostic inline', async () => {
+  const buildDirectory = join(process.cwd(), 'build');
+  await mkdir(buildDirectory, { recursive: true });
+  const directory = await mkdtemp(join(buildDirectory, 'unrepresentable-report-'));
+  const path = join(directory, 'report.json');
+  try {
+    const report = { status: 'failed', evidence: 'x'.repeat(5000), error: 'diagnostic' };
+    await publishReport(directory, report, [], { maxBytes: 1000 });
+    const bytes = await readFile(path);
+    assert.ok(bytes.length <= 1000);
+    const parsed = JSON.parse(bytes);
+    assert.equal(parsed.status, 'failed');
+    assert.equal(parsed.error, 'diagnostic');
+    assert.deepEqual(parsed.reportEvidence.referencedKeys, ['evidence']);
+    assert.equal(parsed.diagnosticTruncation, undefined);
+    assert.equal(await readFile(path + '.browser-publication').then(() => true, () => false), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('keeps small diagnostic fields when a large error competes with near-limit evidence', () => {
+  const report = {
+    status: 'failed', evidence: 'x'.repeat(523_000), error: 'é'.repeat(300_000),
+    applicationError: 'a', browserError: 'b', viteError: 'v', workCleanupError: 'w', cleanupErrors: ['c', 'd', 'e'],
+  };
+  const bounded = boundReport(report);
+  assert.ok(Buffer.byteLength(JSON.stringify(bounded), 'utf8') <= MAX_REPORT_BYTES);
+  assert.deepEqual({ applicationError: bounded.applicationError, browserError: bounded.browserError,
+    viteError: bounded.viteError, workCleanupError: bounded.workCleanupError, cleanupErrors: bounded.cleanupErrors },
+  { applicationError: 'a', browserError: 'b', viteError: 'v', workCleanupError: 'w', cleanupErrors: ['c', 'd', 'e'] });
+  assert.ok(bounded.error.includes('é'));
+  assert.ok(bounded.diagnosticTruncation.error.omittedBytes > 0);
+  assert.deepEqual(Object.keys(bounded.diagnosticTruncation), ['error']);
+});
+
+test('publishes a scrubbed, byte-bounded failure with large UTF-8 diagnostics and intact verdicts', async () => {
+  const token = 'secret-access-token-123';
+  const bootstrap = '#bootstrap=bootSecret_123';
+  const diagnostic = (targetBytes, prefix, suffix) => {
+    const fillerBytes = targetBytes - Buffer.byteLength(prefix + suffix, 'utf8');
+    assert.ok(fillerBytes >= 0);
+    return `${prefix}${'é'.repeat(Math.floor(fillerBytes / 2))}${fillerBytes % 2 ? 'x' : ''}${suffix}`;
+  };
+  const report = {
+    status: 'failed', mode: 'audit',
+    gates: { timing: 'failed', memory: 'failed', requests: 'failed' },
+    budgetFailures: ['timing p95 exceeded its existing budget', 'peak JVM memory exceeded its existing budget'],
+    requestFailures: ['required source request failed'],
+    applicationError: diagnostic(1_062_019, `Structure diagnostic ${token} ${bootstrap} START `, ' APPLICATION-END'),
+    error: diagnostic(206_263, 'Structure driver diagnostic START ', ' DRIVER-END'),
+    requests: { browser: Array.from({ length: 1000 }, (_, index) => ({ method: 'GET', url: `/route/${index}?detail=${'x'.repeat(90)}` })) },
+    shutdownConfirmed: true, workCleanupConfirmed: true, workRetained: false,
+  };
+  const buildDirectory = join(process.cwd(), 'build');
+  await mkdir(buildDirectory, { recursive: true });
+  const directory = await mkdtemp(join(buildDirectory, 'failure-report-'));
+  const path = join(directory, 'report.json');
+  try {
+    const { primaryText, evidence } = await publishReport(directory, report, [token]);
+    const bytes = await readFile(path);
+    const parsed = JSON.parse(bytes.toString('utf8'));
+    assert.equal(primaryText, bytes.toString('utf8'));
+    assert.ok((await stat(path)).size <= MAX_REPORT_BYTES, `actual report file exceeded ${MAX_REPORT_BYTES} bytes`);
+    assert.ok(bytes.length <= MAX_REPORT_BYTES);
+    assert.equal(parsed.status, 'failed');
+    // Diagnostics are excerpted, not referenced, and the scrubbed whole survives in the evidence parts.
+    assert.deepEqual(parsed.reportEvidence.referencedKeys, []);
+    const parts = await Promise.all(evidence.parts.map(part => readFile(join(directory, part.file))));
+    const whole = Buffer.concat(parts);
+    assert.equal(createHash('sha256').update(whole).digest('hex'), parsed.reportEvidence.sha256);
+    const scrubbed = scrubTokens(report, [token]);
+    assert.equal(whole.toString('utf8'), JSON.stringify(scrubbed, null, 2) + '\n');
+    assert.equal(whole.toString('utf8').includes(token), false);
+    assert.deepEqual(parsed.gates, report.gates);
+    assert.deepEqual(parsed.budgetFailures, report.budgetFailures);
+    assert.deepEqual(parsed.requestFailures, report.requestFailures);
+    assert.equal(parsed.shutdownConfirmed, true);
+    assert.equal(parsed.workCleanupConfirmed, true);
+    assert.equal(parsed.workRetained, false);
+    assert.deepEqual(parsed.requests, report.requests, 'Request evidence fits inline once diagnostics are excerpted');
+    assert.ok(parsed.applicationError.includes('Structure diagnostic [redacted] #bootstrap=[redacted] START'));
+    assert.ok(parsed.applicationError.includes('APPLICATION-END'));
+    assert.ok(parsed.error.includes('Structure driver diagnostic START'));
+    assert.ok(parsed.error.includes('DRIVER-END'));
+    assert.equal(parsed.diagnosticTruncation.applicationError.originalBytes, Buffer.byteLength(report.applicationError.replace(token, '[redacted]').replace(bootstrap, '#bootstrap=[redacted]')));
+    assert.equal(parsed.diagnosticTruncation.error.originalBytes, Buffer.byteLength(report.error));
+    assert.ok(parsed.diagnosticTruncation.applicationError.omittedBytes > 0);
+    assert.ok(parsed.diagnosticTruncation.error.omittedBytes > 0);
+    assert.equal(parsed.diagnosticTruncation.applicationError.sha256, createHash('sha256').update(scrubbed.applicationError).digest('hex'));
+    assert.equal(parsed.diagnosticTruncation.error.sha256, createHash('sha256').update(scrubbed.error).digest('hex'));
+    assert.equal(bytes.toString('utf8').includes(token), false);
+    assert.equal(bytes.toString('utf8').includes(bootstrap), false);
+    assert.equal(await readFile(path + '.browser-publication').then(() => true, () => false), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('reserves diagnostic excerpts before near-limit request evidence at the production cap', async () => {
+  const buildDirectory = join(process.cwd(), 'build');
+  await mkdir(buildDirectory, { recursive: true });
+  const directory = await mkdtemp(join(buildDirectory, 'diagnostic-reserve-'));
+  try {
+    // Without a reserve these requests fit beside marker-only excerpts, leaving ~0 bytes of either diagnostic.
+    const report = { status: 'failed', mode: 'audit', error: 'D'.repeat(200_000) + ' DRIVER-END',
+      applicationError: 'A'.repeat(1_000_000) + ' APPLICATION-END', requests: 'r'.repeat(MAX_REPORT_BYTES - 1500) };
+    await publishReport(directory, report, []);
+    const bytes = await readFile(join(directory, 'report.json'));
+    assert.ok(bytes.length <= MAX_REPORT_BYTES);
+    const parsed = JSON.parse(bytes);
+    assert.deepEqual(parsed.reportEvidence.referencedKeys, ['requests']);
+    for (const [name, end] of [['error', 'DRIVER-END'], ['applicationError', 'APPLICATION-END']]) {
+      const truncation = parsed.diagnosticTruncation[name];
+      assert.ok(truncation.retainedBytes >= 16 * 1024, `${name} kept only ${truncation.retainedBytes} bytes`);
+      assert.equal(truncation.originalBytes, Buffer.byteLength(report[name]));
+      assert.equal(truncation.sha256, createHash('sha256').update(report[name]).digest('hex'));
+      assert.ok(parsed[name].endsWith(end));
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('references a required fact before the diagnostic excerpt markers at the production cap', async () => {
+  const buildDirectory = join(process.cwd(), 'build');
+  await mkdir(buildDirectory, { recursive: true });
+  const directory = await mkdtemp(join(buildDirectory, 'required-reference-'));
+  try {
+    const report = { status: 'failed', mode: 'audit', exitCode: 1, error: 'E'.repeat(700_000) + ' DRIVER-END',
+      requestFailures: 'q'.repeat(530_000) };
+    await publishReport(directory, report, []);
+    const bytes = await readFile(join(directory, 'report.json'));
+    assert.ok(bytes.length <= MAX_REPORT_BYTES);
+    const parsed = JSON.parse(bytes);
+    assert.deepEqual(parsed.reportEvidence.referencedKeys, ['requestFailures']);
+    assert.equal(parsed.mode, 'audit');
+    assert.equal(parsed.exitCode, 1);
+    const truncation = parsed.diagnosticTruncation.error;
+    assert.ok(truncation.retainedBytes >= 400_000, `error kept only ${truncation.retainedBytes} bytes`);
+    assert.ok(parsed.error.startsWith('E') && parsed.error.endsWith('DRIVER-END'));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('keeps a small-cap excerpt instead of referencing short facts with larger references', async () => {
+  const buildDirectory = join(process.cwd(), 'build');
+  await mkdir(buildDirectory, { recursive: true });
+  const directory = await mkdtemp(join(buildDirectory, 'small-cap-excerpt-'));
+  try {
+    const report = { status: 'failed', mode: 'audit', exitCode: 1, auditVerdict: 'failed', error: 'E'.repeat(4990) + ' DRIVER-END',
+      shutdownConfirmed: false, forcedShutdown: true, workRetained: true, workCleanupConfirmed: false, installationUnchanged: true };
+    await publishReport(directory, report, [], { maxBytes: 1200 });
+    const bytes = await readFile(join(directory, 'report.json'));
+    assert.ok(bytes.length <= 1200);
+    const parsed = JSON.parse(bytes);
+    assert.deepEqual(parsed.reportEvidence.referencedKeys, []);
+    for (const key of ['status', 'mode', 'exitCode', 'auditVerdict', 'shutdownConfirmed', 'forcedShutdown', 'workRetained',
+      'workCleanupConfirmed', 'installationUnchanged']) assert.equal(parsed[key], report[key], key);
+    assert.ok(parsed.diagnosticTruncation.error.retainedBytes > 0);
+    assert.ok(parsed.error.startsWith('E') && parsed.error.endsWith('DRIVER-END'));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('references large diagnostics when even their excerpt markers cannot fit the primary bound', async () => {
+  const buildDirectory = join(process.cwd(), 'build');
+  await mkdir(buildDirectory, { recursive: true });
+  const directory = await mkdtemp(join(buildDirectory, 'diagnostic-reference-'));
+  try {
+    const report = { status: 'failed', mode: 'audit', error: 'e'.repeat(5000), cleanupErrors: Array(8).fill('z'.repeat(5000)),
+      shutdownConfirmed: false, workRetained: true };
+    const before = structuredClone(report);
+    const { primaryText, evidence } = await publishReport(directory, report, [], { maxBytes: 2048 });
+    const bytes = await readFile(join(directory, 'report.json'));
+    assert.equal(primaryText, bytes.toString('utf8'));
+    assert.ok(bytes.length <= 2048);
+    const parsed = JSON.parse(bytes);
+    assert.equal(parsed.status, 'failed');
+    assert.equal(parsed.shutdownConfirmed, false);
+    assert.equal(parsed.workRetained, true);
+    assert.equal(parsed.diagnosticTruncation, undefined);
+    assert.ok(evidence.referencedKeys.includes('cleanupErrors'));
+    const cleanup = Buffer.from(JSON.stringify(report.cleanupErrors), 'utf8');
+    assert.deepEqual(parsed.cleanupErrors, { reportEvidence: 'cleanupErrors', bytes: cleanup.length,
+      sha256: createHash('sha256').update(cleanup).digest('hex') });
+    assert.deepEqual(report, before, 'The in-memory report must not be modified');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('only pin PUTs to the selected attempt are accepted mutations', () => {
   const pin = `${origin}/nested/api/v1/jobs/j/runs/run_fixture_3/progress-pin`;
   const session = `${origin}/nested/api/v1/session`;
@@ -170,6 +365,8 @@ test('applies a bootstrap token only as an in-page hash assignment', () => {
 });
 
 const KiB = 1024;
+// report.json is published by atomic rename from this staging file.
+const STAGED = 'report.json.browser-publication';
 const pretty = value => JSON.stringify(value, null, 2) + '\n';
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const token = 'tok_Secret-9';
@@ -346,7 +543,7 @@ test('evidence and primary I/O failures are recorded once, without retry, overwr
     const { writes, fsApi } = failing(directory, name => name === 'report.full.part-001');
     await assert.rejects(publishReport(directory, report, [token], { maxBytes: 8 * KiB, partBytes: 64 * KiB, fsApi }),
       error => { assertSecretFree(error.message); return /bounded failure record written; 1 evidence part/.test(error.message); });
-    assert.deepEqual(writes.map(write => write.name), ['report.full.part-000', 'report.full.part-001', 'report.json']);
+    assert.deepEqual(writes.map(write => write.name), ['report.full.part-000', 'report.full.part-001', STAGED]);
     assert.deepEqual(writes.slice(0, 2).map(write => write.options), [{ flag: 'wx' }, { flag: 'wx' }]);
     const all = await files(directory);
     for (const bytes of Object.values(all)) assertSecretFree(bytes);
@@ -362,7 +559,7 @@ test('evidence and primary I/O failures are recorded once, without retry, overwr
     assert.equal(digest(all['report.full.part-000']), record.reportPublication.partsWritten[0].sha256);
   });
   await scratch(async directory => {
-    const { writes, fsApi } = failing(directory, (name, all) => name === 'report.json' && all.filter(w => w.name === name).length === 1);
+    const { writes, fsApi } = failing(directory, (name, all) => name === STAGED && all.filter(w => w.name === name).length === 1);
     await assert.rejects(publishReport(directory, report, [token], { maxBytes: 8 * KiB, partBytes: 64 * KiB, fsApi }),
       /bounded failure record written/);
     const record = JSON.parse(await readFile(join(directory, 'report.json')));
@@ -373,7 +570,7 @@ test('evidence and primary I/O failures are recorded once, without retry, overwr
     const { writes, fsApi } = failing(directory, () => true);
     await assert.rejects(publishReport(directory, { status: 'passed', mode: 'audit' }, [token], { fsApi }),
       error => { assertSecretFree(error.message); return /no failure record written; 0 evidence part/.test(error.message); });
-    assert.deepEqual(writes.map(write => write.name), ['report.json', 'report.json'], 'One attempt and one failure record; no retry');
+    assert.deepEqual(writes.map(write => write.name), [STAGED, STAGED], 'One attempt and one failure record; no retry');
     assert.deepEqual(await readdir(directory), []);
   });
 });
@@ -387,8 +584,8 @@ async function runDriverFinalizer({ report, root, sensitiveValues, values = { mo
   const calls = [];
   const logs = [];
   const process = { exitCode: report.status === 'failed' ? 1 : undefined };
-  const context = vm.createContext({ report, root, sensitiveValues, values, process, join, publishReport, boundReport, scrubTokens,
-    cdp: { call: async method => { calls.push(`cdp ${method}`); } },
+  const context = vm.createContext({ report, root, sensitiveValues, values, process, join, publishReport, boundReport, scrubTokens, recordCleanupTruth,
+    cdp: { call: async method => { calls.push(`cdp ${method}`); }, lateEvidence: () => ({ settlements: [], dropped: 0 }) },
     stop: async child => { calls.push(`stop ${child}`); if (rejectStop && child === 'application') throw new Error(`stuck ${sensitiveValues[0]}`); },
     browser: 'browser', application: 'application', vite: null, forcedKill: new Set(), profile: '/fake/profile', browserTmp: null,
     safeDiagnostic: value => scrubTokens(String(value), sensitiveValues),
@@ -455,11 +652,11 @@ test('bounded failure record survives JSON escaping of retained error facts', ()
   const writes = [];
   const fsApi = { writeFile: async (path, data, options) => {
     writes.push(path.slice(root.length + 1));
-    if (path.endsWith('report.json')) return writeFile(path, data, options);
+    if (path.endsWith(STAGED)) return writeFile(path, data, options);
     throw new Error('inert evidence write refusal');
   } };
   await assert.rejects(publishReport(root, report, [token], { fsApi }), /bounded failure record written/);
-  assert.deepEqual(writes, ['report.full.part-000', 'report.json']);
+  assert.deepEqual(writes, ['report.full.part-000', STAGED]);
   const bytes = await readFile(join(root, 'report.json'));
   assert.ok(bytes.length <= 64 * KiB);
   assertSecretFree(bytes);
@@ -496,7 +693,7 @@ test('a partial failed part write is retained as an unverified attempted file', 
     /bounded failure record written/);
   const all = await files(root);
   assert.deepEqual(Object.keys(all), ['report.full.part-000', 'report.full.part-001', 'report.json']);
-  assert.deepEqual(writes, ['report.full.part-000', 'report.full.part-001', 'report.json']);
+  assert.deepEqual(writes, ['report.full.part-000', 'report.full.part-001', STAGED]);
   const record = JSON.parse(all['report.json']);
   assert.equal(record.status, 'failed');
   assert.equal(record.reportPublication.partAttempted, 'report.full.part-001');

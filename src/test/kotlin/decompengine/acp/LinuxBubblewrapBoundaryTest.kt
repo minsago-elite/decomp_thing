@@ -1,5 +1,6 @@
 package decompengine.acp
 
+import org.junit.jupiter.api.extension.ExtendWith
 import decompengine.agent.AgentAccessPolicy
 import decompengine.agent.AgentCancellation
 import decompengine.agent.AgentExecutionException
@@ -39,6 +40,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
+@ExtendWith(AcpHostMountChurnRestartReport::class)
 class LinuxBubblewrapBoundaryTest {
     @Test
     fun `mount event witness retains original phase and sticky refusal never queries again`() {
@@ -1514,6 +1516,322 @@ class LinuxBubblewrapBoundaryTest {
         }
     }
 
+    @Test
+    fun `pre-execution scopes restart after unrelated mount churn and refuse churn that reaches the closure`() {
+        withRepositoryTemporaryDirectory("acp-mount-churn-") { base ->
+            val temporary = Files.createDirectory(base.resolve("tmp"))
+            val java = Path.of(System.getProperty("java.home"), "bin", "java")
+            // A private user+mount namespace makes the probe's own mount(2) calls real kernel events
+            // on the JVM's /proc/self/mountinfo without touching the host table.
+            val process = ProcessBuilder(
+                "unshare", "--user", "--map-root-user", "--mount", "--fork", "--",
+                java.toString(), "-XX:-UsePerfData", "-Djava.io.tmpdir=$temporary", "-Djna.tmpdir=$temporary",
+                "-cp", System.getProperty("java.class.path"),
+                LinuxBubblewrapBoundaryTest::class.java.name, "host-mount-churn-restart-probe", base.toString(),
+            ).redirectErrorStream(true).redirectOutput(base.resolve("mount-churn-probe.log").toFile()).start()
+            try {
+                assertTrue(process.waitFor(45, TimeUnit.SECONDS), "host mount churn probe timed out")
+                val output = Files.readString(base.resolve("mount-churn-probe.log"))
+                assertEquals(0, process.exitValue(), output)
+                assertTrue(output.contains("host-mount-churn-restart-probe: all controls passed"), output)
+                output.lineSequence().filter { it.startsWith("host-mount-churn-restart-probe:") }.forEach(::println)
+            } finally {
+                if (process.isAlive) {
+                    process.destroyForcibly()
+                    assertTrue(process.waitFor(5, TimeUnit.SECONDS))
+                }
+            }
+        }
+    }
+
+    private fun runHostMountChurnRestartProbe(base: Path) {
+        val libc = com.sun.jna.NativeLibrary.getInstance("c")
+        fun mount(source: String?, target: Path, type: String?, flags: Long, data: String?) {
+            val result = libc.getFunction("mount").invokeInt(arrayOf(
+                source, target.toString(), type, com.sun.jna.NativeLong(flags), data,
+            ))
+            assertEquals(0, result, "mount $target failed: errno=${com.sun.jna.Native.getLastError()}")
+        }
+        fun unmount(target: Path) {
+            val result = libc.getFunction("umount2").invokeInt(arrayOf<Any?>(target.toString(), 0))
+            assertEquals(0, result, "umount $target failed: errno=${com.sun.jna.Native.getLastError()}")
+        }
+        mount(null, Path.of("/"), null, 0x4000L or 0x40000L, null) // MS_REC | MS_PRIVATE
+        val runtime = Files.createDirectories(base.resolve("runtime/sub")).parent
+        Files.writeString(runtime.resolve("a"), "alpha-runtime-content")
+        Files.writeString(runtime.resolve("sub/b"), "beta-runtime-content")
+        val unrelated = Files.createDirectory(base.resolve("unrelated"))
+        val limits = AcpRuntimeClosureLimits(64, 1024 * 1024, 8)
+        val refusal = "host mounts changed during runtime manifest"
+        val expected = calculateAcpRuntimeManifestSha256(runtime, limits) {}
+        fun scopeFrames(): List<StackTraceElement> = Thread.currentThread().stackTrace
+            .filter { it.className.startsWith("decompengine.acp.RuntimePrivateControlScope") }
+        // The scope invokes its checkpoint callback immediately before polling its own event latch.
+        fun inCheckpoint(admitted: Boolean): Boolean = scopeFrames().let { frames ->
+            frames.any { it.methodName == "checkpointLocked" } &&
+                frames.none { it.className == "decompengine.acp.RuntimePrivateControlScope\$Companion" } == admitted
+        }
+        // Add and remove a mount on a disjoint path within one window: the observed hosted shape.
+        fun churnUnrelated() {
+            mount("tmpfs", unrelated, "tmpfs", 0, "size=64k,mode=700")
+            unmount(unrelated)
+        }
+        fun witnesses(failure: Throwable): List<AcpMountEventWitness> = failure.suppressed.flatMap { suppressed ->
+            if (suppressed is AcpMountEventWitness) listOf(suppressed)
+            else if (suppressed.message == refusal) suppressed.suppressed.filterIsInstance<AcpMountEventWitness>()
+            else emptyList()
+        }
+        fun requireEventWitness(witness: AcpMountEventWitness, stage: String) {
+            assertTrue(witness.diagnosticRecord.startsWith(
+                "mount-event-v1 phase=CHECKPOINT generation=NOT_EVALUATED outcome=EVENT "), witness.diagnosticRecord)
+            assertTrue(requireNotNull(witness.admissionRecord).startsWith("mount-admission-v1 stage=$stage "))
+        }
+        val provisioning = AcpSetupRestartPermit { AutoCloseable {} }
+        fun manifest(restart: AcpSetupRestartPermit?, check: () -> Unit): String =
+            buildRuntimeManifest(runtime, limits, emptySet(), cancellationCheck = check, restart = restart).manifestSha256
+
+        // Unrelated churn while hashing, and while admitting the scope, restarts once and succeeds.
+        for ((admitted, stage) in listOf(true to "ADMITTED", false to "CONSTRUCTING")) {
+            var churns = 0
+            val before = AcpHostMountChurnRestarts.total()
+            assertEquals(expected, manifest(provisioning) {
+                if (churns == 0 && inCheckpoint(admitted)) { churns++; churnUnrelated() }
+            })
+            assertEquals(1, churns)
+            assertEquals(before + 1, AcpHostMountChurnRestarts.total())
+            requireEventWitness(AcpHostMountChurnRestarts.retained().last(), stage)
+        }
+        println("host-mount-churn-restart-probe: unrelatedChurnRestarted=2 recordedWitnesses=2")
+
+        // Without a permit, or after the owner revoked it, the first refusal is final.
+        val recorded = AcpHostMountChurnRestarts.total()
+        var consulted = 0
+        for (restart in listOf(null, AcpSetupRestartPermit { consulted++; null })) {
+            var churns = 0
+            val strict = assertFailsWith<IOException> {
+                manifest(restart) { if (churns == 0 && inCheckpoint(true)) { churns++; churnUnrelated() } }
+            }
+            assertEquals(refusal, strict.message)
+            assertEquals(1, churns)
+            assertEquals(1, witnesses(strict).size)
+            requireEventWitness(witnesses(strict).single(), "ADMITTED")
+        }
+        assertEquals(1, consulted)
+        assertEquals(recorded, AcpHostMountChurnRestarts.total())
+        println("host-mount-churn-restart-probe: strictAndRevokedRefusalsFinal=2 permitConsulted=1")
+
+        // Churn in every attempt exhausts the bound and keeps every discarded witness.
+        var persistentChurns = 0
+        val persistent = assertFailsWith<IOException> {
+            manifest(provisioning) { if (inCheckpoint(true)) { persistentChurns++; churnUnrelated() } }
+        }
+        assertEquals(refusal, persistent.message)
+        assertEquals(3, persistentChurns)
+        assertEquals(2, persistent.suppressed.count { it.message == refusal })
+        assertEquals(3, witnesses(persistent).size)
+        witnesses(persistent).forEach { requireEventWitness(it, "ADMITTED") }
+        assertEquals(recorded, AcpHostMountChurnRestarts.total())
+        println("host-mount-churn-restart-probe: persistentChurnAttempts=3 retainedWitnesses=3")
+
+        // A mount that reaches the closure is refused by the fresh attempt's own strict checks.
+        val covered = runtime.resolve("sub")
+        var coveringMounts = 0
+        try {
+            val reached = assertFailsWith<IOException> {
+                manifest(provisioning) {
+                    if (coveringMounts == 0 && inCheckpoint(true)) {
+                        coveringMounts++
+                        mount("tmpfs", covered, "tmpfs", 0, "size=64k,mode=700")
+                    }
+                }
+            }
+            assertEquals("sandbox runtime closure crosses a mount boundary", reached.message)
+            assertEquals(1, coveringMounts)
+            // Only the discarded attempt's refusal: the closure refusal itself was never restarted.
+            assertEquals(1, reached.suppressed.size)
+            assertEquals(1, reached.suppressed.count { it.message == refusal })
+            requireEventWitness(witnesses(reached).single(), "ADMITTED")
+            assertEquals(recorded, AcpHostMountChurnRestarts.total())
+        } finally {
+            if (coveringMounts > 0) unmount(covered)
+        }
+        assertEquals(expected, calculateAcpRuntimeManifestSha256(runtime, limits) {})
+        println("host-mount-churn-restart-probe: closureMountRefusedAfterRestart=true")
+
+        // A transient mount that changes the names a refused attempt walked never reaches the result.
+        var walkAdmissions = 0
+        val walkedEntries = IntArray(3)
+        var decoyMounted = false
+        var decoyRemoved = false
+        assertEquals(expected, manifest(provisioning) {
+            val frames = scopeFrames()
+            if (inCheckpoint(false)) walkAdmissions++
+            // The walk's Stream.peek callback is the manifest's only checkpoint reached through java.util.stream.
+            if (frames.isEmpty() && Thread.currentThread().stackTrace.any { it.className.startsWith("java.util.stream.") }) {
+                walkedEntries[minOf(walkAdmissions, 2)]++
+                if (walkAdmissions == 1 && !decoyMounted) {
+                    decoyMounted = true
+                    mount("tmpfs", covered, "tmpfs", 0, "size=64k,mode=700")
+                    Files.writeString(covered.resolve("decoy-x"), "decoy")
+                    Files.writeString(covered.resolve("decoy-y"), "decoy")
+                }
+            } else if (decoyMounted && !decoyRemoved && inCheckpoint(true)) {
+                decoyRemoved = true
+                unmount(covered)
+            }
+        })
+        assertTrue(decoyMounted && decoyRemoved)
+        assertEquals(2, walkAdmissions)
+        assertEquals(5, walkedEntries[1], "the refused attempt walked the transient decoy names")
+        assertEquals(4, walkedEntries[2], "the fresh attempt walked only the original names")
+        println("host-mount-churn-restart-probe: transientCoverDiscarded=true refusedWalk=5 freshWalk=4")
+
+        val controls = Files.createDirectory(base.resolve("controls"))
+        Files.setPosixFilePermissions(controls, OWNER_ONLY)
+        val type = Class.forName("decompengine.acp.PinnedControlDirectory")
+        val parentType = Class.forName("decompengine.acp.PinnedSandboxControlTemporaryParent")
+        val companion = type.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+        val create = companion.javaClass.getDeclaredMethod("create", AcpRuntimeClosureLimits::class.java, parentType)
+        fun newControl(): Any = withTemporaryParent(controls.toString()) {
+            val pinned = requireNotNull(invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()))
+            try { requireNotNull(invokePrivate(companion, create, limits, pinned)) }
+            finally { invokePrivate(pinned, AutoCloseable::class.java.getMethod("close")) }
+        }
+        fun deleteControl(control: Any) { invokePrivate(control, type.getDeclaredMethod("deleteAndProve")) }
+        // Another thread's control admission polls every published scope's own event descriptor.
+        fun concurrentAdmission(): Result<Any> {
+            var outcome: Result<Any>? = null
+            val admission = Thread { outcome = runCatching { newControl() } }
+            admission.start()
+            admission.join(20_000)
+            assertFalse(admission.isAlive, "concurrent control admission did not finish")
+            return requireNotNull(outcome)
+        }
+        val boundaryKt = Class.forName("decompengine.acp.LinuxBubblewrapBoundaryKt")
+        val registry = boundaryKt.getDeclaredField("ACTIVE_PRIVATE_CONTROLS").apply { isAccessible = true }.get(null)
+        val scopes = boundaryKt.getDeclaredField("ACTIVE_MANIFEST_SCOPES").apply { isAccessible = true }.get(null) as Set<*>
+        val observer = boundaryKt.getDeclaredField("privateControlTransactionObserver").apply { isAccessible = true }
+
+        // A concurrent admission that latches the scope before its final poll fails the attempt itself.
+        var preFinalAdmissions = 0
+        var preFinalChurned = false
+        var preFinal: Result<Any>? = null
+        val beforePreFinal = AcpHostMountChurnRestarts.total()
+        assertEquals(expected, manifest(provisioning) {
+            if (inCheckpoint(false)) preFinalAdmissions++
+            if (!preFinalChurned && preFinalAdmissions == 1 && scopeFrames().isEmpty() &&
+                Thread.currentThread().stackTrace.any { it.methodName == "buildRuntimeManifestOwned" }) {
+                preFinalChurned = true
+                churnUnrelated()
+                preFinal = concurrentAdmission()
+            }
+        })
+        assertEquals(refusal, requireNotNull(preFinal).exceptionOrNull()?.message)
+        assertEquals(2, preFinalAdmissions, "the latched attempt must be discarded, not returned")
+        assertEquals(beforePreFinal + 1, AcpHostMountChurnRestarts.total())
+
+        // An event after the last walk checkpoint, during finish's table comparison, meets the final locked poll.
+        var finishAdmissions = 0
+        var finishChurned = false
+        val beforeFinish = AcpHostMountChurnRestarts.total()
+        assertEquals(expected, manifest(provisioning) {
+            if (inCheckpoint(false)) finishAdmissions++
+            if (!finishChurned && scopeFrames().any { it.methodName == "finish" } &&
+                scopeFrames().none { it.methodName == "checkpointLocked" }) {
+                finishChurned = true
+                churnUnrelated()
+            }
+        })
+        assertTrue(finishChurned)
+        assertEquals(2, finishAdmissions, "the final poll must refuse an event seen only at finish")
+        assertEquals(beforeFinish + 1, AcpHostMountChurnRestarts.total())
+
+        // After the final poll the scope is detached atomically: a later event cannot latch it.
+        var detachedChecks = 0
+        var postFinal: Result<Any>? = null
+        var latchedAfterDetach: Any? = null
+        val owner = Thread.currentThread()
+        val beforePostFinal = AcpHostMountChurnRestarts.total()
+        observer.set(null, { stage: PrivateControlTransactionStage ->
+            if (stage == PrivateControlTransactionStage.AFTER_MANIFEST_DETACH && Thread.currentThread() === owner &&
+                postFinal == null) {
+                churnUnrelated()
+                postFinal = concurrentAdmission()
+                latchedAfterDetach = synchronized(registry) {
+                    scopes.map { scope ->
+                        val check = scope!!.javaClass.getDeclaredField("mountEventCheck").apply { isAccessible = true }.get(scope)
+                        check.javaClass.getDeclaredField("mountChanged").apply { isAccessible = true }.get(check)
+                    }
+                }
+            }
+        })
+        try {
+            assertEquals(expected, manifest(provisioning) { if (inCheckpoint(false)) detachedChecks++ })
+        } finally {
+            observer.set(null, null)
+        }
+        val admitted = requireNotNull(postFinal).getOrThrow()
+        assertEquals(listOf<Any?>(false), latchedAfterDetach)
+        assertEquals(1, detachedChecks)
+        assertEquals(beforePostFinal, AcpHostMountChurnRestarts.total())
+        deleteControl(admitted)
+        println("host-mount-churn-restart-probe: preFinalAdmissionDiscarded=true postDetachAdmissionDisjoint=true")
+
+        // A refused snapshot copy proves its container deletion before the fresh copy begins.
+        val control = newControl()
+        val controlPath = invokePrivate(control, type.getDeclaredMethod("getPath")) as Path
+        val stagingSignature = arrayOf(Path::class.java, AcpRuntimeClosureLimits::class.java, type,
+            Function0::class.java, RuntimeCopyStatistics::class.java, AcpSetupRestartPermit::class.java)
+        fun copying() = inCheckpoint(true) && Thread.currentThread().stackTrace.any { it.methodName == "copyRuntimeNode" }
+        var retained: Path? = null
+        try {
+            var copyChurns = 0
+            var refusedContainers = -1
+            val before = AcpHostMountChurnRestarts.total()
+            val snapshot = requireNotNull(invokeBoundaryPrivate("stagePrivateRuntimeSnapshot", stagingSignature,
+                runtime, limits, control, {
+                    if (copyChurns == 0 && copying()) {
+                        copyChurns++
+                        churnUnrelated()
+                    } else if (copyChurns == 1 && refusedContainers < 0 && scopeFrames().isEmpty()) {
+                        refusedContainers = Files.list(controlPath).use { it.count() }.toInt()
+                    }
+                }, null, provisioning))
+            assertEquals(1, copyChurns)
+            assertEquals(0, refusedContainers, "the refused container must be deleted before the restart")
+            assertEquals(before + 1, AcpHostMountChurnRestarts.total())
+            assertEquals(1L, Files.list(controlPath).use { it.count() })
+            val copied = invokePrivate(snapshot, snapshot.javaClass.getDeclaredMethod("getSource")) as Path
+            assertEquals("alpha-runtime-content", Files.readString(copied.resolve("a")))
+            assertEquals("beta-runtime-content", Files.readString(copied.resolve("sub/b")))
+            val container = requireNotNull(invokePrivate(snapshot, snapshot.javaClass.getDeclaredMethod("getContainer")))
+            invokePrivate(container, container.javaClass.getDeclaredMethod("deleteAndProve"))
+            println("host-mount-churn-restart-probe: snapshotRestartedFromProvedCleanState=true")
+
+            // An unproved deletion of the refused container is final: no second copy begins.
+            var copyAdmissions = 0
+            val unproved = assertFailsWith<AcpCleanupProofFailure> {
+                invokeBoundaryPrivate("stagePrivateRuntimeSnapshot", stagingSignature, runtime, limits, control, {
+                    if (inCheckpoint(false)) copyAdmissions++
+                    val destination = Files.list(controlPath).use { it.toList() }.singleOrNull()?.resolve("root")
+                    if (retained == null && copying() && destination != null && Files.isDirectory(destination)) {
+                        // Covering the refused attempt's own copy root makes its deletion unprovable.
+                        mount("tmpfs", destination, "tmpfs", 0, "size=64k,mode=700")
+                        retained = destination
+                    }
+                }, null, provisioning)
+            }
+            assertEquals(1, copyAdmissions)
+            assertTrue(unproved.suppressed.any { it.message == refusal }, unproved.toString())
+            assertEquals(before + 1, AcpHostMountChurnRestarts.total())
+            println("host-mount-churn-restart-probe: unprovedSnapshotCleanupFinal=true")
+        } finally {
+            retained?.let(::unmount)
+            deleteControl(control)
+        }
+        println("host-mount-churn-restart-probe: all controls passed")
+    }
+
     private fun runStatxPolicyProbe(base: Path) {
         val (auditArchitecture, statxNumber) = when (System.getProperty("os.arch")) {
             "amd64", "x86_64" -> 0xc000003e.toInt() to 332
@@ -2806,6 +3124,373 @@ class LinuxBubblewrapBoundaryTest {
     }
 
     @Test
+    fun `setup restart permission ends before the first authorization decision and never returns`() {
+        requireLiveHost()
+        val refuseFirst = AtomicBoolean(true)
+        val boundary = LinuxBubblewrapBoundary.prepare(
+            liveConfiguration(),
+            launchHook = AcpSandboxLaunchHook {
+                if (it == AcpSandboxLaunchStage.BEFORE_SCOPE_START && refuseFirst.compareAndSet(true, false)) {
+                    throw IOException("injected pre-start refusal")
+                }
+            },
+        )
+        try {
+            val permit = setupRestartPermit(boundary)
+            fun permitted(): Boolean = permit.holdBeforeUntrustedExecution()?.use { true } ?: false
+            assertTrue(permitted())
+            assertFailsWith<IOException> { boundary.launch(probeLaunch(listOf("netns")), true) {} }
+            assertTrue(permitted(), "a launch refused before authorization keeps restarts")
+            var revokedBeforeAuthorization = false
+            val process = boundary.launch(probeLaunch(listOf("netns")), true, {}) {
+                revokedBeforeAuthorization = !permitted()
+            }
+            assertTrue(revokedBeforeAuthorization, "restarts must end before the broker authorization decision")
+            assertTrue(process.process.waitFor(8, TimeUnit.SECONDS), "sandbox probe timed out")
+            process.awaitCleanup(Duration.ofSeconds(5))
+            assertFalse(permitted(), "a proved cleanup never restores setup restarts")
+        } finally {
+            boundary.close()
+        }
+    }
+
+    @Test
+    fun `restarted setup attempts complete before a concurrent first authorization`() {
+        requireLiveHost()
+        withRepositoryTemporaryDirectory("acp-restart-barrier-") { base ->
+            val temporary = Files.createDirectory(base.resolve("tmp"))
+            val java = Path.of(System.getProperty("java.home"), "bin", "java")
+            // A child JVM keeps this deliberately injected restart out of the run's natural restart count.
+            val forwarded = listOf("decompengine.acp.gateHelperExecutable", "decompengine.acp.gateHelperChecksum")
+                .mapNotNull { name -> System.getProperty(name)?.let { "-D$name=$it" } }
+            val process = ProcessBuilder(
+                listOf(java.toString(), "-XX:-UsePerfData", "-Djava.io.tmpdir=$temporary", "-Djna.tmpdir=$temporary") +
+                    forwarded + listOf("-cp", System.getProperty("java.class.path"),
+                    LinuxBubblewrapBoundaryTest::class.java.name, "setup-restart-barrier-probe", base.toString()),
+            ).redirectErrorStream(true).redirectOutput(base.resolve("barrier-probe.log").toFile()).start()
+            try {
+                assertTrue(process.waitFor(150, TimeUnit.SECONDS), "setup restart barrier probe timed out")
+                val output = Files.readString(base.resolve("barrier-probe.log"))
+                assertEquals(0, process.exitValue(), output)
+                assertTrue(output.contains("setup-restart-barrier-probe: all controls passed"), output)
+                output.lineSequence().filter { it.startsWith("setup-restart-barrier-probe:") }.forEach(::println)
+            } finally {
+                if (process.isAlive) {
+                    process.destroyForcibly()
+                    assertTrue(process.waitFor(5, TimeUnit.SECONDS))
+                }
+            }
+        }
+    }
+
+    private fun setupRestartPermit(boundary: LinuxBubblewrapBoundary): AcpSetupRestartPermit =
+        boundary.javaClass.getDeclaredField("setupRestart").apply { isAccessible = true }.get(boundary) as AcpSetupRestartPermit
+
+    private fun runSetupRestartBarrierProbe(base: Path) {
+        val runtime = Files.createDirectories(base.resolve("runtime"))
+        Files.writeString(runtime.resolve("a"), "alpha-runtime-content")
+        val limits = AcpRuntimeClosureLimits(64, 1024 * 1024, 8)
+        val expected = calculateAcpRuntimeManifestSha256(runtime, limits) {}
+        val boundaryKt = Class.forName("decompengine.acp.LinuxBubblewrapBoundaryKt")
+        val scopes = boundaryKt.getDeclaredField("ACTIVE_MANIFEST_SCOPES").apply { isAccessible = true }.get(null) as Set<*>
+        val observer = boundaryKt.getDeclaredField("privateControlTransactionObserver").apply { isAccessible = true }
+        val phase = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase").enumConstants
+            .single { (it as Enum<*>).name == "CHECKPOINT" }
+        val boundary = LinuxBubblewrapBoundary.prepare(liveConfiguration())
+        try {
+            val permit = setupRestartPermit(boundary)
+            val order = AtomicInteger()
+            val restartedAttemptFinished = AtomicInteger()
+            val authorized = AtomicInteger()
+            val atDecision = java.util.concurrent.CountDownLatch(1)
+            val atBarrier = AtomicBoolean(false)
+            var injected = false
+            var paused = false
+            var restarted: Result<String>? = null
+            fun inScope() = Thread.currentThread().stackTrace.any { it.className.startsWith("decompengine.acp.RuntimePrivateControlScope") }
+            val setup = Thread {
+                restarted = runCatching {
+                    buildRuntimeManifest(runtime, limits, emptySet(), cancellationCheck = {
+                        val frames = Thread.currentThread().stackTrace
+                        if (!injected && frames.any { it.methodName == "checkpointLocked" } &&
+                            frames.none { it.className == "decompengine.acp.RuntimePrivateControlScope\$Companion" }) {
+                            injected = true
+                            // The existing fixed-observation seam latches exactly this scope's own event.
+                            val scope = scopes.single { candidate ->
+                                val root = candidate!!.javaClass.getDeclaredField("root").apply { isAccessible = true }.get(candidate)
+                                root.javaClass.getDeclaredMethod("getNamespacePath").invoke(root) == runtime
+                            }!!
+                            val check = scope.javaClass.getDeclaredField("mountEventCheck").apply { isAccessible = true }.get(scope)
+                            runCatching {
+                                invokePrivate(check, check.javaClass.getDeclaredMethod("requireObservation",
+                                    java.lang.Long.TYPE, phase.javaClass), (1L shl 32) or 10L, phase)
+                            }
+                        } else if (injected && !paused && !inScope()) {
+                            // The restart loop has taken its hold and now pauses at its decision.
+                            paused = true
+                            atDecision.countDown()
+                            val deadline = System.nanoTime() + Duration.ofSeconds(45).toNanos()
+                            while (!atBarrier.get() && authorized.get() == 0 && System.nanoTime() < deadline) Thread.sleep(5)
+                        }
+                    }, restart = permit).manifestSha256
+                }
+            }
+            observer.set(null, { stage: PrivateControlTransactionStage ->
+                if (stage == PrivateControlTransactionStage.AFTER_MANIFEST_DETACH && Thread.currentThread() === setup && paused) {
+                    restartedAttemptFinished.compareAndSet(0, order.incrementAndGet())
+                }
+            })
+            try {
+                setup.start()
+                assertTrue(atDecision.await(30, TimeUnit.SECONDS), "the setup attempt never reached its restart decision")
+                val process = boundary.launch(probeLaunch(listOf("netns")), true, {
+                    if (Thread.currentThread().stackTrace.any { it.methodName == "revokeSetupRestarts" }) atBarrier.set(true)
+                }) { authorized.compareAndSet(0, order.incrementAndGet()) }
+                assertTrue(process.process.waitFor(8, TimeUnit.SECONDS), "sandbox probe timed out")
+                process.awaitCleanup(Duration.ofSeconds(5))
+                setup.join(30_000)
+                assertFalse(setup.isAlive)
+            } finally {
+                observer.set(null, null)
+            }
+            assertEquals(expected, requireNotNull(restarted).getOrThrow())
+            assertTrue(atBarrier.get(), "authorization must wait at the restart barrier")
+            assertEquals(1, restartedAttemptFinished.get(), "the restarted attempt finishes first")
+            assertEquals(2, authorized.get(), "authorization follows the complete restarted attempt")
+            assertEquals(null, permit.holdBeforeUntrustedExecution(), "no restart may begin after authorization")
+            println("setup-restart-barrier-probe: restartedAttemptBeforeAuthorization=true revokedAfter=true")
+
+            // Once authorization has begun, a refused setup attempt in this boundary is final.
+            var lateInjected = false
+            val late = assertFailsWith<IOException> {
+                buildRuntimeManifest(runtime, limits, emptySet(), cancellationCheck = {
+                    val frames = Thread.currentThread().stackTrace
+                    if (!lateInjected && frames.any { it.methodName == "checkpointLocked" } &&
+                        frames.none { it.className == "decompengine.acp.RuntimePrivateControlScope\$Companion" }) {
+                        lateInjected = true
+                        val scope = scopes.single()!!
+                        val check = scope.javaClass.getDeclaredField("mountEventCheck").apply { isAccessible = true }.get(scope)
+                        runCatching {
+                            invokePrivate(check, check.javaClass.getDeclaredMethod("requireObservation",
+                                java.lang.Long.TYPE, phase.javaClass), (1L shl 32) or 10L, phase)
+                        }
+                    }
+                }, restart = permit)
+            }
+            assertEquals("host mounts changed during runtime manifest", late.message)
+            println("setup-restart-barrier-probe: postAuthorizationRefusalFinal=true")
+        } finally {
+            boundary.close()
+        }
+        runStuckSetupRestartDrainProbe(runtime, limits, expected, scopes, phase)
+        runLateGrantReleaseProbe(runtime, limits, expected, scopes, phase)
+        println("setup-restart-barrier-probe: all controls passed")
+    }
+
+    /** A grant released after the drain deadline, before the waiter rechecks, never lets the expired launch authorize. */
+    private fun runLateGrantReleaseProbe(
+        runtime: Path,
+        limits: AcpRuntimeClosureLimits,
+        expected: String,
+        scopes: Set<*>,
+        phase: Any,
+    ) {
+        val before = controlDirectories()
+        val units = mutableListOf<String>()
+        val scopeIdentities = mutableListOf<AcpSandboxScopeIdentity>()
+        val drainObserver = Class.forName("decompengine.acp.LinuxBubblewrapBoundaryKt")
+            .getDeclaredField("setupRestartDrainObserver").apply { isAccessible = true }
+        val boundary = LinuxBubblewrapBoundary.prepare(
+            liveConfiguration(),
+            observer = unitObserver(units),
+            scopeObserver = AcpSandboxScopeObserver { identity -> scopeIdentities.add(identity) },
+        )
+        try {
+            val permit = setupRestartPermit(boundary)
+            val stuck = java.util.concurrent.CountDownLatch(1)
+            val unstick = java.util.concurrent.CountDownLatch(1)
+            var injected = false
+            var restarted: Result<String>? = null
+            val setup = Thread {
+                restarted = runCatching {
+                    buildRuntimeManifest(runtime, limits, emptySet(), cancellationCheck = {
+                        val frames = Thread.currentThread().stackTrace
+                        val inScope = frames.any { it.className.startsWith("decompengine.acp.RuntimePrivateControlScope") }
+                        if (!injected && frames.any { it.methodName == "checkpointLocked" } &&
+                            frames.none { it.className == "decompengine.acp.RuntimePrivateControlScope\$Companion" }) {
+                            injected = true
+                            val scope = scopes.single { candidate ->
+                                val root = candidate!!.javaClass.getDeclaredField("root").apply { isAccessible = true }.get(candidate)
+                                root.javaClass.getDeclaredMethod("getNamespacePath").invoke(root) == runtime
+                            }!!
+                            val check = scope.javaClass.getDeclaredField("mountEventCheck").apply { isAccessible = true }.get(scope)
+                            runCatching {
+                                invokePrivate(check, check.javaClass.getDeclaredMethod("requireObservation",
+                                    java.lang.Long.TYPE, phase.javaClass), (1L shl 32) or 10L, phase)
+                            }
+                        } else if (injected && stuck.count > 0 && !inScope &&
+                            frames.any { it.className.startsWith("java.util.stream.") }) {
+                            stuck.countDown()
+                            unstick.await(60, TimeUnit.SECONDS)
+                        }
+                    }, restart = permit).manifestSha256
+                }
+            }
+            val deadline = java.util.concurrent.atomic.AtomicLong(0L)
+            var releasedAfterExpiry = false
+            var authorizations = 0
+            var outcome: Result<AcpSandboxedProcess>? = null
+            drainObserver.set(null, { observed: Long -> deadline.set(observed) })
+            try {
+                setup.start()
+                assertTrue(stuck.await(30, TimeUnit.SECONDS), "the restarted attempt never reached its walk")
+                val launching = Thread {
+                    outcome = runCatching {
+                        boundary.launch(probeLaunch(listOf("netns")), true, {
+                            // Seam: the waiter's checkpoint runs outside the drain lock. Release the last
+                            // grant after expiry, before the waiter takes the lock again.
+                            val drainDeadline = deadline.get()
+                            if (!releasedAfterExpiry && drainDeadline != 0L &&
+                                Thread.currentThread().stackTrace.any { it.methodName == "revokeSetupRestarts" } &&
+                                System.nanoTime() - drainDeadline >= 0L) {
+                                releasedAfterExpiry = true
+                                unstick.countDown()
+                                setup.join(30_000)
+                                assertFalse(setup.isAlive, "the restarted attempt must release its grant")
+                            }
+                        }) { authorizations++ }
+                    }
+                }
+                launching.start()
+                launching.join(Duration.ofSeconds(40).toMillis())
+                assertFalse(launching.isAlive, "the expired launch must finish")
+            } finally {
+                drainObserver.set(null, null)
+                unstick.countDown()
+                setup.join(30_000)
+            }
+            // An unexpectedly authorized target is reaped first, so its cleanup cannot mask the assertion.
+            requireNotNull(outcome).getOrNull()?.let { process ->
+                process.process.waitFor(8, TimeUnit.SECONDS)
+                process.awaitCleanup(Duration.ofSeconds(5))
+            }
+            assertTrue(releasedAfterExpiry, "the seam must release the grant after the drain deadline")
+            val failure = requireNotNull(outcome).exceptionOrNull()
+            assertEquals("restarted sandbox setup did not finish before authorization", failure?.message, failure.toString())
+            assertEquals(0, authorizations, "an expired drain must never authorize, even once the grant is gone")
+            assertTrue(boundary.evidence(null).launches.isEmpty())
+            units.forEach(::assertUnitAbsent)
+            scopeIdentities.forEach { assertFalse(Files.exists(it.cgroupPath, LinkOption.NOFOLLOW_LINKS)) }
+            assertEquals(expected, requireNotNull(restarted).getOrThrow())
+            println("setup-restart-barrier-probe: lateGrantReleaseAfterExpiryRefused=true authorizations=0")
+        } finally {
+            boundary.close()
+        }
+        assertBoundaryResidueAbsent(before, units, scopeIdentities)
+    }
+
+    /** A restarted attempt stuck in I/O cannot hold authorization past its own bound, even with a no-op checkpoint. */
+    private fun runStuckSetupRestartDrainProbe(
+        runtime: Path,
+        limits: AcpRuntimeClosureLimits,
+        expected: String,
+        scopes: Set<*>,
+        phase: Any,
+    ) {
+        val before = controlDirectories()
+        val units = mutableListOf<String>()
+        val scopeIdentities = mutableListOf<AcpSandboxScopeIdentity>()
+        val boundary = LinuxBubblewrapBoundary.prepare(
+            liveConfiguration(),
+            observer = unitObserver(units),
+            scopeObserver = AcpSandboxScopeObserver { identity -> scopeIdentities.add(identity) },
+        )
+        try {
+            val permit = setupRestartPermit(boundary)
+            val launch = probeLaunch(listOf("netns"))
+            val bound = minOf(Duration.ofSeconds(10), launch.maximumWallDuration)
+            val stuck = java.util.concurrent.CountDownLatch(1)
+            val unstick = java.util.concurrent.CountDownLatch(1)
+            var injected = false
+            var restarted: Result<String>? = null
+            val setup = Thread {
+                restarted = runCatching {
+                    buildRuntimeManifest(runtime, limits, emptySet(), cancellationCheck = {
+                        val frames = Thread.currentThread().stackTrace
+                        val inScope = frames.any { it.className.startsWith("decompengine.acp.RuntimePrivateControlScope") }
+                        if (!injected && frames.any { it.methodName == "checkpointLocked" } &&
+                            frames.none { it.className == "decompengine.acp.RuntimePrivateControlScope\$Companion" }) {
+                            injected = true
+                            val scope = scopes.single { candidate ->
+                                val root = candidate!!.javaClass.getDeclaredField("root").apply { isAccessible = true }.get(candidate)
+                                root.javaClass.getDeclaredMethod("getNamespacePath").invoke(root) == runtime
+                            }!!
+                            val check = scope.javaClass.getDeclaredField("mountEventCheck").apply { isAccessible = true }.get(scope)
+                            runCatching {
+                                invokePrivate(check, check.javaClass.getDeclaredMethod("requireObservation",
+                                    java.lang.Long.TYPE, phase.javaClass), (1L shl 32) or 10L, phase)
+                            }
+                        } else if (injected && stuck.count > 0 && !inScope &&
+                            frames.any { it.className.startsWith("java.util.stream.") }) {
+                            // The restarted attempt now holds its grant and blocks inside its walk.
+                            stuck.countDown()
+                            unstick.await(60, TimeUnit.SECONDS)
+                        }
+                    }, restart = permit).manifestSha256
+                }
+            }
+            var authorized = false
+            var outcome: Result<AcpSandboxedProcess>? = null
+            var drainObserved = 0L
+            var finishedAt = 0L
+            try {
+                setup.start()
+                assertTrue(stuck.await(30, TimeUnit.SECONDS), "the restarted attempt never reached its walk")
+                val launching = Thread {
+                    // A no-op checkpoint: only the drain's own bound may end the wait.
+                    outcome = runCatching { boundary.launch(launch, true, {}) { authorized = true } }
+                    finishedAt = System.nanoTime()
+                }
+                launching.start()
+                // Admission closes when draining begins; the stuck grant is still held.
+                val pollDeadline = System.nanoTime() + Duration.ofSeconds(40).toNanos()
+                while (drainObserved == 0L && System.nanoTime() < pollDeadline && launching.isAlive) {
+                    val grant = permit.holdBeforeUntrustedExecution()
+                    if (grant == null) drainObserved = System.nanoTime() else { grant.close(); Thread.sleep(2) }
+                }
+                assertTrue(drainObserved != 0L, "restart admission must close as soon as authorization drains")
+                launching.join(bound.plusSeconds(20).toMillis())
+                assertFalse(launching.isAlive, "authorization must stop waiting at its own bound")
+                assertEquals(1L, unstick.count, "the restarted attempt stayed stuck for the whole wait")
+            } finally {
+                unstick.countDown()
+                setup.join(30_000)
+            }
+            requireNotNull(outcome).getOrNull()?.let { process ->
+                process.process.waitFor(8, TimeUnit.SECONDS)
+                process.awaitCleanup(Duration.ofSeconds(5))
+            }
+            val drained = Duration.ofNanos(finishedAt - drainObserved)
+            val failure = requireNotNull(outcome).exceptionOrNull()
+            assertEquals("restarted sandbox setup did not finish before authorization", failure?.message, failure.toString())
+            assertFalse(authorized, "a launch must never authorize while a restarted attempt may run")
+            assertTrue(drained >= bound.minusMillis(250), "drain ended early after $drained")
+            assertTrue(drained <= bound.plusSeconds(8), "drain and cleanup exceeded the bound: $drained")
+            assertTrue(boundary.evidence(null).launches.isEmpty())
+            units.forEach(::assertUnitAbsent)
+            scopeIdentities.forEach { assertFalse(Files.exists(it.cgroupPath, LinkOption.NOFOLLOW_LINKS)) }
+            assertEquals(null, permit.holdBeforeUntrustedExecution(), "a timed-out drain never reopens restarts")
+            // The grant that was already running finishes normally; nothing it computed is authorized.
+            assertEquals(expected, requireNotNull(restarted).getOrThrow())
+            println("setup-restart-barrier-probe: stuckRestartDrainBoundMillis=${bound.toMillis()} " +
+                "drainAndCleanupMillis=${drained.toMillis()} admissionClosed=true neverAuthorized=true")
+        } finally {
+            boundary.close()
+        }
+        assertBoundaryResidueAbsent(before, units, scopeIdentities)
+    }
+
+    @Test
     fun `preparation and policy validation abort inside authenticated runtime work without residue`() {
         requireLiveHost()
         val before = controlDirectories()
@@ -3596,6 +4281,8 @@ class LinuxBubblewrapBoundaryTest {
                 "private-control-poison-probe" -> LinuxBubblewrapBoundaryTest().runPrivateControlPoisonProbe(Path.of(args[1]))
                 "private-control-bind-probe" -> LinuxBubblewrapBoundaryTest().runPrivateControlBindProbe(Path.of(args[1]))
                 "statx-policy-probe" -> LinuxBubblewrapBoundaryTest().runStatxPolicyProbe(Path.of(args[1]))
+                "host-mount-churn-restart-probe" -> LinuxBubblewrapBoundaryTest().runHostMountChurnRestartProbe(Path.of(args[1]))
+                "setup-restart-barrier-probe" -> LinuxBubblewrapBoundaryTest().runSetupRestartBarrierProbe(Path.of(args[1]))
                 else -> error("unknown native boundary probe")
             }
         }

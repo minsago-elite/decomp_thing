@@ -5,6 +5,8 @@ export const artifactCopy = {
   read: 'List retained artifacts',
   refresh: 'Refresh artifact list from its first page',
   revisionOnly: 'Show only files bound to the result revision',
+  invalidSaved: 'The artifact selection saved in this address is invalid or no longer applies to this attempt. List the retained artifacts again.',
+  addressTooLong: 'The address is too long to also save the artifact list. Clear other selections saved in the address, such as a long filter, then list the artifacts again.',
   loading: 'Reading the artifact catalog…',
   failed: 'The artifact catalog could not be read. Check the local session and server, then refresh.',
   expired: 'The attempt set changed or this catalog page expired. Refresh the artifact list from its first page.',

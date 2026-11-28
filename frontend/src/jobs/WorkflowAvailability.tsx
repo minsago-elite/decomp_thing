@@ -1,5 +1,5 @@
 import { Fragment } from 'preact';
-import type { Capability, Workflow } from '../api/generated';
+import type { Capability, Job, Workflow } from '../api/generated';
 import { jobCopy as copy } from '../copy/job';
 import type { RuntimeSnapshot } from '../session/session';
 import { message } from '../shared/messages';
@@ -18,7 +18,9 @@ const labels = {
   repair: copy.repair,
 } satisfies Record<Workflow, string>;
 
-function CapabilityReport({ capability }: { capability: Capability }) {
+type JobFacts = Pick<Job, 'acceptedRevisionId'>;
+
+function CapabilityReport({ capability, job, attemptHistory }: { capability: Capability; job?: JobFacts | undefined; attemptHistory?: string | undefined }) {
   return <li>
     <p class="capability-heading">{message(copy.capabilityReport, {
       identity: <code>{capability.id}</code>, state: <StateMark tone={capabilityTone(capability.state)}>{capability.state}</StateMark>,
@@ -31,19 +33,45 @@ function CapabilityReport({ capability }: { capability: Capability }) {
       {reportedCapabilityFacts(capability).map(fact => <Fragment key={fact.key}>
         <dt>{fact.label}</dt><dd>{fact.value}</dd>
       </Fragment>)}
+      {job && capability.launch && <>
+        <dt>{copy.launchRequiredTools}</dt>
+        <dd>{capability.launch.requiredTools.join(', ') || copy.launchNoRequiredTools}</dd>
+        <dt>{copy.launchRecordedInput}</dt>
+        <dd>{inputPrerequisite(capability.launch.input, job)}
+          {capability.launch.input === 'recorded-required' && <> {message(copy.launchInputAttemptResult, {
+            history: attemptHistory ? <a href={attemptHistory}>{copy.launchInputAttemptHistory}</a> : copy.launchInputAttemptHistory,
+          })} {copy.launchInputRetainedSource}</>}</dd>
+      </>}
     </dl>
+    {job && !capability.launch && <p>{copy.launchIntentNotReported}</p>}
   </li>;
 }
 
+function inputPrerequisite(input: NonNullable<Capability['launch']>['input'], job: JobFacts) {
+  const revision = job.acceptedRevisionId;
+  switch (input) {
+    case 'none': return copy.launchInputNone;
+    case 'accepted-optional': return revision
+      ? message(copy.launchInputOptionalPresent, { revision: <code>{revision}</code> }) : copy.launchInputOptionalAbsent;
+    case 'recorded-required': return revision
+      ? message(copy.launchInputRequiredPresent, { revision: <code>{revision}</code> })
+      : copy.launchInputRequiredAbsent;
+  }
+}
+
 /** Display the last authenticated report. It cannot admit work or select a harness. */
-export function WorkflowAvailability({ runtime, receipt }: { runtime: RuntimeSnapshot; receipt?: ReceiptTime }) {
+export function WorkflowAvailability({ runtime, receipt, job, attemptHistory }: {
+  runtime: RuntimeSnapshot; receipt?: ReceiptTime; job?: JobFacts;
+  /** Existing attempt-history route. Each listed attempt's page shows its Result revision. */
+  attemptHistory?: string;
+}) {
   const generalCapabilities = runtime.capabilities.filter(capability => capability.workflows.length === 0);
   return <section aria-labelledby="job-workflow-availability-title">
     <h3 id="job-workflow-availability-title">{copy.workflowAvailabilityForThisJob}</h3>
     <p>{message(copy.reportedReadiness, { readiness: <code>{runtime.readiness}</code> })}</p>
     <p>{copy.capabilitiesAreTheLastSessionReport}</p>
     <MetadataReceipt kind="runtime" receipt={receipt} />
-    <p>{copy.jobPrerequisitesNotReported}</p>
+    <p>{job ? copy.launchJobRecordAge : copy.jobPrerequisitesNotReported}</p>
     <p>{copy.capabilityLimitsBoundary}</p>
     {generalCapabilities.length > 0 && <section aria-labelledby="job-general-capabilities-title">
       <h4 id="job-general-capabilities-title">{copy.generalCapabilityReports}</h4>
@@ -60,7 +88,7 @@ export function WorkflowAvailability({ runtime, receipt }: { runtime: RuntimeSna
           <div>
             <p><StateMark tone="blocked">{copy.startUnavailable}</StateMark></p>
             {capabilities.length === 0 ? <p>{copy.noCapabilityForThisWorkflow}</p> : <ul class="capability-reports">
-              {capabilities.map(capability => <CapabilityReport key={capability.id} capability={capability} />)}
+              {capabilities.map(capability => <CapabilityReport key={capability.id} capability={capability} job={job} attemptHistory={attemptHistory} />)}
             </ul>}
           </div>
         </li>;

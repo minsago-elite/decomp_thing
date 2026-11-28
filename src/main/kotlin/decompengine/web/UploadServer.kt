@@ -338,6 +338,8 @@ class UploadServer(
         logDownloadPhases = logDownloadPhases) }
     /** Admitted artifact downloads that have not yet released their stream; test evidence helper. */
     internal fun activeArtifactDownloads(): Int = api?.artifactDownloads?.activeCount() ?: 0
+    /** Admitted HTTP handlers still running, including post-response audit appends; for test quiescence only. */
+    internal fun activeRequestCount(): Int = synchronized(lifecycleLock) { activeRequests }
     // A request that finds every worker and queue slot taken is answered by this tiny pool with a stable 429
     // instead of a reset connection. It has no queue, so overload still never buffers more than the main pool does;
     // when it too is busy the rejection propagates and the dispatcher closes the connection, as before.
@@ -1035,6 +1037,9 @@ class UploadServer(
         val source = runCatching { archiveEvidence.read(jobId, reportPrefix = reports.artifactPrefix).source }
             .recoverCatching { sourceEvidence.read(jobId, reports.artifactPrefix).view() }
         val progress = runCatching { readLegacyProgress(jobId, reports.runId) }.getOrNull()
+        val explorationClassification = captureWebExplorationPresentation(redaction) {
+            jobs.readArtifact(jobId, "${reports.artifactPrefix}/exploration.json", 1_048_576).bytes
+        }
         // The fixed reader already captured diagnostic H once. Never reread it as display input.
         val legacyOnly = recorded.status == decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED
         val repairHistory = if (legacyOnly) readLegacyJsonReport(jobId, reports, LegacyJsonReport.REPAIR_HISTORY) else null
@@ -1045,13 +1050,13 @@ class UploadServer(
         val recordedView = if (legacyOnly) null else recordedRepairEvidenceView(jobId, reports, recorded, artifacts, page, query.validationCasePageNumber)
         exchange.sendHtml(200, renderJobDocument(displayJob(view.job), reports, view.diagnostics, source.getOrNull(), source.isFailure,
             progressSnapshot = progress,
-            explorationReport = readLegacyJsonReport(jobId, reports, LegacyJsonReport.EXPLORATION),
             repairHistory = repairHistory,
             reconstructionProgress = readLegacyJsonReport(jobId, reports, LegacyJsonReport.RECONSTRUCTION_PROGRESS),
             artifacts = artifacts,
             repairEvidenceArtifactStates = repairEvidenceStates?.first,
             repairReceiptBindingStates = repairEvidenceStates?.second,
-            recordedRepairHistory = recordedView))
+            recordedRepairHistory = recordedView,
+            explorationClassification = explorationClassification))
     }
 
     /** Links need the same checked listing; receipt integrity is checked per canonical attempt. */
@@ -1229,7 +1234,7 @@ class UploadServer(
         .digest(bytes).joinToString("") { "%02x".format(it) }
 
     private enum class LegacyJsonReport(val filename: String) {
-        EXPLORATION("exploration.json"), REPAIR_HISTORY("repair_history.json"),
+        REPAIR_HISTORY("repair_history.json"),
         RECONSTRUCTION_PROGRESS("reconstruction_progress.json"),
     }
 
@@ -1531,10 +1536,7 @@ private fun HttpExchange.sendUntrustedAttachment(
     filename: String,
 ) {
     responseHeaders.set("Content-Disposition", attachmentDisposition(filename))
-    responseHeaders.set(
-        "Content-Security-Policy",
-        "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'",
-    )
+    // sendBytes applies the shared sandboxed WEB_INERT_CONTENT_SECURITY_POLICY to every attachment.
     sendBytes(status, body, contentType)
 }
 

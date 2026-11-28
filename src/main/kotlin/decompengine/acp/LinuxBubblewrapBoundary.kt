@@ -23,6 +23,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /** Failure-only display data from a closed producer; never execution, identity or cleanup authority. */
 internal sealed interface AcpMountEventWitness {
@@ -524,6 +526,78 @@ internal class LinuxBubblewrapBoundary private constructor(
     }
     private val closed = AtomicBoolean(false)
     private val closeFailure = AtomicReference<AcpCleanupProofFailure?>()
+    /**
+     * Until this boundary first starts to authorize a target, none of its targets can run, so its
+     * setup scopes may restart after their own host mount EVENT refusal (#1799). Each restarted
+     * attempt holds a grant for its whole duration. Authorization first closes admission for good,
+     * then waits, within its own bound, until no grant remains; only then may it authorize.
+     */
+    private val authorizationMayHaveCommitted = AtomicBoolean(false)
+    private val setupRestartLock = ReentrantLock()
+    private val setupRestartsReleased = setupRestartLock.newCondition()
+    /** Guarded by [setupRestartLock]; set when authorization starts draining and never cleared. */
+    private var setupRestartsClosed = false
+    /** Guarded by [setupRestartLock]: live grants per holding thread. */
+    private val setupRestartHolders = HashMap<Thread, Int>()
+    private val setupRestart = AcpSetupRestartPermit {
+        setupRestartLock.withLock {
+            if (setupRestartsClosed) null else {
+                val holder = Thread.currentThread()
+                setupRestartHolders[holder] = (setupRestartHolders[holder] ?: 0) + 1
+                SetupRestartGrant(holder)
+            }
+        }
+    }
+
+    private inner class SetupRestartGrant(private val holder: Thread) : AutoCloseable {
+        private var released = false
+
+        override fun close() = setupRestartLock.withLock {
+            if (released) return@withLock
+            released = true
+            val remaining = (setupRestartHolders[holder] ?: 1) - 1
+            if (remaining == 0) setupRestartHolders.remove(holder) else setupRestartHolders[holder] = remaining
+            if (setupRestartHolders.isEmpty()) setupRestartsReleased.signalAll()
+        }
+    }
+
+    /**
+     * Closes restart admission permanently, then waits only for grants already issued. The wait has
+     * its own bound, [SETUP_RESTART_DRAIN_TIMEOUT] capped by the launch's wall-duration ceiling that
+     * its systemd scope already enforces, so a stuck attempt or a no-op checkpoint cannot hold the
+     * launch. On expiry the launch fails closed through its pre-authorization cleanup.
+     */
+    private fun revokeSetupRestarts(maximumWallDuration: Duration, cancellationCheck: () -> Unit) {
+        if (authorizationMayHaveCommitted.get()) return
+        val bound = minOf(SETUP_RESTART_DRAIN_TIMEOUT, maximumWallDuration)
+        val deadline = System.nanoTime() + bound.toNanos()
+        setupRestartDrainObserver?.invoke(deadline)
+        var waited = false
+        while (true) {
+            setupRestartLock.withLock {
+                if (Thread.currentThread() in setupRestartHolders) {
+                    throw IOException("sandbox authorization cannot begin inside a restarted setup attempt")
+                }
+                setupRestartsClosed = true
+                // Monotonic and checked under the lock on every pass: once this launch has waited, a
+                // grant released after expiry cannot let it authorize.
+                val remaining = deadline - System.nanoTime()
+                if (waited && remaining <= 0L) {
+                    throw IOException("restarted sandbox setup did not finish before authorization")
+                }
+                if (setupRestartHolders.isEmpty()) {
+                    authorizationMayHaveCommitted.set(true)
+                    return
+                }
+                if (remaining <= 0L) {
+                    throw IOException("restarted sandbox setup did not finish before authorization")
+                }
+                waited = true
+                setupRestartsReleased.awaitNanos(minOf(remaining, SETUP_RESTART_DRAIN_POLL_NANOS))
+            }
+            cancellationCheck()
+        }
+    }
 
     fun validateReadOnlyMounts(
         mounts: Collection<AcpSandboxReadOnlyMount>,
@@ -538,11 +612,12 @@ internal class LinuxBubblewrapBoundary private constructor(
                 forbiddenRuntimeFiles,
                 controlDirectory,
                 cancellationCheck = cancellationCheck,
+                restart = setupRestart,
             )
             try {
                 pinned.forEach { mount ->
                     cancellationCheck()
-                    mount.requireUnchanged(cancellationCheck)
+                    mount.requireUnchanged(cancellationCheck, restart = setupRestart)
                 }
             } finally {
                 deletePinnedMounts(pinned)
@@ -725,10 +800,11 @@ internal class LinuxBubblewrapBoundary private constructor(
                 cancellationCheck = {
                     launchCheckpoint(AcpSandboxLaunchStage.DURING_RUNTIME_CLOSURE, cancellationCheck)
                 },
+                restart = setupRestart,
             ) }
             launchMounts.forEach { mount ->
                 cancellationCheck()
-                mount.requireUnchanged(cancellationCheck, statistics)
+                mount.requireUnchanged(cancellationCheck, statistics, setupRestart)
             }
             val launchGateHelper = launchMounts.singleOrNull {
                 it.mount.destination == ACP_SANDBOX_GATE_HELPER_PATH
@@ -836,7 +912,7 @@ internal class LinuxBubblewrapBoundary private constructor(
             launchHook?.at(AcpSandboxLaunchStage.AFTER_SETUP_WAITER_BEFORE_BIND_ATTESTATION)
             cancellationCheck()
             requireBoundaryUnchanged(cancellationCheck)
-            launchMounts.forEach { it.requireUnchanged(cancellationCheck, statistics) }
+            launchMounts.forEach { it.requireUnchanged(cancellationCheck, statistics, setupRestart) }
             launch.stagingRoots.forEach {
                 cancellationCheck()
                 it.stagingRoot.requireCurrentIdentity(cancellationCheck)
@@ -862,7 +938,7 @@ internal class LinuxBubblewrapBoundary private constructor(
             launchHook?.at(AcpSandboxLaunchStage.AFTER_SETUP_BIND_ATTESTATION_BEFORE_RELEASE)
             cancellationCheck()
             requireBoundaryUnchanged(cancellationCheck)
-            launchMounts.forEach { it.requireUnchanged(cancellationCheck, statistics) }
+            launchMounts.forEach { it.requireUnchanged(cancellationCheck, statistics, setupRestart) }
             launch.stagingRoots.forEach {
                 cancellationCheck()
                 it.stagingRoot.requireCurrentIdentity(cancellationCheck)
@@ -898,7 +974,7 @@ internal class LinuxBubblewrapBoundary private constructor(
             launchGateHelper.sealMountedSingleFileSnapshot(cancellationCheck)
             executableMount.sealMountedSingleFileSnapshot(cancellationCheck)
             requireBoundaryUnchanged(cancellationCheck)
-            launchMounts.forEach { it.requireUnchanged(cancellationCheck, statistics) }
+            launchMounts.forEach { it.requireUnchanged(cancellationCheck, statistics, setupRestart) }
             launch.stagingRoots.forEach {
                 cancellationCheck()
                 it.stagingRoot.requireCurrentIdentity(cancellationCheck)
@@ -980,6 +1056,8 @@ internal class LinuxBubblewrapBoundary private constructor(
             // cancellation or authorization check follows it.
             val reservation = reserveSuccessfulLaunchEvidence(launchEvidence)
             launchEvidenceReservation = reservation
+            // From here a target may be authorized; no later setup in this boundary may restart.
+            revokeSetupRestarts(launch.maximumWallDuration, cancellationCheck)
             cancellationCheck()
             beforeAuthorizationCommit()
             // No fallible operation or cancellation/policy check follows the broker's
@@ -1215,7 +1293,7 @@ internal class LinuxBubblewrapBoundary private constructor(
         scopeInspector.requireUnchanged(cancellationCheck)
         environmentFdOpener.requireUnchanged(cancellationCheck)
         busEndpoint.requireUnchanged(cancellationCheck)
-        launcherMounts.forEach { it.requireUnchanged(cancellationCheck) }
+        launcherMounts.forEach { it.requireUnchanged(cancellationCheck, restart = setupRestart) }
         cancellationCheck()
     }
 
@@ -1472,6 +1550,7 @@ internal class LinuxBubblewrapBoundary private constructor(
                     allowUserOwnedSnapshot = true,
                     cancellationCheck = cancellationCheck,
                     statistics = statistics,
+                    restart = BEFORE_ANY_UNTRUSTED_EXECUTION,
                 ).single()
                 requireNotNull(helperValidation).requireStaticGateHelper(
                     configuration.expectedSandboxGateHelperSha256,
@@ -1489,6 +1568,7 @@ internal class LinuxBubblewrapBoundary private constructor(
                     allowUserOwnedSnapshot = false,
                     cancellationCheck = cancellationCheck,
                     statistics = statistics,
+                    restart = BEFORE_ANY_UNTRUSTED_EXECUTION,
                 )
                 cancellationCheck()
             } catch (failure: Throwable) {
@@ -1757,8 +1837,11 @@ private enum class PrivateControlLifecycle { LIVE, PROVED_DELETED }
 /** Test-only observation points execute within the real registry transaction. */
 internal enum class PrivateControlTransactionStage {
     CREATED_UNPINNED, BEFORE_PUBLICATION, BEFORE_QUARANTINE, AFTER_UNLINK_PROOF, BEFORE_MANIFEST_RETAIN,
+    AFTER_MANIFEST_DETACH,
 }
 private var privateControlTransactionObserver: ((PrivateControlTransactionStage) -> Unit)? = null
+/** Test-only: receives each restart drain's monotonic System.nanoTime deadline as it begins. */
+@Volatile private var setupRestartDrainObserver: ((Long) -> Unit)? = null
 private var privateControlTestUuid: UUID? = null
 private fun observePrivateControlTransaction(stage: PrivateControlTransactionStage) {
     privateControlTransactionObserver?.invoke(stage)
@@ -2134,6 +2217,112 @@ private fun physicalLocationsOverlap(a: HostPhysicalLocation, b: HostPhysicalLoc
     pathsOverlap(a.namespacePath, b.namespacePath) ||
         (a.filesystemDevice == b.filesystemDevice && pathsOverlap(a.path, b.path))
 
+/**
+ * Permission to restart one complete runtime-manifest or snapshot scope after that scope's own
+ * sticky host mount EVENT refusal (#1799). It tolerates no event: every attempt still refuses on
+ * any event in its own window, and a restart reuses nothing it computed.
+ */
+internal fun interface AcpSetupRestartPermit {
+    /**
+     * Returns a hold that keeps the owner's untrusted execution from beginning until it is closed,
+     * or null once that execution may have begun. One hold spans one complete restarted attempt.
+     */
+    fun holdBeforeUntrustedExecution(): AutoCloseable?
+}
+
+private val NOTHING_TO_HOLD = AutoCloseable {}
+
+/** Trusted provisioning and boundary construction precede every target they could serve. */
+private val BEFORE_ANY_UNTRUSTED_EXECUTION = AcpSetupRestartPermit { NOTHING_TO_HOLD }
+
+/** The original attempt plus two complete restarts. */
+private const val MAXIMUM_HOST_MOUNT_CHURN_ATTEMPTS = 3
+
+/**
+ * Upper bound for authorization to wait on restarted setup attempts that were already running when
+ * it closed restart admission. One restarted attempt is a single runtime manifest or snapshot copy,
+ * which also runs within the caller's prelaunch budget; expiry fails the launch closed.
+ */
+private val SETUP_RESTART_DRAIN_TIMEOUT: Duration = Duration.ofSeconds(10)
+
+/** The drain re-checks the caller's cancellation checkpoint at least this often. */
+private val SETUP_RESTART_DRAIN_POLL_NANOS = TimeUnit.MILLISECONDS.toNanos(50)
+
+/** Identity-only record of the refusals built by the latches of scopes opened for one attempt. */
+private class ManifestScopeAttempt {
+    private val refusals = ArrayList<IOException>(4)
+
+    fun register(refusal: IOException) = synchronized(this) { if (refusals.size < 4) refusals += refusal }
+
+    /** Exactly a latch-built primary that carries only its own witness: nothing was added while unwinding. */
+    fun ownsRefusal(failure: Throwable): Boolean = synchronized(this) { refusals.any { it === failure } } &&
+        failure.suppressed.let { it.size == 1 && it[0] is AcpMountEventWitness }
+}
+
+/** Bounded process-wide record of refusals discarded by a successful restart; display data only. */
+internal object AcpHostMountChurnRestarts {
+    private const val RETAINED = 16
+    private val retained = ArrayDeque<AcpMountEventWitness>(RETAINED)
+    private var total = 0L
+
+    fun record(refusals: List<Throwable>) {
+        try {
+            synchronized(this) {
+                refusals.forEach { refusal ->
+                    val witness = refusal.suppressed.single() as AcpMountEventWitness
+                    if (retained.size == RETAINED) retained.removeFirst()
+                    retained.addLast(witness)
+                    if (total < Long.MAX_VALUE) total++
+                }
+            }
+        } catch (_: Throwable) { /* Display data cannot replace a successful attempt. */ }
+    }
+
+    fun total(): Long = synchronized(this) { total }
+    fun retained(): List<AcpMountEventWitness> = synchronized(this) { retained.toList() }
+}
+
+/**
+ * Runs one complete scope-owned unit, restarting it from nothing only after its own scope latch
+ * refused on a host mount EVENT, while [restart] still grants a hold and the bound remains (#1799).
+ * The hold spans the whole restarted attempt, so the owner's first untrusted execution is ordered
+ * after it. Any other failure, a refusal carrying unwinding/cleanup failures, or a refused hold is
+ * final. Each discarded refusal's witness is recorded on success or attached to the final failure.
+ */
+private inline fun <T> restartAfterOwnHostMountEvent(
+    restart: AcpSetupRestartPermit?,
+    cancellationCheck: () -> Unit,
+    crossinline attempt: (ManifestScopeAttempt?) -> T,
+): T {
+    if (restart == null) return attempt(null)
+    val refused = ArrayList<Throwable>(MAXIMUM_HOST_MOUNT_CHURN_ATTEMPTS - 1)
+    var hold: AutoCloseable? = null
+    while (true) {
+        val owner = ManifestScopeAttempt()
+        val failure = try {
+            val result = try { attempt(owner) } finally { hold?.close(); hold = null }
+            AcpHostMountChurnRestarts.record(refused)
+            return result
+        } catch (failure: Throwable) { failure }
+        if (refused.size + 1 < MAXIMUM_HOST_MOUNT_CHURN_ATTEMPTS && owner.ownsRefusal(failure)) {
+            hold = try { restart.holdBeforeUntrustedExecution() } catch (_: Throwable) { null }
+        }
+        val held = hold
+        if (held == null) {
+            refused.forEach(failure::addSuppressed)
+            throw failure
+        }
+        refused += failure
+        try {
+            cancellationCheck()
+        } catch (stopped: Throwable) {
+            try { held.close() } catch (release: Throwable) { if (release !== stopped) stopped.addSuppressed(release) }
+            refused.forEach { if (it !== stopped) stopped.addSuppressed(it) }
+            throw stopped
+        }
+    }
+}
+
 /** All mutable membership and lifetime state is guarded by ACTIVE_PRIVATE_CONTROLS. */
 private class RuntimePrivateControlScope private constructor(
     private val mountEvents: LinuxDescriptor,
@@ -2148,6 +2337,8 @@ private class RuntimePrivateControlScope private constructor(
     private val cancellationCheck: () -> Unit,
 ) : AutoCloseable {
     private var closed = false
+    /** Guarded by ACTIVE_PRIVATE_CONTROLS; set only by [finish] after its final successful poll. */
+    private var finished = false
     private val mountEventCheck = MountEventCheck(mountPoll)
     private var fast = fastEligible(controls)
 
@@ -2196,6 +2387,8 @@ private class RuntimePrivateControlScope private constructor(
         private var initialOwner = false
         private var initialFast = false
         private var admissionComplete = false
+        /** Set once by the scope's opener; it only learns refusal identities and never alters the latch. */
+        var restartAttempt: ManifestScopeAttempt? = null
 
         fun recordAdmissionFacts(mounts: Int, controls: Int, owner: Boolean, fast: Boolean) {
             if (initialMounts >= 0) return
@@ -2271,6 +2464,8 @@ private class RuntimePrivateControlScope private constructor(
                 failure.addSuppressed(diagnostic)
                 // A direct, bounded link on this fresh owned failure avoids arbitrary suppressed-list snapshots.
                 failure.initCause(diagnostic)
+                // Only a refusal carrying its witness can ever be restarted; otherwise it stays final.
+                restartAttempt?.register(failure)
             } catch (_: Throwable) { /* Diagnostic failure cannot replace the original refusal. */ }
             return failure
         }
@@ -2336,6 +2531,9 @@ private class RuntimePrivateControlScope private constructor(
     }
 
     fun requireCreationUnexposed(candidate: HostPhysicalLocation, currentMounts: List<HostPhysicalMount>) {
+        // A finished scope has made its final poll and returned its result; it neither leases its root
+        // nor accepts polls, so a later event cannot latch it after its result is accepted (#1799).
+        if (finished) return
         requireMountsUnchanged(MountEventPhase.CONTROL_ADMISSION)
         if (mounts != currentMounts) throw IOException("host mounts changed during control admission")
         val current = currentRoot(NO_SANDBOX_CHECKPOINT)
@@ -2467,7 +2665,16 @@ private class RuntimePrivateControlScope private constructor(
     fun finish() {
         checkpoint()
         if (mounts != hostPhysicalMounts(cancellationCheck)) throw IOException("host mount coordinates changed during runtime manifest")
-        checkpoint()
+        // The final poll and detachment from concurrent admission polls are one registry transaction:
+        // an event any thread latched before it fails this attempt, and none can latch it afterwards.
+        synchronized(ACTIVE_PRIVATE_CONTROLS) {
+            checkpointLocked()
+            // checkpointLocked revalidates controls and the root after its poll; poll once more so the
+            // latch covers every event through detachment.
+            requireMountsUnchanged(MountEventPhase.CHECKPOINT)
+            finished = true
+        }
+        observePrivateControlTransaction(PrivateControlTransactionStage.AFTER_MANIFEST_DETACH)
     }
 
     override fun close() {
@@ -2534,6 +2741,15 @@ private class RuntimePrivateControlScope private constructor(
         }
 
         fun open(source: Path, owner: LinuxFileKey?, check: () -> Unit): RuntimePrivateControlScope =
+            open(source, owner, check, null)
+
+        /** [attempt] learns this scope's latch refusal identities, including admission-time refusals. */
+        fun open(
+            source: Path,
+            owner: LinuxFileKey?,
+            check: () -> Unit,
+            attempt: ManifestScopeAttempt?,
+        ): RuntimePrivateControlScope =
             synchronized(ACTIVE_PRIVATE_CONTROLS) {
                 requirePrivateControlRegistryHealthy()
                 if (ACTIVE_MANIFEST_SCOPES.size >= MAXIMUM_ACTIVE_MANIFEST_SCOPES) {
@@ -2571,6 +2787,7 @@ private class RuntimePrivateControlScope private constructor(
                                 val created = RuntimePrivateControlScope(eventHandle, pollScratch, statxScratch, mounts, retained, privateControlGeneration,
                                     pinned, location, ownerRecord, check)
                                 scope = created
+                                created.mountEventCheck.restartAttempt = attempt
                                 created.requireRootUnexposed(retained)
                                 created.checkpointLocked()
                                 if (mounts != hostPhysicalMounts(check)) throw IOException("host mounts changed during runtime manifest admission")
@@ -4439,7 +4656,8 @@ private class PinnedReadOnlyMount private constructor(
     )
 
     fun requireUnchanged(cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
-                         statistics: RuntimeCopyStatistics? = null) {
+                         statistics: RuntimeCopyStatistics? = null,
+                         restart: AcpSetupRestartPermit? = null) {
         cancellationCheck()
         val current = LinuxFilesystemSyscalls.identity(sourceDescriptor.fd)
         if (current.key.device != manifest.rootIdentity.device ||
@@ -4492,6 +4710,7 @@ private class PinnedReadOnlyMount private constructor(
                 cancellationCheck = cancellationCheck,
                 privateSnapshotOwner = snapshotContainer?.controlKey,
                 statistics = statistics,
+                restart = restart,
             ) != manifest
         ) {
             throw IOException("authenticated runtime closure changed: ${mount.destination}")
@@ -4562,6 +4781,7 @@ private class PinnedReadOnlyMount private constructor(
             allowUserOwnedSnapshot: Boolean,
             cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
             statistics: RuntimeCopyStatistics? = null,
+            restart: AcpSetupRestartPermit? = null,
         ): PinnedReadOnlyMount {
             cancellationCheck()
             val configuredManifest = buildRuntimeManifest(
@@ -4570,6 +4790,7 @@ private class PinnedReadOnlyMount private constructor(
                 forbidden,
                 cancellationCheck = cancellationCheck,
                 statistics = statistics,
+                restart = restart,
             )
             if (configuredManifest.recursivelyRootOwnedAndImmutable) {
                 requireCanonicalRootOwnedPath(mount.source, cancellationCheck)
@@ -4602,6 +4823,7 @@ private class PinnedReadOnlyMount private constructor(
                 controlDirectory,
                 cancellationCheck,
                 statistics,
+                restart,
             )
             try {
                 val copiedManifest = buildRuntimeManifestOwned(
@@ -4612,6 +4834,7 @@ private class PinnedReadOnlyMount private constructor(
                     cancellationCheck = cancellationCheck,
                     privateSnapshotOwner = snapshot.container.controlKey,
                     statistics = statistics,
+                    restart = restart,
                 )
                 if (copiedManifest.manifestSha256 != expected) {
                     throw IOException("user-owned runtime snapshot does not match its expected SHA-256")
@@ -4625,6 +4848,7 @@ private class PinnedReadOnlyMount private constructor(
                     cancellationCheck = cancellationCheck,
                     privateSnapshotOwner = snapshot.container.controlKey,
                     statistics = statistics,
+                    restart = restart,
                 )
                 val descriptor = requirePinnedDescriptor(snapshot.source, hardenedManifest.rootIdentity)
                 val descriptorDigest = if (hardenedManifest.rootDirectory) null else {
@@ -4953,8 +5177,9 @@ internal fun buildRuntimeManifest(
     allowPrivateControlSource: Boolean = false,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
     statistics: RuntimeCopyStatistics? = null,
+    restart: AcpSetupRestartPermit? = null,
 ): RuntimeManifest = buildRuntimeManifestOwned(source, limits, forbidden, allowPrivateControlSource,
-    cancellationCheck, privateSnapshotOwner = null, statistics = statistics)
+    cancellationCheck, privateSnapshotOwner = null, statistics = statistics, restart = restart)
 
 private fun buildRuntimeManifestOwned(
     source: Path,
@@ -4964,12 +5189,15 @@ private fun buildRuntimeManifestOwned(
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
     privateSnapshotOwner: LinuxFileKey? = null,
     statistics: RuntimeCopyStatistics? = null,
+    restart: AcpSetupRestartPermit? = null,
 ): RuntimeManifest {
     cancellationCheck()
     if (allowPrivateControlSource && privateSnapshotOwner == null) {
         throw IOException("private runtime manifest lacks its owning control identity")
     }
-    return RuntimePrivateControlScope.open(source, privateSnapshotOwner, cancellationCheck).use { protection ->
+    // A restarted attempt rebuilds the entire read-only manifest under a fresh scope (#1799).
+    return restartAfterOwnHostMountEvent(restart, cancellationCheck) { attempt ->
+    RuntimePrivateControlScope.open(source, privateSnapshotOwner, cancellationCheck, attempt).use { protection ->
         val basic = Files.readAttributes(source, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
         if (basic.isSymbolicLink || (!basic.isRegularFile && !basic.isDirectory)) {
             throw IOException("sandbox runtime source must be a real file or directory: $source")
@@ -5078,26 +5306,37 @@ private fun buildRuntimeManifestOwned(
         protection.finish()
         manifest
     }
+    }
 }
 
 /**
  * Computes the versioned runtime manifest digest to pin in configuration. Call this during trusted
  * provisioning, persist the result, and never recompute it from an untrusted launch-time tree.
+ * Provisioning precedes every sandbox it configures, so a host mount EVENT refusal restarts the
+ * complete manifest under a fresh scope at most twice (#1799); every attempt remains strict.
  */
 fun calculateAcpRuntimeManifestSha256(
     source: Path,
     limits: AcpRuntimeClosureLimits = AcpRuntimeClosureLimits(),
-): String = calculateAcpRuntimeManifestSha256(source, limits, NO_SANDBOX_CHECKPOINT)
+): String = calculateAcpRuntimeManifestSha256(source, limits, NO_SANDBOX_CHECKPOINT, BEFORE_ANY_UNTRUSTED_EXECUTION)
 
-/** Application-owned captured input hashing with the enclosing invocation checkpoint. */
+/** Application-owned captured input hashing with the enclosing invocation checkpoint; one strict attempt. */
 internal fun calculateAcpRuntimeManifestSha256(
     source: Path,
     limits: AcpRuntimeClosureLimits,
     cancellationCheck: () -> Unit,
+): String = calculateAcpRuntimeManifestSha256(source, limits, cancellationCheck, null)
+
+private fun calculateAcpRuntimeManifestSha256(
+    source: Path,
+    limits: AcpRuntimeClosureLimits,
+    cancellationCheck: () -> Unit,
+    restart: AcpSetupRestartPermit?,
 ): String {
     cancellationCheck()
     LinuxFilesystemSyscalls.requireSupported(source)
-    return buildRuntimeManifest(source, limits, emptySet(), cancellationCheck = cancellationCheck).manifestSha256
+    return buildRuntimeManifest(source, limits, emptySet(), cancellationCheck = cancellationCheck,
+        restart = restart).manifestSha256
 }
 
 private fun pinMounts(
@@ -5108,6 +5347,7 @@ private fun pinMounts(
     allowUserOwnedSnapshot: Boolean = true,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
     statistics: RuntimeCopyStatistics? = null,
+    restart: AcpSetupRestartPermit? = null,
 ): List<PinnedReadOnlyMount> {
     cancellationCheck()
     if (mounts.size > MAXIMUM_SANDBOX_MOUNTS + 1) {
@@ -5138,6 +5378,7 @@ private fun pinMounts(
                 allowUserOwnedSnapshot,
                 cancellationCheck,
                 statistics,
+                restart,
             )
         }
         return pinned
@@ -5210,7 +5451,17 @@ private fun stagePrivateRuntimeSnapshot(
     controlDirectory: PinnedControlDirectory,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
     statistics: RuntimeCopyStatistics? = null,
-): PrivateRuntimeSnapshot {
+): PrivateRuntimeSnapshot = stagePrivateRuntimeSnapshot(source, limits, controlDirectory, cancellationCheck, statistics, null)
+
+/** A restart begins only after the refused attempt's container deletion was proved (#1799). */
+private fun stagePrivateRuntimeSnapshot(
+    source: Path,
+    limits: AcpRuntimeClosureLimits,
+    controlDirectory: PinnedControlDirectory,
+    cancellationCheck: () -> Unit,
+    statistics: RuntimeCopyStatistics?,
+    restart: AcpSetupRestartPermit?,
+): PrivateRuntimeSnapshot = restartAfterOwnHostMountEvent(restart, cancellationCheck) { attempt ->
     cancellationCheck()
     val container = controlDirectory.createChild("runtime-")
     val destination = container.path.resolve("root")
@@ -5219,7 +5470,7 @@ private fun stagePrivateRuntimeSnapshot(
         val root = LinuxFilesystemSyscalls.openAbsolutePathOrNull(source)
             ?: throw IOException("sandbox runtime source disappeared")
         root.use {
-            RuntimePrivateControlScope.open(source, null, cancellationCheck).use { protection ->
+            RuntimePrivateControlScope.open(source, null, cancellationCheck, attempt).use { protection ->
                 val budget = RuntimeSnapshotBudget()
                 copyRuntimeNode(
                     descriptor = root,
@@ -5237,7 +5488,7 @@ private fun stagePrivateRuntimeSnapshot(
                 protection.finish()
             }
         }
-        return PrivateRuntimeSnapshot(container, destination)
+        PrivateRuntimeSnapshot(container, destination)
     } catch (failure: Throwable) {
         val cleanupFailure = runCatching { container.deleteAndProve() }.exceptionOrNull()
         if (cleanupFailure != null) {

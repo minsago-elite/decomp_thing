@@ -267,14 +267,19 @@ describe('generated v1 contract pipeline', () => {
         .toThrow(expect.objectContaining({ code: 'unsupported_contract' }));
     }
   });
-  it('accepts only completed version-two exploration reports through the API decoder', () => {
+  it('accepts completed and summary-free partial version-two exploration reports through the API decoder', () => {
     const original = JSON.parse(fixture('report-exploration')) as ResponseOf<'report'>;
     const versioned = { ...original, data: { ...original.data, producerSchemaVersion: 2 } };
     for (const mode of ['producer', 'response'] as const) {
       expect(decodeContract(JSON.stringify(versioned), { mode })).toEqual(versioned);
+      // A version-two report without its `state` is partial and carries no summary.
+      const partial = { ...versioned, data: { ...versioned.data, state: 'partial' as const, summary: null } };
+      expect(decodeContract(JSON.stringify(partial), { mode })).toEqual(partial);
       const invalid = [
         { ...versioned.data, state: 'partial' },
         { ...versioned.data, summary: null },
+        { ...partial.data, authority: 'derived-presentation' },
+        { ...partial.data, acceptance: 'accepted' },
         { ...versioned.data, authority: 'derived-presentation' },
         { ...versioned.data, acceptance: 'accepted' },
       ];
