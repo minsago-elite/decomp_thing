@@ -511,7 +511,7 @@ private object MetadataInspectionProtocol {
     private const val CHECKPOINT_INTERVAL = 64
 }
 
-internal fun metadataWorkerCommand(path: Path, limits: BoundedElfMetadataLimits): List<String> {
+private fun metadataWorkerCommand(path: Path, limits: BoundedElfMetadataLimits): List<String> {
     val java = Path.of(System.getProperty("java.home"), "bin", if (File.separatorChar == '\\') "java.exe" else "java")
         .toAbsolutePath().normalize()
     require(Files.isExecutable(java)) { "application JDK has no executable metadata worker: $java" }
@@ -545,10 +545,15 @@ internal fun metadataWorkerCommand(path: Path, limits: BoundedElfMetadataLimits)
 /**
  * The worker starts with a cleared environment, so it would otherwise fall back to JVM and JNA defaults
  * (`/tmp`, and `~/.cache/JNA/temp` for the extracted JNA dispatch library). Forward the temporary directories this
- * process is already configured with; never choose new ones.
+ * process is already configured with; never choose new ones. The worker runs in the input's directory, so a
+ * relative setting is resolved against this process's working directory first, as [bundledGhidraDirectoryOptions]
+ * does.
  */
-private fun metadataWorkerTemporaryOptions(): List<String> = listOf("java.io.tmpdir", "jna.tmpdir").mapNotNull { name ->
-    System.getProperty(name)?.takeIf(String::isNotEmpty)?.let { "-D$name=$it" }
+private fun metadataWorkerTemporaryOptions(): List<String> {
+    val workingDirectory = Path.of("").toAbsolutePath().normalize()
+    return listOf("java.io.tmpdir", "jna.tmpdir").mapNotNull { name ->
+        System.getProperty(name)?.takeIf(String::isNotEmpty)?.let { "-D$name=${workingDirectory.resolve(it).normalize()}" }
+    }
 }
 
 internal fun startMetadataWorker(command: List<String>, directory: Path): Process {

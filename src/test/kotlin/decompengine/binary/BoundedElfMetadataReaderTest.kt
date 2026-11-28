@@ -186,6 +186,32 @@ class BoundedElfMetadataReaderTest {
         }
 
     @Test
+    fun `isolated metadata worker resolves a relative jna tmpdir against the parent working directory`(): Unit =
+        inControlTemporaryDirectory { root ->
+            val inputDirectory = java.nio.file.Files.createDirectory(root.resolve("input-tree"))
+            val input = writeElf(inputDirectory.resolve("relative-jna.elf"), dynamicFixture(variants.first()))
+            // Relative to the test JVM's working directory (the project directory), never to the worker's.
+            val relative = "build/elf-worker-relative-jna-${System.nanoTime()}"
+            val expected = java.nio.file.Path.of("").toAbsolutePath().resolve(relative).normalize()
+            val previous = System.getProperty("jna.tmpdir")
+            var launched: List<String>? = null
+            System.setProperty("jna.tmpdir", relative)
+            try {
+                BoundedElfMetadataInspectionProcess(processStarter = { command, directory ->
+                    launched = command
+                    startMetadataWorker(command, directory)
+                }).inspect(input, BoundedElfMetadataLimits()) {}
+            } finally {
+                if (previous == null) System.clearProperty("jna.tmpdir") else System.setProperty("jna.tmpdir", previous)
+            }
+            assertEquals(listOf("-Djna.tmpdir=$expected"), checkNotNull(launched).filter { it.startsWith("-Djna.tmpdir=") })
+            assertEquals(listOf("relative-jna.elf"), java.nio.file.Files.list(inputDirectory).use { paths ->
+                paths.map { it.fileName.toString() }.toList()
+            }, "the worker resolved jna.tmpdir under its own working directory")
+            java.nio.file.Files.deleteIfExists(expected)
+        }
+
+    @Test
     fun `isolated metadata result decoding continues to observe analysis checkpoints`() = inControlTemporaryDirectory { root ->
         val input = writeElf(root.resolve("checkpointed-inventory.elf"), dynamicFixture(variants.first(), functionCount = 128))
         var decodingCheckpoints = 0
