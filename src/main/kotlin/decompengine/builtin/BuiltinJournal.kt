@@ -61,8 +61,30 @@ internal enum class BuiltinJournalKind {
 /** No raw failure causes, paths, configuration or payloads escape through execution receipts. */
 internal class BuiltinJournalException : RuntimeException("Built-in journal unavailable or invalid")
 
+/**
+ * One JVM-wide lease per journal path, taken before any channel on that path is opened and held until it closes.
+ * POSIX record locks belong to the process: when a same-JVM contender's tryLock is refused and it closes its own
+ * channel, Linux also drops the lock held through the first channel. Contenders are refused before they open one.
+ */
+internal object BuiltinJournalLeases {
+    private val held = java.util.concurrent.ConcurrentHashMap.newKeySet<Path>()
+
+    class Lease internal constructor(private val key: Path) : AutoCloseable {
+        private val released = java.util.concurrent.atomic.AtomicBoolean(false)
+        override fun close() { if (released.compareAndSet(false, true)) held.remove(key) }
+    }
+
+    /** The parent is verified as a real path first; the journal itself is single-link and may not exist yet. */
+    fun acquire(path: Path): Lease {
+        val key = path.parent.toRealPath().resolve(path.fileName.toString())
+        check(held.add(key)) { "Journal lease held" }
+        return Lease(key)
+    }
+}
+
 internal class BuiltinJournal private constructor(
     private val configuration: BuiltinJournalConfiguration,
+    private val lease: BuiltinJournalLeases.Lease,
     private val channel: FileChannel,
     private val lock: FileLock,
     private val fileKey: Any,
@@ -135,13 +157,15 @@ internal class BuiltinJournal private constructor(
         throw BuiltinJournalException()
     }
 
-    override fun close(): Unit = guarded { try { lock.release() } finally { channel.close() } }
+    override fun close(): Unit = guarded { try { lock.release() } finally { try { channel.close() } finally { lease.close() } } }
 
     companion object {
         fun open(configuration: BuiltinJournalConfiguration, request: AgentExecutionRequest, secrets: List<String>): BuiltinJournal {
+            var lease: BuiltinJournalLeases.Lease? = null
             var channel: FileChannel? = null
             try {
                 verifyParent(configuration.path)
+                lease = BuiltinJournalLeases.acquire(configuration.path)
                 val parent = configuration.path.parent
                 request.workspaceRoots.forEach {
                     val root = it.path.toAbsolutePath().normalize()
@@ -156,7 +180,7 @@ internal class BuiltinJournal private constructor(
                 val redactionPatterns = secrets.filter { it.isNotEmpty() }.flatMap {
                     listOf(it, JsonPrimitive(it).toString().drop(1).dropLast(1))
                 }.distinct().sortedByDescending { it.length }
-                val journal = BuiltinJournal(configuration, channel, lock, key, redactionPatterns)
+                val journal = BuiltinJournal(configuration, lease, channel, lock, key, redactionPatterns)
                 val identity = identity(configuration.identity, AgentExecutionRequestBinding.capture(request))
                 // Identities must remain usable for exact trusted comparison; do not persist secret-bearing configuration.
                 check(journal.redact(identity) == identity)
@@ -165,6 +189,7 @@ internal class BuiltinJournal private constructor(
                 return journal
             } catch (_: Exception) {
                 try { channel?.close() } catch (_: Exception) { }
+                lease?.close()
                 throw BuiltinJournalException()
             }
         }
@@ -176,7 +201,7 @@ internal class BuiltinJournal private constructor(
                 verifyParent(configuration.path)
                 val key = Files.readAttributes(configuration.path, BasicFileAttributes::class.java, NOFOLLOW_LINKS).fileKey() ?: error("No identity")
                 verifyFile(configuration.path, key)
-                FileChannel.open(configuration.path, READ, WRITE, NOFOLLOW_LINKS).use { channel ->
+                BuiltinJournalLeases.acquire(configuration.path).use { _ -> FileChannel.open(configuration.path, READ, WRITE, NOFOLLOW_LINKS).use { channel ->
                     (channel.tryLock() ?: error("Active writer")).use {
                         check(expected.bytes in 1..configuration.maximumBytes && expected.records in 1..configuration.maximumRecords)
                         check(channel.size() == expected.bytes)
@@ -214,17 +239,19 @@ internal class BuiltinJournal private constructor(
                         return BuiltinJournalInspection(records.toList(), terminal, pending != null,
                             contentDigest.digest().joinToString("") { byte -> "%02x".format(byte) })
                     }
-                }
+                } }
             } catch (_: Exception) { throw BuiltinJournalException() }
         }
 
         /** Revalidate the entire inspected file under a new exclusive lock before retaining append authority. */
         fun reopenCheckpoint(configuration: BuiltinJournalConfiguration, request: AgentExecutionRequest,
             expected: BuiltinJournalCommitment, secrets: List<String>): Pair<BuiltinJournal, JsonObject> {
+            var lease: BuiltinJournalLeases.Lease? = null
             var channel: FileChannel? = null
             try {
                 val inspection = inspect(configuration, AgentExecutionRequestBinding.capture(request), expected)
                 check(inspection.endsAtCheckpoint)
+                lease = BuiltinJournalLeases.acquire(configuration.path)
                 channel = FileChannel.open(configuration.path, READ, WRITE, NOFOLLOW_LINKS)
                 val lock = channel.tryLock() ?: error("Active writer")
                 val key = Files.readAttributes(configuration.path, BasicFileAttributes::class.java, NOFOLLOW_LINKS).fileKey() ?: error("No identity")
@@ -245,11 +272,12 @@ internal class BuiltinJournal private constructor(
                 val patterns = secrets.filter { it.isNotEmpty() }.flatMap {
                     listOf(it, JsonPrimitive(it).toString().drop(1).dropLast(1))
                 }.distinct().sortedByDescending { it.length }
-                val journal = BuiltinJournal(configuration, channel, lock, key, patterns)
+                val journal = BuiltinJournal(configuration, lease, channel, lock, key, patterns)
                 journal.count = expected.records; journal.bytes = expected.bytes; journal.head = expected.headSha256
                 return journal to inspection.records.last().getValue("payload").jsonObject
             } catch (_: Exception) {
                 try { channel?.close() } catch (_: Exception) { }
+                lease?.close()
                 throw BuiltinJournalException()
             }
         }

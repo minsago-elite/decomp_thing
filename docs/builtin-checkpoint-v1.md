@@ -39,7 +39,10 @@ On explicit `resumeReceipt`, the loop:
 1. Reads the private commitment and validates the complete journal against the expected immutable
    request and workflow identities. The journal must end at that exact checkpoint.
 2. Acquires exclusive append authority and rechecks all inspected bytes under the retained lock.
-   An active writer or intervening append is rejected; no source/model work is replayed.
+   An active writer or intervening append is rejected; no source/model work is replayed. A
+   JVM-wide lease per journal path is taken before any channel on the journal opens. A same-JVM
+   contender is refused without opening one, because closing its channel would also drop the
+   holder's process-owned POSIX lock.
 3. Validates the checkpoint state digest, schema, limit fingerprint, correlated history and counters.
    Both remaining duration and absolute expiry constrain the original deadline, including downtime.
 4. Opens the workflow-supplied stage and compares its actual source hash and registered tools with
