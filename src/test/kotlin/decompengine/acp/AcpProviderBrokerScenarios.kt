@@ -2,6 +2,7 @@ package decompengine.acp
 
 import java.io.ByteArrayOutputStream
 import java.net.InetAddress
+import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
@@ -194,7 +195,7 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
         assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.exchange(channelRequest(1, ByteArray(32))) }
         val capability = capability(broker)
         val otherCapability = capability(other)
-        assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.deliverChannelCapability(ByteArrayOutputStream()) }
+        assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.deliverChannelCapability(RecordingSink()) }
 
         // The reserved field has a fixed width: other lengths are refused when the frame is decoded.
         listOf(ByteArray(0), ByteArray(31), ByteArray(33)).forEach { malformed ->
@@ -280,45 +281,45 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
     fun channelCapabilityDeliveredOnceToOwnedStream() {
         val server = server()
         val broker = broker(connector = connector(server))
-        val channel = RecordingChannel()
+        val channel = RecordingSink()
         broker.deliverChannelCapability(channel)
         assertEquals(1, channel.writes)
-        val capability = channel.toByteArray()
+        val capability = channel.bytes()
         assertEquals(32, capability.size)
         capabilities += capabilityHex(capability)
-        // Single use: no second stream ever receives the capability, before or after close.
-        val second = RecordingChannel()
+        // Single use: no second channel ever receives the capability, before or after close.
+        val second = RecordingSink()
         assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.deliverChannelCapability(second) }
-        assertEquals(0, second.size())
+        assertEquals(0, second.writes)
         assertEquals(200, broker.exchange(channelRequest(1, capability)).status)
         broker.close()
-        assertTrue(channel.closed, "the broker owns and closes the private channel stream")
-        assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.deliverChannelCapability(RecordingChannel()) }
+        assertTrue(channel.closed, "the broker owns and closes the private relay channel")
+        assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.deliverChannelCapability(RecordingSink()) }
         assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.exchange(channelRequest(2, capability)) }
         // A zeroed capability cannot authorize anything either.
         assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.exchange(channelRequest(2, ByteArray(32))) }
 
-        // A failed delivery binds the stream anyway: nothing can be retried on another stream.
+        // A failed delivery binds the channel anyway: nothing can be retried on another channel.
         val failing = broker(connector = connector(server))
-        val broken = RecordingChannel(failWrites = true)
+        val broken = RecordingSink(fail = true)
         assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { failing.deliverChannelCapability(broken) }
         assertTrue(broken.closed)
-        val retry = RecordingChannel()
+        val retry = RecordingSink()
         assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { failing.deliverChannelCapability(retry) }
-        assertEquals(0, retry.size())
+        assertEquals(0, retry.writes)
         assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { failing.exchange(channelRequest(1, ByteArray(32))) }
 
         // An undelivered capability is erased on close and can never be delivered afterwards.
         val undelivered = broker(connector = connector(server))
         undelivered.close()
-        val late = RecordingChannel()
+        val late = RecordingSink()
         assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { undelivered.deliverChannelCapability(late) }
-        assertEquals(0, late.size())
+        assertEquals(0, late.writes)
         assertEquals(1, server.requests.size)
     }
 
     fun eventStreamEchoesAreDetectedAfterDecoding() {
-        val capabilityChannel = RecordingChannel()
+        val capabilityChannel = RecordingSink()
         val split = token.length / 2
         fun escaped(value: String) = value.map { "\\u%04x".format(it.code) }.joinToString("")
         fun delta(text: String, item: String = "msg_1") =
@@ -344,12 +345,12 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
             diagnostics += failure.stackTraceToString()
         }
         // The capability itself, escaped and split, is caught the same way.
-        val server = server { observed -> sseResponse(delta(escaped(capabilityHex(capabilityChannel.toByteArray()).take(32))) +
-            delta(capabilityHex(capabilityChannel.toByteArray()).drop(32))) }
+        val server = server { observed -> sseResponse(delta(escaped(capabilityHex(capabilityChannel.bytes()).take(32))) +
+            delta(capabilityHex(capabilityChannel.bytes()).drop(32))) }
         val broker = broker(connector = connector(server))
         broker.deliverChannelCapability(capabilityChannel)
-        capabilities += capabilityHex(capabilityChannel.toByteArray())
-        assertRefused(AcpProviderBrokerFailureKind.SECRET_EXPOSURE) { broker.exchange(channelRequest(1, capabilityChannel.toByteArray())) }
+        capabilities += capabilityHex(capabilityChannel.bytes())
+        assertRefused(AcpProviderBrokerFailureKind.SECRET_EXPOSURE) { broker.exchange(channelRequest(1, capabilityChannel.bytes())) }
 
         // Benign escapes pass, and the agent receives exactly the bytes that were checked.
         val benign = delta("a\\/b \\u0041") + "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{}}\r\n\r\n"
@@ -442,57 +443,69 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
 
     fun deliveryNeverHoldsTheCloseLock() {
         val server = server()
-        // A stream that never drains: its write blocks until the stream is closed.
-        val blocking = BlockingChannel()
+        // A real pipe filled to capacity and never drained.
+        val pipe = java.nio.channels.Pipe.open()
+        pipe.sink().configureBlocking(false)
+        val filler = ByteBuffer.allocate(64 * 1024)
+        while (pipe.sink().write(filler.clear()) > 0) Unit
         val broker = broker(connector = connector(server))
         val executor = Executors.newSingleThreadExecutor()
         try {
-            val delivery = executor.submit<Result<Unit>> { runCatching { broker.deliverChannelCapability(blocking) } }
-            assertTrue(blocking.entered.await(10, TimeUnit.SECONDS), "the delivery write is blocked")
+            val delivery = executor.submit<Result<Unit>> { runCatching { broker.deliverChannelCapability(pipe.sink()) } }
+            Thread.sleep(200)
+            assertFalse(delivery.isDone, "the delivery is waiting on the full pipe")
             val started = System.nanoTime()
             broker.close()
-            assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(2), "close was not held up by the blocked write")
-            val failure = delivery.get(10, TimeUnit.SECONDS).exceptionOrNull() as AcpProviderBrokerFailure
+            assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(2), "close was not held up by the stalled pipe")
+            val failure = delivery.get(5, TimeUnit.SECONDS).exceptionOrNull() as AcpProviderBrokerFailure
             assertEquals(AcpProviderBrokerFailureKind.CHANNEL_REFUSED, failure.kind)
-            assertTrue(blocking.closed)
-            // The write got a temporary copy, zeroed afterwards; the broker's own array was never handed out.
-            assertTrue(blocking.written!!.all { it == 0.toByte() })
-            assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.deliverChannelCapability(RecordingChannel()) }
+            assertFalse(pipe.sink().isOpen, "the broker closed its relay channel")
+            assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.deliverChannelCapability(RecordingSink()) }
             assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { broker.exchange(channelRequest(1, ByteArray(32))) }
         } finally {
             executor.shutdownNow()
+            pipe.source().close()
         }
 
-        // A write that finishes normally after close never commits delivery.
-        val lateWrite = BlockingChannel(failAfterRelease = false)
-        val closing = broker(connector = connector(server))
-        val lateExecutor = Executors.newSingleThreadExecutor()
+        // A channel that never drains and whose own close releases nothing: close still returns, the writer
+        // exits, and the temporary copy it was handed is zeroed.
+        val stalled = RecordingSink(accept = false)
+        val stalledBroker = broker(connector = connector(server))
+        val stalledExecutor = Executors.newSingleThreadExecutor()
         try {
-            val delivery = lateExecutor.submit<Result<Unit>> { runCatching { closing.deliverChannelCapability(lateWrite) } }
-            assertTrue(lateWrite.entered.await(10, TimeUnit.SECONDS))
-            closing.close()
-            val failure = delivery.get(10, TimeUnit.SECONDS).exceptionOrNull() as AcpProviderBrokerFailure
+            val delivery = stalledExecutor.submit<Result<Unit>> { runCatching { stalledBroker.deliverChannelCapability(stalled) } }
+            assertTrue(stalled.entered.await(10, TimeUnit.SECONDS))
+            val started = System.nanoTime()
+            stalledBroker.close()
+            assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(2))
+            val failure = delivery.get(5, TimeUnit.SECONDS).exceptionOrNull() as AcpProviderBrokerFailure
             assertEquals(AcpProviderBrokerFailureKind.CHANNEL_REFUSED, failure.kind)
+            assertTrue(stalled.handed!!.all { it == 0.toByte() }, "the copy handed to the channel was zeroed")
         } finally {
-            lateExecutor.shutdownNow()
+            stalledExecutor.shutdownNow()
         }
+
+        // A write that completes while the broker closes never commits delivery.
+        val racing = broker(connector = connector(server))
+        val closingSink = RecordingSink(onWrite = { racing.close() })
+        assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { racing.deliverChannelCapability(closingSink) }
 
         // A completed delivery also zeroes its temporary copy, while the delivered bytes still authorize.
-        val capturing = CapturingChannel()
+        val accepting = RecordingSink()
         val open = broker(connector = connector(server))
-        open.deliverChannelCapability(capturing)
-        assertTrue(capturing.passed!!.all { it == 0.toByte() }, "the array handed to the stream was a zeroed temporary copy")
-        capabilities += capabilityHex(capturing.toByteArray())
-        assertEquals(200, open.exchange(channelRequest(1, capturing.toByteArray())).status)
+        open.deliverChannelCapability(accepting)
+        assertTrue(accepting.handed!!.all { it == 0.toByte() }, "the array handed to the channel was a zeroed temporary copy")
+        capabilities += capabilityHex(accepting.bytes())
+        assertEquals(200, open.exchange(channelRequest(1, accepting.bytes())).status)
 
-        // With nobody calling close, the idle bound closes a stream that never drains.
+        // With nobody calling close, the idle bound ends a delivery to a channel that never drains.
         val bounded = broker(connector = connector(server), brokerPolicy = approvedProviderPolicy("idleTimeoutMillis" to "200"))
-        val stuck = BlockingChannel()
+        val stuck = RecordingSink(accept = false)
         val started = System.nanoTime()
         assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { bounded.deliverChannelCapability(stuck) }
         assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(5))
         assertTrue(stuck.closed)
-        assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { bounded.deliverChannelCapability(RecordingChannel()) }
+        assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { bounded.deliverChannelCapability(RecordingSink()) }
     }
 
     fun sourceWalkFailsClosedAndChecksBelowTheRoot() {
@@ -642,8 +655,17 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
             launch(workspace, mounts = listOf(AcpSandboxReadOnlyMount(codexHome))),
             launch(workspace, mounts = listOf(AcpSandboxReadOnlyMount(codexHome.parent, Path.of("/opt/provider")))),
             launch(workspace, mounts = listOf(AcpSandboxReadOnlyMount(codexHome.resolve("auth.json"), Path.of("/opt/auth.json")))),
-            launch(codexHome),
         ).forEach { assertRefused(AcpProviderBrokerFailureKind.CREDENTIAL_SOURCE_VISIBLE) { broker.requireNoProviderAuthority(it) } }
+        // The working directory and mount destinations are sandbox paths. Even when they spell a host ancestor of the
+        // credential, as the sandbox /tmp does for a credential home below the host /tmp, only the secret scan applies.
+        broker.requireNoProviderAuthority(launch(Path.of("/tmp")))
+        broker.requireNoProviderAuthority(launch(codexHome.parent))
+        broker.requireNoProviderAuthority(launch(codexHome))
+        broker.requireNoProviderAuthority(launch(Path.of("/tmp"), mounts = listOf(AcpSandboxReadOnlyMount(workspace, codexHome.parent))))
+        // A host mount source that overlaps the credential is still refused with a sandbox working directory of /tmp.
+        assertRefused(AcpProviderBrokerFailureKind.CREDENTIAL_SOURCE_VISIBLE) {
+            broker.requireNoProviderAuthority(launch(Path.of("/tmp"), mounts = listOf(AcpSandboxReadOnlyMount(codexHome.parent, Path.of("/opt/up")))))
+        }
         val linked = Files.createSymbolicLink(providerFixtureDirectory("link").resolve("home"), codexHome)
         assertRefused(AcpProviderBrokerFailureKind.CREDENTIAL_SOURCE_VISIBLE) {
             broker.requireNoProviderAuthority(launch(workspace, mounts = listOf(AcpSandboxReadOnlyMount(linked, Path.of("/opt/home")))))
@@ -659,7 +681,9 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
         }
         broker.close()
         // Once closed, the source path stays protected; the dropped credential and capability are no longer held.
-        assertRefused(AcpProviderBrokerFailureKind.CREDENTIAL_SOURCE_VISIBLE) { broker.requireNoProviderAuthority(launch(codexHome)) }
+        assertRefused(AcpProviderBrokerFailureKind.CREDENTIAL_SOURCE_VISIBLE) {
+            broker.requireNoProviderAuthority(launch(workspace, mounts = listOf(AcpSandboxReadOnlyMount(codexHome, Path.of("/opt/home")))))
+        }
         assertRefused(AcpProviderBrokerFailureKind.CREDENTIAL_SOURCE_VISIBLE) {
             broker.requireNoProviderAuthority(launch(workspace, mounts = listOf(AcpSandboxReadOnlyMount(hardLink, Path.of("/opt/copy.json")))))
         }
@@ -734,9 +758,9 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
     /** The contained relay's side of the private channel setup: read the one delivery from its stream. */
     private fun capability(broker: AcpProviderBroker, reuse: Boolean = false): ByteArray {
         if (reuse) return granted.getValue(broker).copyOf()
-        val channel = ByteArrayOutputStream()
+        val channel = RecordingSink()
         broker.deliverChannelCapability(channel)
-        val bytes = channel.toByteArray()
+        val bytes = channel.bytes()
         assertEquals(32, bytes.size)
         capabilities += capabilityHex(bytes)
         granted[broker] = bytes
@@ -785,52 +809,45 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
         return failure
     }
 
-    /** A stream that never drains: write blocks until close, then fails. Records the array it was handed. */
-    private class BlockingChannel(private val failAfterRelease: Boolean = true) : java.io.OutputStream() {
+    /**
+     * A test relay channel: an unbuffered selectable byte channel that records the array it is handed and the bytes
+     * it accepts. With [accept] false it never drains; with [fail] its writes throw. Its close releases nothing by
+     * itself. [onWrite] runs inside each write, before the bytes are accepted.
+     */
+    private class RecordingSink(
+        private val accept: Boolean = true,
+        private val fail: Boolean = false,
+        private val onWrite: () -> Unit = {},
+    ) : java.nio.channels.Pipe.SinkChannel(java.nio.channels.spi.SelectorProvider.provider()) {
+        @Volatile var handed: ByteArray? = null
+        @Volatile var writes = 0
         val entered = CountDownLatch(1)
-        private val release = CountDownLatch(1)
-        @Volatile var written: ByteArray? = null
-        @Volatile var closed = false
+        private val received = ByteArrayOutputStream()
+        val closed: Boolean get() = !isOpen
 
-        override fun write(b: Int) = write(byteArrayOf(b.toByte()))
+        fun bytes(): ByteArray = synchronized(received) { received.toByteArray() }
 
-        override fun write(b: ByteArray) {
-            written = b
-            entered.countDown()
-            release.await(30, TimeUnit.SECONDS)
-            if (failAfterRelease) throw java.io.IOException("channel closed while writing")
-        }
-
-        override fun close() {
-            closed = true
-            release.countDown()
-        }
-    }
-
-    /** Keeps a reference to the exact array the broker hands to write, alongside the bytes it received. */
-    private class CapturingChannel : ByteArrayOutputStream() {
-        var passed: ByteArray? = null
-
-        override fun write(b: ByteArray) {
-            passed = b
-            super.write(b)
-        }
-    }
-
-    /** A private channel stream that records writes and close, and can fail its writes. */
-    private class RecordingChannel(private val failWrites: Boolean = false) : ByteArrayOutputStream() {
-        var writes = 0
-        var closed = false
-
-        override fun write(b: ByteArray) {
+        override fun write(src: ByteBuffer): Int {
             writes++
-            if (failWrites) throw java.io.IOException("channel write failed")
-            super.write(b)
+            if (src.hasArray()) handed = src.array()
+            entered.countDown()
+            onWrite()
+            if (fail) throw java.io.IOException("channel write failed")
+            if (!accept) return 0
+            val count = src.remaining()
+            synchronized(received) { received.write(src.array(), src.arrayOffset() + src.position(), count) }
+            src.position(src.limit())
+            return count
         }
 
-        override fun close() {
-            closed = true
-        }
+        override fun write(srcs: Array<out ByteBuffer>, offset: Int, length: Int): Long =
+            (offset until offset + length).sumOf { write(srcs[it]).toLong() }
+
+        override fun write(srcs: Array<out ByteBuffer>): Long = write(srcs, 0, srcs.size)
+
+        override fun implCloseSelectableChannel() = Unit
+
+        override fun implConfigureBlocking(block: Boolean) = Unit
     }
 
     companion object {

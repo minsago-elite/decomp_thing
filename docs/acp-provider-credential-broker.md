@@ -77,22 +77,25 @@ cache owned by someone else is refused; production always uses the process's own
 ## Invocation-bound channel
 
 The broker creates a fresh 32-byte random channel capability. `deliverChannelCapability` writes it once to the
-host-owned private stream to the contained relay, and the broker takes ownership of that stream and closes it on
+host-owned private relay channel. That channel must be an unbuffered selectable byte channel, such as a pipe
+sink or a socket channel, never an `OutputStream` wrapper. The broker takes ownership of it and closes it on
 `close`.
 
-- The stream is reserved under the broker lock, so a failed delivery cannot be retried on another stream. A
+- The channel is reserved under the broker lock, so a failed delivery cannot be retried on another channel. A
   second delivery, or one after close, is refused with `CHANNEL_REFUSED`.
-- The write happens outside the lock that `close` needs, so a stream that never drains cannot stop `close` from
-  revoking and zeroing the capability. `close` also closes the stream, which unblocks the write.
-- The stream is handed a temporary copy, never the broker's own array, and the copy is zeroed after the write.
-- If the write does not finish within the policy idle bound, a watchdog closes the stream.
-- Delivery is committed only if the write finished first and the broker is still open. Otherwise the stream is
+- The write happens outside the lock that `close` needs, in non-blocking mode. The writer polls until every byte
+  is written, the policy idle bound passes, the broker closes, or the channel fails. It never blocks inside the
+  channel, so a channel that never drains cannot stop `close`, and nothing depends on the channel's own close
+  releasing the writer.
+- Abort is a plain channel close, with no buffered wrapper to flush and no watchdog thread to get stuck.
+- The channel is handed a temporary copy, never the broker's own array, and the copy is zeroed after the write.
+- Delivery is committed only if every byte was written while the broker was still open. Otherwise the channel is
   closed and delivery is refused for good.
 
 The capability is never an environment variable, argument or file. Analyzed programs, candidate build and
 validation processes and ACP terminal children therefore cannot inherit it through process ancestry or find it
 through filesystem visibility. Even a copied capability authorizes nothing without the private channel. Until
-the contained-side relay is wired, the private stream is whatever the caller passes; this checkpoint does not
+the contained-side relay is wired, the private channel is whatever the caller passes; this checkpoint does not
 yet attach it to a real sandbox descriptor.
 
 `identity.invocationBindingSha256` binds the policy descriptor digest, the admitted request binding and a fresh
@@ -195,12 +198,17 @@ analysis.
   and the empty directories. If the capability, the access token or the account ID appears in any of them, the
   launch is refused with `SECRET_EXPOSURE`.
 - **Host sources.** It checks every host source the launch makes visible (mount sources and staging roots) with
-  `requireEffectiveLaunchCarriesNoProviderAuthority`, below. The working directory is a sandbox path, so it is
-  only checked by path against the credential source.
+  `requireEffectiveLaunchCarriesNoProviderAuthority`, below.
+- **Sandbox paths.** The working directory, mount destinations and empty directories are sandbox-namespace
+  paths, so they get the secret scan only, never a host path or identity check. The outer agent's working
+  directory is the private sandbox `/tmp`. A credential home below the host `/tmp` therefore does not refuse
+  every launch, while a host mount source that overlaps it is still refused.
 
 `requireEffectiveLaunchCarriesNoProviderAuthority` takes the final effective argv (for example a boundary's
-bubblewrap command with its bind paths), environment and host sources. A boundary calls it before those inputs
-reach a command observer or launch evidence. It scans the argv and environment for secrets, then checks each
+bubblewrap command with its bind paths), environment and host sources. The sources are host paths only: mount
+sources, staging roots and anything else the boundary binds from the host. Sandbox paths belong in the argv,
+where only the secret scan applies. A boundary calls it before those inputs reach a command observer or launch
+evidence. It scans the argv and environment for secrets, then checks each
 source, and it fails closed:
 
 - The source must resolve to a real path. A source that cannot be resolved is refused with
@@ -281,7 +289,10 @@ The tests use no real credentials and make no external connection. Hosted CI sta
   - the upstream head is exactly the policy-owned headers and the credential headers, and the body is the
     validated body;
   - the capability is delivered once to a broker-owned stream, never again, and is erased on close;
-  - a delivery blocked on a stream that never drains cannot stop `close`, and the idle bound closes it;
+  - a delivery to a full pipe that is never drained, or to a channel whose own close releases nothing, cannot
+    stop `close`: the writer exits, its copy is zeroed, and the idle bound ends it when nobody closes;
+  - a sandbox working directory of `/tmp` is allowed when the credential home is below a host directory with
+    that path, while an overlapping host mount source is still refused;
   - capability and sequence binding hold;
   - routing, framing and disclosure refusals send nothing upstream;
   - responses are redacted, including escaped and split echoes, and the event stream and content coding are

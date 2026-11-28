@@ -17,9 +17,10 @@ import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
-import java.io.OutputStream
 import java.net.InetAddress
 import java.net.Socket
+import java.nio.channels.SelectableChannel
+import java.nio.channels.WritableByteChannel
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
@@ -34,9 +35,7 @@ import java.security.SecureRandom
 import java.time.Clock
 import java.time.Duration
 import java.util.Locale
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.locks.LockSupport
 import javax.net.ssl.SSLException
 import javax.net.ssl.SSLSocket
 
@@ -159,7 +158,7 @@ internal class AcpProviderBroker private constructor(
     private var credential: AcpProviderCredential? = credential
     // Not secret: where the credential came from, which no sandbox launch may make visible. Kept after close.
     private val credentialSourceIdentity: AcpProviderCredentialSourceIdentity = credential.source
-    private var privateChannel: OutputStream? = null
+    private var privateChannel: SelectableChannel? = null
     private var delivered = false
     private var closed = false
     private var nextSequence = 1L
@@ -180,24 +179,26 @@ internal class AcpProviderBroker private constructor(
     /**
      * The only provider authority a contained agent receives: the broker's fresh random capability, bound to this
      * broker and so to one admitted invocation, one policy and one channel. It is written once to [channel], the
-     * host-owned private stream to the contained relay. The broker takes ownership of that stream and closes it on
-     * [close]. The capability is never an environment variable, argument or file, and a second delivery, or one
-     * after close, is refused.
+     * host-owned private relay channel: an unbuffered selectable byte channel such as a pipe sink or a socket. The
+     * broker takes ownership of it and closes it on [close]. The capability is never an environment variable,
+     * argument or file, and a second delivery, or one after close, is refused.
      *
-     * The stream is reserved under the broker lock, but written outside it, so a stream that never drains cannot
-     * stop [close] from revoking. The write gets a temporary copy, never the broker's own array, and the copy is
-     * zeroed afterwards. If the write does not finish within the idle bound, the stream is closed. Delivery is
-     * committed only if the broker is still open when the write finishes.
+     * The channel is reserved under the broker lock and written outside it, in non-blocking mode, until the bytes are
+     * written, the idle bound passes or the broker closes. So the writer never blocks inside the channel, nothing
+     * depends on the channel's own close releasing it, and a channel that never drains cannot stop [close]. Abort is
+     * a plain channel close: there is no buffered wrapper to flush and no watchdog thread. The write gets a temporary
+     * copy, never the broker's own array, and the copy is zeroed afterwards. Delivery is committed only if every
+     * byte was written while the broker was still open.
      */
-    fun deliverChannelCapability(channel: OutputStream) {
+    fun <C> deliverChannelCapability(channel: C) where C : SelectableChannel, C : WritableByteChannel {
         val copy = synchronized(lock) {
             if (closed || privateChannel != null) refuse(AcpProviderBrokerFailureKind.CHANNEL_REFUSED)
-            // Reserved before the write: a failed delivery cannot be retried on another stream.
+            // Reserved before the write: a failed delivery cannot be retried on another channel.
             privateChannel = channel
             capability.copyOf()
         }
         val written = try {
-            writeWithinBound(channel, copy, policy.bounds.idleTimeout)
+            writeWithinDeadline(channel, copy, policy.bounds.idleTimeout) { synchronized(lock) { closed } }
         } finally {
             copy.fill(0)
         }
@@ -252,15 +253,18 @@ internal class AcpProviderBroker private constructor(
         val texts = launch.command + listOf(launch.workingDirectory.toString()) +
             launch.readOnlyMounts.flatMap { listOf(it.source.toString(), it.destination.toString()) } +
             launch.stagingRoots.map { it.stagingRoot.path.toString() } + launch.emptyDirectories.map(Path::toString)
+        // The working directory, mount destinations and empty directories are sandbox-namespace paths: they get the
+        // secret scan above, but no host path or identity check (the outer agent's cwd is the private sandbox /tmp).
         requireEffectiveLaunchCarriesNoProviderAuthority(texts, launch.environment, sources)
-        // The working directory is a sandbox path, not a host source; it still may not name the credential source.
-        if (pathOverlapsCredentialSource(launch.workingDirectory)) refuse(AcpProviderBrokerFailureKind.CREDENTIAL_SOURCE_VISIBLE)
     }
 
     /**
      * The same check on the final effective launch inputs: the exact argv a boundary will execute (for example
      * its bubblewrap command, including every bind path), the exact environment, and every host source it makes
-     * visible. A boundary calls this before the inputs reach a command observer or launch evidence.
+     * visible. A boundary calls this before the inputs reach a command observer or launch evidence. [sources] are
+     * host paths only (mount sources, staging roots and anything else the boundary binds from the host); sandbox
+     * paths such as the working directory or a mount destination belong in [argv], where only the secret scan
+     * applies.
      *
      * It fails closed. Each source must resolve to a real path, must not overlap the credential source by path,
      * and is walked without following links, within [limits]. Every entry's device and inode is compared with the
@@ -389,8 +393,8 @@ internal class AcpProviderBroker private constructor(
     }
 
     /**
-     * Drops the credential, zeroes the capability (the only copy), closes the private channel stream and aborts an
-     * in-flight upstream connection.
+     * Drops the credential, zeroes the capability (the only copy), closes the private relay channel (a channel close,
+     * never a flush) and aborts an in-flight upstream connection.
      */
     override fun close() {
         val (inflight, channel) = synchronized(lock) {
@@ -921,36 +925,32 @@ private fun sourceEntryKey(path: Path): LinuxFileKey? = try {
 }
 
 /**
- * Writes and flushes [bytes] on the caller's thread. A watchdog closes [channel] if that does not finish within
- * [bound], which also unblocks a write stuck on a stream that never drains. True only if the write finished first.
+ * Writes [bytes] to [channel] in non-blocking mode on the caller's thread, polling until every byte is written,
+ * [bound] passes, [stopped] reports true or the channel fails or closes. True only if every byte was written. The
+ * writer never blocks inside the channel, so a channel that never drains, or one closed by another thread, only
+ * ends the loop.
  */
-private fun writeWithinBound(channel: OutputStream, bytes: ByteArray, bound: Duration): Boolean {
-    val state = AtomicInteger(DELIVERY_WRITING)
-    val finished = CountDownLatch(1)
-    val watchdog = Thread({
-        try {
-            if (!finished.await(bound.toNanos(), TimeUnit.NANOSECONDS) && state.compareAndSet(DELIVERY_WRITING, DELIVERY_TIMED_OUT)) {
-                runCatching { channel.close() }
-            }
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
-        }
-    }, "decomp-acp-provider-channel-delivery").apply { isDaemon = true }
-    watchdog.start()
+private fun writeWithinDeadline(channel: SelectableChannel, bytes: ByteArray, bound: Duration, stopped: () -> Boolean): Boolean {
+    val deadline = System.nanoTime() + bound.toNanos()
+    val buffer = ByteBuffer.wrap(bytes)
     return try {
-        channel.write(bytes)
-        channel.flush()
-        state.compareAndSet(DELIVERY_WRITING, DELIVERY_FINISHED)
+        channel.configureBlocking(false)
+        val writable = channel as WritableByteChannel
+        while (buffer.hasRemaining()) {
+            if (stopped() || !channel.isOpen) return false
+            if (writable.write(buffer) > 0) continue
+            val remaining = deadline - System.nanoTime()
+            if (remaining <= 0) return false
+            LockSupport.parkNanos(minOf(remaining, DELIVERY_POLL_NANOS))
+        }
+        !stopped()
     } catch (_: Exception) {
         false
-    } finally {
-        finished.countDown()
     }
 }
 
-private const val DELIVERY_WRITING = 0
-private const val DELIVERY_FINISHED = 1
-private const val DELIVERY_TIMED_OUT = 2
+/** How often a blocked delivery re-checks its deadline and the broker's closed state. */
+private val DELIVERY_POLL_NANOS = Duration.ofMillis(5).toNanos()
 
 private fun brokerStrictUtf8(bytes: ByteArray): String = StandardCharsets.UTF_8.newDecoder()
     .onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)
