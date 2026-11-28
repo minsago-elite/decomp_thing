@@ -604,6 +604,93 @@ class ManagedGitRepositoriesTest {
 
     // ---- Import (#572) ------------------------------------------------------------------
 
+    @Test fun `restart reconciles every Attach interruption without changing source or accepted evidence`() {
+        val byteIdentityProblems = mutableListOf<String>()
+        for (point in GitOperationCrashPoint.entries) {
+            val (f, importRoot) = importFixture()
+            f.use {
+                val g = f.repositories
+                val source = Files.createDirectories(importRoot.resolve("attach-source"))
+                g.git("init", "-q", "--initial-branch=feature/attach", source.toString())
+                Files.createDirectories(source.resolve("src/üñícode"))
+                Files.write(source.resolve("src/üñícode/naïve file.c"), "int attached = 7;\r\n".toByteArray())
+                Files.write(source.resolve(".gitattributes"), "*.c text eol=lf\n".toByteArray())
+                g.git("add", "-A", cwd = source)
+                g.git("commit", "-q", "-m", "Attach fixture", cwd = source)
+                g.git("tag", "fixture-v1", cwd = source)
+                val expectedObjectId = g.git("rev-parse", "HEAD", cwd = source).trim()
+                val sourceBefore = f.tree(source)
+                val expectedPublishedTree = listOf(".gitattributes", "src/üñícode/naïve file.c").associateWith { path ->
+                    g.git("cat-file", "blob", "HEAD:$path", cwd = source).toByteArray().toList()
+                }
+                val sourcePermissionsBefore = Files.walk(source).use { paths -> paths.toList().associate { path ->
+                    source.relativize(path).toString() to Files.getPosixFilePermissions(path).toString()
+                } }
+
+                // Keep a second job's accepted snapshot, export and evidence marker byte-for-byte intact.
+                val acceptedJob = "fedcba9876543210fedcba9876543210"
+                val acceptedRoot = Files.createDirectories(f.store.resolve(acceptedJob))
+                val acceptedSource = Files.createDirectories(acceptedRoot.resolve("reports/runs/accepted/source-tree"))
+                Files.createDirectories(acceptedSource.resolve("src"))
+                Files.write(acceptedSource.resolve("src/accepted.c"), "int retained_source = 3;\n".toByteArray())
+                val acceptedEvidence = Files.createDirectories(acceptedRoot.resolve("reports/runs/accepted/evidence"))
+                Files.write(acceptedEvidence.resolve("verification.json"), "{\"status\":\"accepted\",\"digest\":\"${"b".repeat(64)}\"}\n".toByteArray())
+                Files.createDirectories(acceptedRoot.resolve("artifacts"))
+                Files.write(acceptedRoot.resolve("artifacts/accepted-export.bin"), byteArrayOf(0, 1, 0x7f, -1))
+                val acceptedBefore = f.tree(acceptedRoot)
+
+                f.crashes += point
+                val first = f.open()
+                val admission = first.request(jobId, GitRepositoryRequest.Attach("attach-source"), "attach_crash_key_01")
+                assertTrue(first.awaitIdle(60_000))
+                if (point != GitOperationCrashPoint.AFTER_PUBLISH) {
+                    assertTrue(first.listing(jobId).repositories.isEmpty(), point.name)
+                }
+                first.close()
+                f.crashes.clear()
+
+                val restarted = f.open()
+                restarted.recover(listOf(jobId, acceptedJob))
+                val recovered = restarted.operation(jobId, admission.operation.repositoryId, admission.operation.operationId)
+                assertEquals(sourceBefore, f.tree(source), point.name)
+                assertEquals(sourcePermissionsBefore, Files.walk(source).use { paths -> paths.toList().associate { path ->
+                    source.relativize(path).toString() to Files.getPosixFilePermissions(path).toString()
+                } }, point.name)
+                assertEquals(acceptedBefore, f.tree(acceptedRoot), point.name)
+                assertFalse(f.store.resolve(jobId).resolve("git/staging/${admission.operation.operationId}").exists(), point.name)
+
+                if (point == GitOperationCrashPoint.AFTER_PUBLISH) {
+                    assertEquals(GitOperationState.COMPLETED, recovered.state, point.name)
+                    assertEquals(expectedObjectId, recovered.resultObjectId, point.name)
+                    assertEquals(1, restarted.listing(jobId).repositories.size, point.name)
+                    val publishedTree = f.tree(f.repositoryDirectory(recovered.repositoryId).resolve("worktree"))
+                    if (publishedTree != expectedPublishedTree) {
+                        byteIdentityProblems += "$point: published files differ from the admitted Git objects; expected=$expectedPublishedTree actual=$publishedTree"
+                    }
+                    assertEquals(GitHeadObservation(GitHeadState.ATTACHED, "refs/heads/feature/attach", expectedObjectId),
+                        restarted.workspace(jobId, recovered.repositoryId).observation.head, point.name)
+                    assertEquals(setOf("refs/heads/feature/attach", "refs/tags/fixture-v1"),
+                        restarted.workspace(jobId, recovered.repositoryId).observation.refs.map { it.name }.toSet(), point.name)
+                } else {
+                    assertEquals(GitOperationState.INTERRUPTED, recovered.state, point.name)
+                    assertFalse(recovered.recoveryRequired, point.name)
+                    assertTrue(restarted.listing(jobId).repositories.isEmpty(), point.name)
+                }
+
+                val replay = restarted.request(jobId, GitRepositoryRequest.Attach("attach-source"), "attach_crash_key_01")
+                assertTrue(replay.replayed, point.name)
+                assertEquals(recovered.state, replay.operation.state, point.name)
+                assertEquals(recovered.repositoryId, replay.operation.repositoryId, point.name)
+                assertEquals(recovered.resultObjectId, replay.operation.resultObjectId, point.name)
+                assertEquals(if (point == GitOperationCrashPoint.AFTER_PUBLISH) 1 else 0,
+                    restarted.listing(jobId).repositories.size, point.name)
+                assertEquals(sourceBefore, f.tree(source), point.name)
+                assertEquals(acceptedBefore, f.tree(acceptedRoot), point.name)
+            }
+        }
+        assertTrue(byteIdentityProblems.isEmpty(), byteIdentityProblems.joinToString("\n"))
+    }
+
     private fun importFixture(): Pair<Fixture, Path> {
         val repositories = GitTestRepositories()
         val importRoot = Files.createDirectories(repositories.root.resolve("admitted imports"))
