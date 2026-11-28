@@ -74,7 +74,11 @@ class AcpProviderBrokerTest {
             // No ambient operator variables reach the scenario; its own child shell needs only a fixed PATH.
             .also { it.environment().clear(); it.environment()["PATH"] = "/usr/bin:/bin" }
             .start()
-        assertTrue(process.waitFor(120, TimeUnit.SECONDS), "scenario JVM did not finish: $scenario")
+        if (!process.waitFor(120, TimeUnit.SECONDS)) {
+            // Never leave a stuck scenario JVM behind: a hung control must fail, not outlive the test.
+            process.destroyForcibly().waitFor(10, TimeUnit.SECONDS)
+            throw AssertionError("scenario JVM did not finish: $scenario\n" + Files.readAllLines(log).joinToString("\n"))
+        }
         val output = Files.readAllLines(log)
         assertEquals(0, process.exitValue(), output.joinToString("\n"))
         assertEquals("SCENARIO_OK $scenario", output.last(), output.joinToString("\n"))
