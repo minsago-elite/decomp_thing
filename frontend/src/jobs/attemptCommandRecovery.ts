@@ -58,3 +58,18 @@ export function createAttemptCommandRecovery(basePath: string, storage: () => St
     },
   };
 }
+
+/**
+ * A confirmed deletion of `jobId` (a RESOURCE_GONE tombstone, or this view's own accepted job deletion) leaves a
+ * retained command for that job with nothing to reconcile against, so the routed deletion path forgets it (#512).
+ * Only a validated pending intent for exactly that job is removed; a command for any other job, and an invalid,
+ * expired or unreadable slot, stay for explicit reconciliation. Bounded to this tab's one slot for this deployment;
+ * it never sends a request. Returns whether a retained command was forgotten.
+ */
+export function forgetAttemptCommandForDeletedJob(basePath: string, jobId: string,
+  storage: () => Storage = () => window.sessionStorage, now = Date.now): boolean {
+  const recovery = createAttemptCommandRecovery(basePath, storage, now);
+  const current = recovery.read();
+  if (current.kind !== 'pending' || current.command.jobId !== jobId) return false;
+  try { recovery.clear(); return true; } catch { return false; }
+}

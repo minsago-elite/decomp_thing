@@ -449,6 +449,30 @@ class DoctorTest {
         assertFalse(valid in context, context)
     }
 
+    @Test
+    fun `ACP timing display validates captured scalars without changing cleanup or legacy witness text`() {
+        val timing = "mount-timing-v1 clock=System.nanoTime origin=unspecified createdNs=${Long.MIN_VALUE} " +
+            "admittedNs=-1 lastCleanNs=NA firstObservedNs=${Long.MAX_VALUE} cleanPolls=0"
+        for (value in listOf(null, timing, "PRIVATE", "x".repeat(513), timing + " PRIVATE",
+            timing.replace("cleanPolls=0", "cleanPolls=9223372036854775808"),
+            timing.replace("admittedNs=-1", "admittedNs=-01"))) {
+            val witness = fixedMountWitness()
+            assertEquals(null, (witness as decompengine.acp.AcpMountEventWitness).timingRecord)
+            witness.javaClass.getDeclaredField("timingContext").apply { isAccessible = true }.set(witness, value)
+            val failure = AgentExecutionException(AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE"), witness)
+            val context = acpDoctorFailureContext(failure)
+            assertEquals(value == timing, "mountTimingRecord=mount-timing-v1" in context)
+            assertTrue("mountEventRecord=${witness.message}" in context)
+            assertTrue("recordedCleanup=MISSING" in context)
+            assertFalse("PRIVATE" in context)
+            assertTrue(context.length <= 1024 && context.all { it.code in 32..126 })
+            assertSame(witness, failure.cause)
+        }
+        val forged = Throwable(timing)
+        assertFalse("mount-timing-v1" in acpDoctorFailureContext(AgentExecutionException(
+            AgentFailure(AgentFailureKind.CONFIGURATION, "PRIVATE"), forged)))
+    }
+
     /** Constructs an owned diagnostic Throwable only; no scope, descriptor, syscall or context. */
     private fun fixedMountAdmissionWitness(admission: String): Throwable {
         val phase = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase")

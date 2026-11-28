@@ -1,0 +1,39 @@
+{
+  "status": "passed",
+  "issue": 162,
+  "sourceCommit": "9aacec498ceda9913ab344fdfb2b1542ea2182bc",
+  "sourceParent": "519b16afa06ab64d2b72ad92c46c1baffc24f294",
+  "sourceTree": "3ebbf8b1169bb6576aa2ab592b5facac10124c2e",
+  "command": "PATH=\"$PWD/build/frontend-node-24.20.0-npm-11.19.0.TlvfpU/node/bin:$PATH\" ./gradlew --no-daemon -x verifyFrontendToolchain test --tests 'decompengine.web.WebBoundedReadsHttpTest.upload request quota does not block unrelated HTTP status reads'",
+  "suite": "decompengine.web.WebBoundedReadsHttpTest",
+  "test": "upload request quota does not block unrelated HTTP status reads",
+  "junitXml": "issue-162-upload-quota-status-2026-11-13.xml",
+  "junitXmlSha256": "43700eba3e8d089cda86ff707b401229dbddf7522783e48cafeb87fbdde03cb3",
+  "totals": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "observed": {
+    "activeUploadWorkers": 2,
+    "thirdUploadStatus": 503,
+    "thirdUploadCode": "UPLOAD_CAPACITY",
+    "thirdUploadBodyBytesSent": 0,
+    "concurrentStatusResponses": 4,
+    "statusLatencyMillis": [22, 26, 46, 52],
+    "statusLatencyMaximumMillis": 52,
+    "maximumAllowedStatusLatencyMillis": 2000,
+    "heldUploadOutcomes": ["INVALID_ELF", "INVALID_ELF"],
+    "stagingCleanup": "verified",
+    "subsequentValidUploadStatus": 201,
+    "finalAdmission": "empty"
+  },
+  "scope": "Local deterministic HTTP qualification against the real SPA listener. Two streamed multipart requests reach staging and hold their upload reservations. A third request sends only headers and receives 503 UPLOAD_CAPACITY before multipart body bytes are sent. Four concurrent authenticated GET /w/api/v1/jobs/{id} reads complete during the held uploads; both held invalid fixtures are cleaned up, and a later valid upload succeeds.",
+  "limitations": [
+    "This tests concurrent upload-request admission and status responsiveness; it does not inject a disk-full condition through the HTTP server.",
+    "The test does not measure physical-disk contention or deployed throughput.",
+    "It complements, but does not replace, the slow-dashboard listing HTTP qualification in PR #1951.",
+    "The broader upload/listing quota matrix and full #162 acceptance remain open."
+  ]
+}

@@ -1,7 +1,7 @@
 // View-scoped interface copy; protocol values and DOM identities stay in their components.
 
 export const runHistoryCopy = {
-  thisJobWasDeleted: "This job was deleted. Its attempt history was removed and cannot be recovered.",
+  thisJobWasDeleted: "This job was deleted from the library. Its attempt history cannot be recovered.",
   "state": "Attempt state: {state}. Acceptance: {acceptance}.",
   "pageCount": "{count} attempts on this page.",
   "newestRecordedAttemptsFirstThisListIsNotACount": "Newest recorded attempts first. This list is not a count of accepted reconstructions.",
@@ -10,6 +10,13 @@ export const runHistoryCopy = {
   "noDurableAttemptsAreRecordedForThisJobLegacyActivity": "No durable attempts are recorded for this job. Legacy activity does not have invented attempt identities.",
   "firstPage": "First page",
   "nextAttempts": "Next attempts",
+  "activity": "Activity",
+  "activityFor": "Activity for attempt {runId}",
+  "evidence": "Evidence and report snapshots",
+  "evidenceFor": "Evidence and report snapshots for attempt {runId}",
+  "sources": "Result revision sources",
+  "sourcesFor": "Result revision sources of revision {revisionId} from attempt {runId}",
+  "noResultRevision": "No result revision recorded",
   "attemptHistory": "Attempt history",
   "returnToJobOverview": "Return to job overview",
   "connectALocalSessionToViewAttemptHistory": "Connect a local session to view attempt history.",
