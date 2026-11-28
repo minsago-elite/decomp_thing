@@ -85,6 +85,9 @@ class LlvmBehaviorQualificationTiersTest {
                 LlvmBehaviorQualificationEvent.PULL_REQUEST,
                 everyCase to 3,
             ),
+            // The event alone selects the tier, even when the run shape matches the requested tier's.
+            Triple(LlvmBehaviorQualificationTierKind.FULL_QUALIFICATION, LlvmBehaviorQualificationEvent.PUSH, smokeCases to 1),
+            Triple(LlvmBehaviorQualificationTierKind.CI_SMOKE, LlvmBehaviorQualificationEvent.SCHEDULE, everyCase to 3),
             // Manual or periodic production evidence cannot be a smoke run.
             Triple(LlvmBehaviorQualificationTierKind.CI_SMOKE, LlvmBehaviorQualificationEvent.SCHEDULE, smokeCases to 1),
             // Smoke stays bounded: exact case set, exactly one repetition.
