@@ -1479,6 +1479,25 @@ public class ExportProgramModelOwned extends GhidraScript {
             currentProgram.getFunctionManager().getFunctionContaining(target) == null &&
             currentProgram.getListing().getInstructionContaining(target) == null;
     }
+    private static final int MAXIMUM_SWITCH_DESTINATION_REFERENCES = 4096;
+    // Ghidra's switch recovery records a recovered table as COMPUTED_JUMP flow references from the
+    // function's indirect jump to each destination, and types the table slots as untyped pointers.
+    // Such a slot is control flow consumed by the decompiler's switch, not a C-visible object, so it
+    // needs no typed declaration. Every other untyped pointer keeps its missing-target refusal.
+    private boolean recoveredSwitchTableSlot(Function function, Data data) throws Exception {
+        DataType type = data.getDataType();
+        if (!(type instanceof Pointer) || ((Pointer)type).getDataType() != null) return false;
+        Object value = data.getValue();
+        if (!(value instanceof Address) || !function.getBody().contains((Address)value)) return false;
+        ReferenceIterator references = currentProgram.getReferenceManager().getReferencesTo((Address)value);
+        for (int seen = 0; seen < MAXIMUM_SWITCH_DESTINATION_REFERENCES && references.hasNext(); seen++) {
+            checkByteCancellation();
+            Reference reference = references.next();
+            if (reference.getReferenceType().isComputed() && reference.getReferenceType().isJump() &&
+                function.getBody().contains(reference.getFromAddress())) return true;
+        }
+        return false;
+    }
     private ResolvedData resolveAddressedData(Address target) throws Exception {
         checkByteCancellation();
         byteAddress(target);
@@ -2553,7 +2572,7 @@ public class ExportProgramModelOwned extends GhidraScript {
                             planningEvidence.retainGlobal(global.id, globalRecord);
                         }
                         referencedGlobals.add(global.id);
-                        if (data != null) {
+                        if (data != null && !recoveredSwitchTableSlot(function, data)) {
                             List<DataType> dataTypes = java.util.Collections.singletonList(data.getDataType());
                             PlannedTypeCoverage dataCoverage;
                             try {
