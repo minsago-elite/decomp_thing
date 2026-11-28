@@ -536,7 +536,8 @@ test('F5: real driver finalizer calls the exported helper after cleanup facts wi
   const call = finalizer.indexOf('await finalizePublication(root, report, sensitiveValues);');
   assert.ok(call > finalizer.indexOf('report.workRetained = true') && call > finalizer.indexOf('report.workCleanupError'), 'publication follows the cleanup facts');
   assert.equal((source.match(/report\.json'\)/g) ?? []).length, 1, 'only the log line names report.json; no second writer');
-  assert.match(source, /\} catch \(error\) \{\n  report\.status = 'failed';[\s\S]*report\.error = safeDiagnostic\(error\.stack\);[\s\S]*\} finally \{/);
+  // #1895 records the primary error once (recordPrimaryError); later diagnostics cannot replace it.
+  assert.match(source, /\} catch \(error\) \{\n  report\.status = 'failed';[\s\S]*recordPrimaryError\(report, safeDiagnostic\(error\.stack\)\);[\s\S]*\} finally \{/);
 });
 
 test('F5: finalizer reports unwritable roots with the original error and exit 1', async () => {

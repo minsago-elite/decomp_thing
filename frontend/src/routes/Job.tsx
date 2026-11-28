@@ -238,12 +238,12 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
       <p>{copy.theAttemptPageRetainsItsExactIdentityAsNewerWork}</p>
       <p>{copy.startingExplorationReconstructionBuildsValidationOrRepairIsUnavailableIn}</p>
       <PanelBoundary name={panelBoundaryCopy.names.workflowAvailability}>
-        <WorkflowAvailability runtime={runtime} {...(runtimeReceipt ? { receipt: runtimeReceipt } : {})} />
+        <WorkflowAvailability runtime={runtime} job={job} attemptHistory={`${jobPath(basePath, job.jobId)}/runs`} {...(runtimeReceipt ? { receipt: runtimeReceipt } : {})} />
       </PanelBoundary>
       <GitRepositoryPanel job={job} capabilities={runtime.capabilities} basePath={basePath} session={session} onDeleted={markDeleted} />
       <a href={appPath(basePath, '/runtime')}>{copy.viewReportedWorkflowAvailability}</a>
       <JobOrganization job={job} client={client} basePath={basePath} session={session}
-        readJob={(signal, accepts) => readJob(signal, 'observe', accepts)} onDeleted={markDeleted} />
+        readJob={(signal, mode, accepts) => readJob(signal, mode ?? 'observe', accepts)} onDeleted={markDeleted} />
       <JobDeletion job={job} client={client} basePath={basePath} session={session} generation={generation}
         onDeleted={(result, failure) => { if (result) setOperation(result); confirmDeletion(issue(), failure); }} />
     </>}

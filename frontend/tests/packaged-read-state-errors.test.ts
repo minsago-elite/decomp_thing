@@ -31,6 +31,8 @@ it('the opt-in Git bootstrap decodes through the real client without changing th
   expect(baseBootstrap).toEqual({ ...source, data: { ...source.data,
     basePath: '/nested/', applicationBuildId: 'SIMULATED_DEVELOPMENT_DATA', uiBuildId: 'SIMULATED_DEVELOPMENT_DATA',
     serverInstanceId: 'SIMULATED_DEVELOPMENT_INSTANCE', sessionExpiresAt: '2099-12-31T23:59:59Z',
+    // #1988: the GET/HEAD-only fixture server advertises no upload support.
+    limits: { ...source.data.limits, maxUploadBytes: '0' },
   } });
   expect(baseBootstrap.data.capabilities.map(capability => capability.id)).toEqual(['harness_acp', 'git', 'git-import']);
   expect(baseBootstrap.data.capabilities.slice(-2)).toEqual([

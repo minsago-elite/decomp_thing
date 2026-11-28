@@ -53,7 +53,8 @@ function confirms(data: Job, jobId: string, before: string, change: Change): Job
  */
 export function JobOrganization({ job, client, basePath, session, onChanged, readJob, onDeleted }: {
   job: Job; client: Client; basePath: string; session: Pick<BrowserSession, 'csrf'>;
-  onChanged?: (job: Job) => void; readJob?: (signal: AbortSignal, accepts?: (job: Job) => boolean) => Promise<Job | null>;
+  onChanged?: (job: Job) => void;
+  readJob?: (signal: AbortSignal, mode?: 'retry', accepts?: (job: Job) => boolean) => Promise<Job | null>;
   onDeleted?: (failure: unknown) => void;
 }) {
   const copy = jobOrganizationCopy;
@@ -83,6 +84,8 @@ export function JobOrganization({ job, client, basePath, session, onChanged, rea
     if (!dirty.current.label) setLabel(job.label ?? '');
     if (!dirty.current.archived) setArchived(job.archived ?? false);
   }, [job.jobId, job.version, job.label, job.archived, basePath, session]);
+  // The save whose answer was a refusal (#635): its notice is final, so a cut follow-up read does not replace it.
+  const refused = useRef<AbortController | null>(null);
   useEffect(() => () => {
     const controller = active.current;
     if (!controller) return;
@@ -90,15 +93,19 @@ export function JobOrganization({ job, client, basePath, session, onChanged, rea
     controller.abort();
     setBusy(false);
     // Cancellation stops observation, not a change already sent. Never carry that
-    // outcome into another job, deployment or session.
+    // outcome into another job, deployment or session. An answered refusal stands.
     const current = renderedOwner.current;
-    if (current.jobId === job.jobId && current.basePath === basePath && current.session === session) setNotice(copy.unconfirmed);
+    if (refused.current !== controller && current.jobId === job.jobId && current.basePath === basePath && current.session === session)
+      setNotice(copy.unconfirmed);
   }, [job.jobId, basePath, available, client, session, copy.unconfirmed]);
   const trimmed = label.trim();
   const invalid = trimmed.length > 0 && [...trimmed].length > 120;
-  /** One GET of this job, ordered by the owning page when it supplies `readJob`; the caller binds the result. */
-  async function reread(signal: AbortSignal, accepts?: (job: Job) => boolean): Promise<Job | null> {
-    if (readJob) return readJob(signal, accepts);
+  /**
+   * One GET of this job, ordered by the owning page when it supplies `readJob`; the caller binds the result. A `retry`
+   * read rejects instead of returning a job the page did not apply, such as one a newer failed Refresh overtook (#635).
+   */
+  async function reread(signal: AbortSignal, mode?: 'retry', accepts?: (job: Job) => boolean): Promise<Job | null> {
+    if (readJob) return readJob(signal, mode, accepts);
     return (await client.get('job', `/jobs/${job.jobId}`, { signal })).data;
   }
   async function save(event: Event) {
@@ -127,7 +134,7 @@ export function JobOrganization({ job, client, basePath, session, onChanged, rea
       confirms(ack, jobId, before, change);
       notifyLibraryChanged(basePath);
       // The page applies the readback only when it confirms this change; a mismatch leaves the shown job alone.
-      const read = await reread(controller.signal, data => { try { confirms(data, jobId, before, change); return true; } catch { return false; } });
+      const read = await reread(controller.signal, undefined, data => { try { confirms(data, jobId, before, change); return true; } catch { return false; } });
       if (controller.signal.aborted) return;
       const fresh = confirms(read as Job, jobId, before, change);
       // Confirmed fields adopt the server form; anything edited after submission stays the user's.
@@ -150,18 +157,22 @@ export function JobOrganization({ job, client, basePath, session, onChanged, rea
         } else setNotice(withApiFailureReference(authoritative && code(failure) === 'VALIDATION_FAILED' ? copy.invalidChange : copy.unverified, failure));
         return;
       }
-      setNotice(withApiFailureReference(status(failure) === 412 ? copy.changed
+      // A 412 is an answered refusal and stays final while its follow-up read runs; it names the current version as
+      // shown only once that read is applied (#635).
+      if (status(failure) === 412) refused.current = controller;
+      setNotice(withApiFailureReference(status(failure) === 412 ? copy.refused
         : [401, 403].includes(status(failure)) ? copy.denied
         : code(failure) === 'STORAGE_UNAVAILABLE' ? copy.storage
         : code(failure) === 'STORAGE_UNCONFIRMED' ? copy.unconfirmed : copy.failed, failure));
       if (status(failure) === 412) {
         try {
-          const read = await reread(controller.signal);
+          const read = await reread(controller.signal, 'retry');
           if (controller.signal.aborted || !read) return;
           const fresh = bindJob(read, jobId);
           if (fresh.version === before) return;
           // The next deliberate Save is guarded by this version; edited fields are kept, nothing is resent.
           if (!readJob) onChanged?.(fresh);
+          setNotice(withApiFailureReference(copy.changed, failure));
           setServerLabel(fresh.label ?? null);
         } catch (readFailure: unknown) {
           // The visible conflict notice already asks for a refresh; only a deletion tombstone ends the job view.
@@ -169,7 +180,11 @@ export function JobOrganization({ job, client, basePath, session, onChanged, rea
         }
       }
     } finally {
-      if (active.current === controller) { active.current = null; setBusy(false); }
+      if (active.current === controller) {
+        active.current = null; setBusy(false);
+        // Lost availability ended the change without an answer; it may or may not have been written.
+        if (controller.signal.aborted && !answered) setNotice(copy.unconfirmed);
+      }
     }
   }
   const errorShown = labelError !== '';

@@ -5,7 +5,7 @@
     "module": "scripts/packaged-browser-read-states.mjs",
     "moduleSha256": "3f72ff87b2b909aa875db6d727a7e3544af6e480d62ce3ce707332ac156a58f3",
     "generatorSha256": "3abf27e1a57e3bff0025bb339724cf4a6353687e43593dab44e6dfcfb74dcc4a",
-    "outputSha256": "b5bbb244a5beafecc0ce4c886b4a7f52ac71a702e67324deb0f7271a58db1299",
+    "outputSha256": "1773a4be1d0cc86aff8f9f56a956f4ba663cd7b4c66840aba8c72c0e85d778af",
     "regenerate": "cd frontend && READ_STATES_WRITE_SEQUENCES=1 npx vitest run tests/packaged-read-states-probe.test.tsx"
   },
   "nonApi": "HTML, assets and /version are outside /nested/api/v1 and are not ledger entries; the JSDOM probe observed none through fetch.",

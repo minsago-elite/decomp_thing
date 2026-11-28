@@ -18,7 +18,7 @@ import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyRestart, assertGracefulShutdown } from './packaged-browser-restart.mjs';
 import { finalizePublication } from './packaged-browser-report.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
-import { qualifyAudit, assertAudit, auditFixtures, chromiumSupplementalInteractionContexts, compactJobFilterAuditEvidence } from './packaged-browser-audit.mjs';
+import { qualifyAudit, assertAudit, auditFixtures, chromiumSupplementalInteractionContexts, compactJobFilterAuditEvidence, connectionNoticeNames } from './packaged-browser-audit.mjs';
 import { createResponsiveSection, responsiveFixtures, qualifyResponsive, assessResponsiveReport } from './packaged-browser-responsive.mjs';
 import { boundedArgv, createRealZoomSection, qualifyRealZoom, assessRealZoomReport } from './packaged-browser-real-zoom.mjs';
 import { createGeometryProbeSection, createGeometryProbe, assessGeometryProbe } from './packaged-browser-zoom-geometry-probe.mjs';
@@ -29,6 +29,8 @@ import { createReadStatesSection, readStateFixtures, qualifyReadStates, assessRe
 import { bindGitInitFixtures, createGitInitSection, qualifyGitInitialization, assessGitInitReport, verifyGitInitPng, GIT_INIT_CASES } from './packaged-browser-git-init.mjs';
 import { TargetLifecycle, TargetProtocol } from './packaged-browser-target-lifecycle.mjs';
 import { createServerPhaseCollector, serverPhaseReport } from './packaged-browser-log-server-phases.mjs';
+import { CdpProtocol, createCapture, assertCaptureLedger, recordPrimaryError, captureFailureDiagnostic, recordCleanupTruth } from './packaged-browser-capture.mjs';
+import { sessionSemanticsGate, statusRecorderSource, assertStatusObservations } from './packaged-browser-session-semantics.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -143,11 +145,6 @@ async function waitFor(check, label, timeout = 20000) {
   throw new Error(`Timed out waiting for ${label}`);
 }
 
-// #619's real-zoom processes close their own DevTools connections.
-class Protocol extends TargetProtocol {
-  close() { this.socket.close(); }
-}
-
 async function snapshot(directory, relative = '') {
   const result = {};
   for (const entry of await fs.readdir(join(directory, relative), { withFileTypes: true })) {
@@ -163,6 +160,11 @@ async function snapshot(directory, relative = '') {
 
 /** Shared by the main browser and the #619 real-zoom processes, so both launch with the same flags. */
 const chromeFlags = (headless) => [...(headless ? ['--headless=new'] : []), '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1'];
+
+// #619's real-zoom processes close their own DevTools connections. The main browser uses #1895's CdpProtocol.
+class Protocol extends TargetProtocol {
+  close() { this.socket.close(); }
+}
 
 const forcedKill = new WeakSet();
 async function stop(process) {
@@ -428,13 +430,24 @@ async function ready(target, expression, label) {
   }, label);
 }
 
-async function capture(target, name, clip) {
-  // Clipped (chart) captures stay inside the rendered viewport: beyond-viewport capture can resize
-  // the layout viewport (dropping the scrollbar) and reflow the figure after it was measured.
-  const { data } = await cdp.call('Page.captureScreenshot', { format: 'png', ...(clip ? { clip, captureBeyondViewport: false } : {}) }, target.sessionId);
-  const bytes = Buffer.from(data, 'base64');
-  await fs.writeFile(join(root, name), bytes);
-  return bytes;
+// Loads the pinned axe-core from the exact-source frontend install; fails closed when absent.
+async function loadSessionSemanticsGate(captureFn, gateOrigin) {
+  const axePath = join(repo, 'frontend/node_modules/axe-core/axe.min.js');
+  const axeSource = await fs.readFile(axePath, 'utf8').catch(() => { throw new Error(`Session semantics gate requires ${axePath}`); });
+  const axeVersion = JSON.parse(await fs.readFile(join(repo, 'frontend/node_modules/axe-core/package.json'), 'utf8')).version;
+  const gate = sessionSemanticsGate({ cdp, evaluate, ready, capture: captureFn, axeSource, origin: gateOrigin });
+  gate.results.axe = { version: axeVersion, sha256: createHash('sha256').update(axeSource).digest('hex') };
+  return gate;
+}
+
+// #1895: every screenshot is foregrounded, labelled, ledgered before CDP, PNG-validated and written exclusively.
+report.captures = [];
+let captureImpl;
+async function capture(target, name, phase, expectedSize) {
+  captureImpl ??= createCapture({ cdp: { call: (...args) => cdp.call(...args) }, directory: root, ledger: report.captures, targetIndex: (candidate) => targets.indexOf(candidate) });
+  // Master's chart evidence passes a page clip object and needs the PNG bytes back.
+  if (phase !== null && typeof phase === 'object') return captureImpl.clipped(target, name, phase);
+  return captureImpl(target, name, phase, expectedSize);
 }
 
 async function prepareArchive(archivePath) {
@@ -565,7 +578,7 @@ try {
   }, 'Chrome DevTools listener');
   const [port, socketPath] = portFile.trim().split('\n');
   const socket = await connectDevTools(`ws://127.0.0.1:${port}${socketPath}`);
-  cdp = new Protocol(socket, { lifecycle: targetLifecycle });
+  cdp = new CdpProtocol(socket, { lifecycle: targetLifecycle });
   cdp.on('Target.targetCreated', ({ targetInfo }) => cdpDiagnostics.targetEvent('target-created', {
     targetId: targetInfo?.targetId, targetType: targetInfo?.type, attached: targetInfo?.attached,
   }));
@@ -621,7 +634,7 @@ try {
     assert.equal(cacheProbe.requests.filter((entry) => entry.url === previousRuntimeUrl).length, 0, 'Cache warm-up loaded the old lazy Runtime');
     await cdp.call('Page.bringToFront', {}, tab.sessionId);
     lastTarget = tab;
-    await capture(tab, 'upgrade-previous-home.png');
+    await capture(tab, 'upgrade-previous-home.png', 'upgrade-previous-home');
 
     // The tab and its old entry module remain alive. Only the owned JVM and its
     // extracted install are replaced; no browser request is intercepted.
@@ -678,7 +691,7 @@ try {
     assert.equal(tab.requests.filter((entry) => entry.type === 'Document').length, 1, 'Old tab automatically reloaded');
     assert.ok(tab.requests.every((entry) => ['GET', 'HEAD'].includes(entry.method)), 'Upgrade recovery sent a mutation');
     assert.deepEqual(tab.exceptions, []);
-    await capture(tab, 'upgrade-version-notice.png');
+    await capture(tab, 'upgrade-version-notice.png', 'upgrade-version-notice');
     try {
       await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Reload application').click()`);
     } catch (error) {
@@ -701,7 +714,7 @@ try {
     assert.deepEqual(cacheProbe.exceptions, []);
     assert.deepEqual(tab.exceptions, []);
     assert.equal(await fs.stat(installation.data).then(() => true, () => false), false, 'Current public browsing created job data');
-    await capture(tab, 'upgrade-current-runtime.png');
+    await capture(tab, 'upgrade-current-runtime.png', 'upgrade-current-runtime');
     Object.assign(report.upgrade, { phase: 'recovered-current', sameOrigin: origin, basePath: '/nested/',
       sameTabPreserved: true, oldLazyResponseStatus: 404, warningCount: 1, observationSeconds: 5,
       automaticReloads: 0, automaticChunkRetries: 0, explicitReloadDocumentRequests: 1,
@@ -720,17 +733,18 @@ try {
       const restartedOrigin = await launchApplication(installation, new URL(origin).port);
       return { origin: restartedOrigin, exit };
     };
-    const captureSafe = async (target, name) => {
+    const captureSafe = async (target, name, phase) => {
       const safe = await evaluate(target, `(() => {
         if (location.hash !== '' || ${JSON.stringify(sensitiveValues)}.some(value => document.body.innerText.includes(value))) return false;
         document.querySelectorAll('input, textarea, [contenteditable]').forEach(element => { element.style.visibility = 'hidden'; });
         return true;
       })()`);
       assert.ok(safe, 'Refusing to capture a page with a bootstrap fragment or visible credential');
-      await capture(target, name);
+      await capture(target, name, phase);
     };
     const restarted = await qualifyRestart({ fixture: restartFixture, origin, makeTarget, cdp, evaluate, ready, waitFor, delay,
-      readOutput: () => applicationOutput, restartApplication, captureSafe, sensitiveValues });
+      readOutput: () => applicationOutput, restartApplication, captureSafe, sensitiveValues,
+      sessionSemantics: await loadSessionSemanticsGate(captureSafe, origin) });
     report.restart = restarted.evidence;
     report.requests.restart = restarted.requests;
     report.jobDataCreated = true;
@@ -921,7 +935,7 @@ try {
     assert.ok(presentation.icon.startsWith(`${origin}/nested/assets/ui/`));
     assert.equal(presentation.bodyMargin, '0px');
     assert.equal(presentation.layout, 'grid');
-    await capture(home, 'home.png');
+    await capture(home, 'home.png', 'home');
     await evaluate(home, `document.querySelector('a[href="/nested/upload"]').focus()`);
     await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', text: '\r', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, home.sessionId);
     await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, home.sessionId);
@@ -949,7 +963,7 @@ try {
     assert.ok(runtimeIdentity.text.includes('Runtime information is not connected'));
     assert.equal(home.requests.filter((entry) => entry.type === 'Document').length, 2, 'Runtime client navigation added a document load after the explicit upload reload');
     assert.deepEqual(home.exceptions, []);
-    await capture(home, 'runtime.png');
+    await capture(home, 'runtime.png', 'runtime');
     const runtimeAsset = manifest.files.find((entry) => /^assets\/Runtime-.+\.js$/.test(entry.path));
     assert.ok(runtimeAsset, 'Expected the runtime lazy chunk in the packaged manifest');
     const runtimeUrl = `${origin}/nested/assets/ui/${runtimeAsset.path}`;
@@ -1013,7 +1027,7 @@ try {
     assert.deepEqual(interceptionErrors, []);
     assert.deepEqual(recovery.exceptions, []);
     assert.ok(await evaluate(recovery, `document.querySelector('#asset-notice-title').getBoundingClientRect().top >= 0`), 'Recovery title scrolled above viewport');
-    await capture(recovery, 'recovery.png');
+    await capture(recovery, 'recovery.png', 'recovery');
     await cdp.call('Fetch.disable', {}, recovery.sessionId);
     try {
       await evaluate(recovery, `[...document.querySelectorAll('button')].find((button) => button.textContent === 'Reload application').click()`);
@@ -1104,6 +1118,12 @@ try {
         return original.apply(this, arguments);
       };
     })();` }, authenticated.sessionId);
+    // #1895: exact-source SessionStatus semantics, axe and trusted keyboard operation (session mode only).
+    let semantics = null;
+    if (values.mode === 'session') {
+      await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: statusRecorderSource }, authenticated.sessionId);
+      semantics = await loadSessionSemanticsGate(capture, browserOrigin);
+    }
     await cdp.call('Page.navigate', { url: bootstrapUrl }, authenticated.sessionId);
     await ready(authenticated, `document.body.innerText.includes('Local session connected.')`, 'authenticated packaged session');
     if (values.mode === 'proxy') {
@@ -1207,7 +1227,8 @@ try {
     assert.equal(authenticated.requests.filter((request) => request.method === 'POST').length, 1);
     const postReload = await evaluate(authenticated, 'window.__sessionTestRequests');
     assert.ok(postReload.every((request) => request.method === 'GET' && request.fragmentEmpty));
-    await capture(authenticated, 'authenticated-runtime.png');
+    await capture(authenticated, 'authenticated-runtime.png', 'authenticated-runtime');
+    if (semantics) await semantics.checkpoint(authenticated, 'connected', { statusText: null, buttons: ['Sign out'] });
     const jobTab = await makeTarget({ stage: 'job' });
     const absentJobPath = '/nested/jobs/' + 'a'.repeat(32);
     await cdp.call('Page.navigate', { url: browserOrigin + absentJobPath }, jobTab.sessionId);
@@ -1290,7 +1311,17 @@ try {
     })()`);
     const peerReads = peer.requests.filter(request => request.url.includes('/api/v1/')).length;
     assert.ok(peerReads > 0);
-    await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Sign out').click()`);
+    let signOutActivation;
+    if (semantics) {
+      const signOutObserved = (await evaluate(authenticated, 'window.__sessionStatusObservations.length'));
+      signOutActivation = await semantics.activate(authenticated, 'Sign out', { allowed: { mutations: ['DELETE /nested/api/v1/session'], reads: [] },
+        holdRequest: { method: 'DELETE', pathSuffix: '/nested/api/v1/session', checkpointName: 'signing-out',
+          expected: { statusText: 'Signing out…', buttons: [] } },
+        settled: `document.body.innerText.includes('You signed out of this browser.')` });
+      semantics.results.signingOutObserved = assertStatusObservations(
+        (await evaluate(authenticated, 'window.__sessionStatusObservations')).slice(signOutObserved), ['Signing out…']);
+      await semantics.checkpoint(authenticated, 'required-signed-out', { statusText: 'You signed out of this browser.', buttons: ['Check session'] });
+    } else await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Sign out').click()`);
     await ready(authenticated, `document.body.innerText.includes('You signed out of this browser.')`, 'explicit logout');
     assert.equal(authenticated.requests.filter((request) => request.method === 'DELETE').length, 1);
     assert.equal(await evaluate(authenticated, `document.querySelector('#server-runtime-title') !== null`), false, 'Logout retained private runtime evidence');
@@ -1298,7 +1329,8 @@ try {
     await ready(peer, `document.body.innerText.includes('Another tab reported a session change.') && window.__sessionInvalidations.length === 1`, 'cross-tab private data invalidation');
     assert.equal(await evaluate(peer, `document.querySelector('#server-runtime-title') !== null`), false);
     assert.deepEqual(await evaluate(peer, 'window.__sessionInvalidations'), [{ version: 1, type: 'session-invalidated' }]);
-    await delay(3000);
+    await delay(semantics ? 5000 : 3000);
+    if (semantics) semantics.results.signOutAfterQuietWindow = await semantics.verifyActivationQuiet(authenticated, signOutActivation);
     assert.equal(peer.requests.filter(request => request.url.includes('/api/v1/')).length, peerReads, 'Peer invalidation must not initiate requests');
     assert.ok(peer.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
     assert.deepEqual(peer.exceptions, []);
@@ -1331,10 +1363,80 @@ try {
       report.requests.unnotified = unnotified.requests;
     }
 
+    if (semantics) {
+      const observed = (await evaluate(authenticated, 'window.__sessionStatusObservations')).length;
+      const checkActivation = await semantics.activate(authenticated, 'Check session', { allowed: { mutations: [], reads: ['GET /nested/api/v1/bootstrap'], requiredReads: ['GET /nested/api/v1/bootstrap'] },
+        settled: `document.body.innerText.includes('To access private work, open the sign-in link')` });
+      const checking = (await evaluate(authenticated, 'window.__sessionStatusObservations')).slice(observed);
+      semantics.results.checkingObserved = { ...assertStatusObservations(checking, ['Checking local session…']), source: 'document-start MutationObserver' };
+      await semantics.checkpoint(authenticated, 'required-missing', { statusText: 'To access private work, open the sign-in link', buttons: ['Check session'] });
+      await delay(5000);
+      semantics.results.checkSessionAfterQuietWindow = await semantics.verifyActivationQuiet(authenticated, checkActivation);
+
+      let reconnectStart;
+      // A real browser-side connection failure exercises unavailable/connection without inventing a server response.
+      await cdp.call('Network.emulateNetworkConditions', { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0,
+        connectionType: 'none' }, authenticated.sessionId);
+      try {
+        const offlineStart = authenticated.requests.length;
+        const offlineStatusStart = (await evaluate(authenticated, 'window.__sessionStatusObservations.length'));
+        const offlineActivation = await semantics.activate(authenticated, 'Check session', { allowed: { mutations: [], reads: ['GET /nested/api/v1/bootstrap'], requiredReads: ['GET /nested/api/v1/bootstrap'] },
+          settled: `document.querySelector('aside.session-notice [role="status"]')?.textContent.includes('The local session could not be checked')` });
+        await semantics.checkpoint(authenticated, 'unavailable-connection', { statusText: 'The local session could not be checked',
+          externalStatusText: 'Browser reports offline', buttons: ['Check session'] });
+        const offlineReads = authenticated.requests.slice(offlineStart).filter((request) => request.url.includes('/nested/api/v1/bootstrap'));
+        assert.equal(offlineReads.length, 1, 'Offline Check session must issue one bootstrap GET');
+        assert.equal(offlineReads[0].method, 'GET');
+        assert.ok(authenticated.responses.every((response) => response.requestId !== offlineReads[0].requestId || response.status !== 200),
+          'Offline Check session unexpectedly received a successful bootstrap response');
+        assertStatusObservations((await evaluate(authenticated, 'window.__sessionStatusObservations')).slice(offlineStatusStart),
+          ['The local session could not be checked']);
+        await delay(5000);
+        semantics.results.offlineAfterQuietWindow = await semantics.verifyActivationQuiet(authenticated, offlineActivation);
+        semantics.results.unavailableConnection = { browserOffline: true, bootstrapGets: 1, noFabricatedResponse: true };
+      } finally {
+        reconnectStart = authenticated.requests.length;
+        await cdp.call('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1,
+          connectionType: 'wifi' }, authenticated.sessionId);
+      }
+      // Reconnect schedules a background session read. Its HTTP response and rendered outcome
+      // must precede the request window attributed to the explicit keyboard activation.
+      const bootstrapEndpoint = browserOrigin + '/nested/api/v1/bootstrap';
+      const automaticRead = await waitFor(() => authenticated.requests.slice(reconnectStart)
+        .find(request => request.method === 'GET' && request.url === bootstrapEndpoint), 'automatic reconnect bootstrap GET');
+      await waitFor(() => authenticated.responses.some(response => response.requestId === automaticRead.requestId
+        && response.url === bootstrapEndpoint && response.status === 401), 'automatic reconnect bootstrap 401');
+      await ready(authenticated, `navigator.onLine && document.querySelector('aside.session-notice [role="status"]')
+        ?.textContent.includes('To access private work, open the sign-in link')`, 'automatic reconnect session state settled');
+      const reconnectReads = authenticated.requests.slice(reconnectStart).filter(request => request.url === bootstrapEndpoint);
+      assert.deepEqual(reconnectReads.map(request => request.method), ['GET']);
+      semantics.results.automaticReconnect = { bootstrapGets: reconnectReads.length, status: 401 };
+      const reconnectActivation = await semantics.activate(authenticated, 'Check session', { allowed: { mutations: [], reads: ['GET /nested/api/v1/bootstrap'], requiredReads: ['GET /nested/api/v1/bootstrap'] },
+        settled: `document.querySelector('aside.session-notice [role="status"]')?.textContent.includes('To access private work, open the sign-in link')` });
+      await semantics.checkpoint(authenticated, 'required-after-reconnect', { statusText: 'To access private work, open the sign-in link',
+        externalStatusText: connectionNoticeNames.reconnected, buttons: ['Check session'] });
+      await delay(5000);
+      semantics.results.reconnectAfterQuietWindow = await semantics.verifyActivationQuiet(authenticated, reconnectActivation);
+    }
+    const statusHistory = semantics ? [...await evaluate(authenticated, 'window.__sessionStatusObservations')] : [];
     await cdp.call('Page.reload', {}, authenticated.sessionId);
     await ready(authenticated, `document.body.innerText.includes('To access private work, open the sign-in link')`, 'revoked session after reload');
     await cdp.call('Page.navigate', { url: bootstrapUrl }, authenticated.sessionId);
     await ready(authenticated, `document.body.innerText.includes('This sign-in link is no longer available.')`, 'consumed link denial');
+    if (semantics) {
+      await semantics.checkpoint(authenticated, 'required-bootstrap', { statusText: 'This sign-in link is no longer available.',
+        buttons: ['Check session'] });
+      statusHistory.push(...await evaluate(authenticated, 'window.__sessionStatusObservations'));
+      assert.deepEqual(semantics.results.checkpoints.map((entry) => entry.name), ['connected', 'signing-out', 'required-signed-out', 'required-missing',
+        'unavailable-connection', 'required-after-reconnect', 'required-bootstrap']);
+      semantics.results.allRecordedStatuses = assertStatusObservations(statusHistory,
+        ['Signing out…', 'Checking local session…', 'You signed out of this browser.', 'The local session could not be checked']);
+      report.sessionSemantics = { ...semantics.results, issue: 1895,
+        notReached: { unavailableReasons: ['configuration', 'removal-failed', 'incompatible', 'logout-unconfirmed'],
+          reason: 'connection is exercised through real browser offline emulation' },
+        coveredElsewhere: { applicationInstanceChanged: '--mode restart: report.restart.sessionSemantics checkpoint connected-instance-changed' },
+        evidenceKind: 'packaged Chrome DOM/axe/trusted keyboard; not screen-reader evidence (#617)' };
+    }
     await delay(5000);
     assert.equal(authenticated.requests.filter((request) => request.method === 'POST').length, 2);
     assert.equal(authenticated.requests.filter((request) => request.method === 'DELETE').length, 1);
@@ -1369,6 +1471,10 @@ try {
   assert.deepEqual(await snapshot(installation.app), installation.before, 'Read-only installation bytes changed');
   report.installationUnchanged = true;
 
+  if (values.mode === 'session') {
+    await assertCaptureLedger(report.captures, root);
+    report.captureLedgerVerified = true;
+  }
   report.status = 'passed';
 
 } catch (error) {
@@ -1376,7 +1482,7 @@ try {
   // Which target setup step ended how (reply, deadline, detach, crash); a classification, not a cause.
   report.targetLifecycle = targetLifecycle.toJSON();
   report.contentSecurityPolicy = cspEvidence();
-  report.error = safeDiagnostic(error.stack);
+  recordPrimaryError(report, safeDiagnostic(error.stack));
   // Fixed logs phase labels and bounded counts only, captured in memory before the throw (#1872).
   report.logsFailurePhase = logsFailureEvidence(error);
   // Fixed Structure body-read facts only; observations, not a cause (#1879).
@@ -1387,21 +1493,14 @@ try {
   console.error(safeDiagnostic(error.stack));
   process.exitCode = 1;
   if (lastTarget && cdp && lastTarget.initializationComplete) {
-    try {
-      // Fail closed if the handoff has not been scrubbed. Hide editable fields
-      // before a diagnostic capture, and never capture visible credential text.
-      const safe = await evaluate(lastTarget, `(() => {
-        if (location.hash !== '' || ${JSON.stringify(sensitiveValues)}.some(value => document.body.innerText.includes(value))) return false;
-        document.querySelectorAll('input, textarea, [contenteditable]').forEach(element => { element.style.visibility = 'hidden'; });
-        return true;
-      })()`);
-      if (safe) {
-        await capture(lastTarget, 'failure.png');
-        report.failureScreenshot = 'failure.png';
-      } else report.failureScreenshotSkipped = 'Uncleared fragment or visible handoff credential';
-    } catch {
-      report.failureScreenshotSkipped = 'Attached page unavailable within the bounded DevTools request deadline';
-    }
+    // Fail closed if the handoff has not been scrubbed. Hide editable fields
+    // before a diagnostic capture, and never capture visible credential text.
+    // failure.png is ledgered as failure-diagnostic and never replaces report.error.
+    await captureFailureDiagnostic({ report, capture, target: lastTarget, isSafe: () => evaluate(lastTarget, `(() => {
+      if (location.hash !== '' || ${JSON.stringify(sensitiveValues)}.some(value => document.body.innerText.includes(value))) return false;
+      document.querySelectorAll('input, textarea, [contenteditable]').forEach(element => { element.style.visibility = 'hidden'; });
+      return true;
+    })()`) });
   } else if (lastTarget && !lastTarget.initializationComplete) report.failureScreenshotSkipped = 'Target initialization failed before page commands completed';
 } finally {
   if (cdp) await cdp.call('Browser.close').catch(() => {});
@@ -1410,7 +1509,7 @@ try {
   if (values.mode === 'restart' && application && forcedKill.has(application)) {
     report.status = 'failed'; report.forcedShutdown = true; process.exitCode = 1;
   }
-  report.shutdownConfirmed = cleanup.every((result) => result.status === 'fulfilled');
+  recordCleanupTruth(report, { cleanup, workCleanup: 'pending' });
   if (!report.shutdownConfirmed) {
     report.status = 'failed';
     report.cleanupErrors = cleanup.filter((result) => result.status === 'rejected').map((result) => safeDiagnostic(result.reason));
@@ -1424,7 +1523,7 @@ try {
       await fs.rm(profile, { recursive: true, force: true });
       if (browserTmp) await fs.rm(browserTmp, { recursive: true, force: true });
       report.workRetained = false;
-      report.workCleanupConfirmed = true;
+      recordCleanupTruth(report, { cleanup, workCleanup: 'removed' });
     } catch (error) {
       report.status = 'failed';
       report.workCleanupConfirmed = false;
@@ -1432,8 +1531,9 @@ try {
       process.exitCode = 1;
     }
   }
+  report.cdpLateSettlements = cdp ? cdp.lateEvidence() : { settlements: [], dropped: 0 };
   // Publication never replaces the scenario's own failure: refusals and read-back
-  // failures leave a bounded failed record, explain on stderr and force exit 1.
+  // failures leave a bounded failed record, print it, explain on stderr and force exit 1.
   await finalizePublication(root, report, sensitiveValues);
   console.log(`Shutdown ${report.shutdownConfirmed ? 'confirmed' : 'UNCONFIRMED'}. Report: ${join(root, 'report.json')}`);
 }

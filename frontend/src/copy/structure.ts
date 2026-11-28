@@ -4,6 +4,9 @@ import { structureTitles as titles } from './structureTitles';
 export const structureCopy = {
   functionsTitle: titles.functions,
   modulesTitle: titles.modules,
+  // Scrolling table regions need names distinct from the page region named by the same title.
+  functionsTableRegion: 'Recovered functions table',
+  modulesTableRegion: 'Recovered modules table',
   moduleTitle: titles.module,
   entityTitles: { function: titles.function, global: titles.global, type: titles.type },
   browseFunctions: titles.browseFunctions,
