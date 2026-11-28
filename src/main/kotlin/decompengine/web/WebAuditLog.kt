@@ -200,9 +200,6 @@ internal class WebAuditLog(
     private val append: (FileChannel, ByteBuffer) -> Unit = { channel, buffer -> while (buffer.hasRemaining()) channel.write(buffer) },
     // Test seam observing directory syncs; production forces the directory to stable storage.
     private val syncDirectory: ((Path) -> Unit)? = null,
-    // Runs on the recording thread before it may block on durability; the web server uses it to
-    // classify the request as post-response audit work for shutdown. It must not throw.
-    private val beforeRecord: () -> Unit = {},
 ) {
     init { require(segmentEntries in 1..65_536) }
     private val storeRoot = root.toAbsolutePath().normalize()
@@ -234,14 +231,6 @@ internal class WebAuditLog(
         status: Int,
         reasonCode: String?,
         requestId: String?,
-    ): WebAuditEntry? {
-        beforeRecord()
-        return recordDurably(actor, action, target, outcome, status, reasonCode, requestId)
-    }
-
-    private fun recordDurably(
-        actor: WebAuditActor, action: WebAuditAction, target: WebAuditTarget, outcome: WebAuditOutcome,
-        status: Int, reasonCode: String?, requestId: String?,
     ): WebAuditEntry? = synchronized(lock) {
         // This bounded durability transaction runs after the response. Preserve cancellation for
         // its caller, but do not let an already interrupted request tear its audit append.

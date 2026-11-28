@@ -51,11 +51,14 @@ class UploadServerShutdownTest {
         }
     }
 
-    /** Delay the real fsync'd append of the server's audit log; the response has already been sent. */
-    private fun delayAuditAppends(server: UploadServer, delay: (java.nio.channels.FileChannel) -> Unit) {
+    /** Hold the real fsync'd append of the server's audit log until [release]; [entered] marks it reached. */
+    private fun holdAuditAppends(server: UploadServer, entered: CountDownLatch, release: CountDownLatch,
+                                 finished: java.util.concurrent.atomic.AtomicBoolean = java.util.concurrent.atomic.AtomicBoolean()) {
         val append: (java.nio.channels.FileChannel, java.nio.ByteBuffer) -> Unit = { channel, bytes ->
-            delay(channel)
+            entered.countDown()
+            check(release.await(10, TimeUnit.SECONDS))
             while (bytes.hasRemaining()) channel.write(bytes)
+            finished.set(true)
         }
         WebAuditLog::class.java.getDeclaredField("append").apply { isAccessible = true }.set(server.audit, append)
     }
@@ -67,9 +70,9 @@ class UploadServerShutdownTest {
             .POST(java.net.http.HttpRequest.BodyPublishers.ofString("{}")).build(),
         java.net.http.HttpResponse.BodyHandlers.discarding()).statusCode()
 
-    private fun assertWholeAuditEntry(root: java.nio.file.Path) {
+    private fun assertWholeAuditEntry(root: java.nio.file.Path, action: WebAuditAction = WebAuditAction.SESSION_START) {
         val reopened = WebAuditLog(root).read()
-        assertEquals(listOf(WebAuditAction.SESSION_START), reopened.entries.map { it.action })
+        assertEquals(listOf(action), reopened.entries.map { it.action })
         assertEquals(0L, reopened.unrecordedEntries)
         assertTrue(reopened.complete)
         val segment = Files.readString(root.resolve(".web-audit/current.jsonl"))
@@ -78,53 +81,131 @@ class UploadServerShutdownTest {
         assertEquals("0", Files.readString(root.resolve(".web-audit/incomplete")))
     }
 
-    @Test fun `stop waits past the request bound for a delayed post-response audit append and keeps its entry whole`() {
+    private fun elapsedMs(started: Long) = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+
+    @Test fun `stop waits past the request bound for a held post-response audit append and keeps its entry whole`() {
         val root = createTempDirectory("web-post-response-audit-drain-")
-        // The request drain alone (100 ms) is shorter than the delayed fsync'd append below.
-        val server = UploadServer("127.0.0.1", 0, root, requestShutdownTimeoutMs = 100)
-        val entered = CountDownLatch(1)
+        val server = UploadServer("127.0.0.1", 0, root, requestShutdownTimeoutMs = 100, auditShutdownTimeoutMs = 5000)
+        val caller = Executors.newSingleThreadExecutor()
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
         server.start()
         try {
-            delayAuditAppends(server) { entered.countDown(); Thread.sleep(1000) }
-            assertTrue(auditedRequest(server) >= 400)
-            assertTrue(entered.await(3, TimeUnit.SECONDS), "the audit append follows the sent response")
-            server.stop()
+            holdAuditAppends(server, entered, release)
+            assertTrue(auditedRequest(server) >= 400, "the response is sent before its audit append")
+            assertTrue(entered.await(3, TimeUnit.SECONDS))
+            val started = System.nanoTime()
+            val stop = caller.submit<WebStopOutcome> { server.stop() }
+            // Well past the 100 ms request bound, stop is still waiting for the held append.
+            assertFailsWith<TimeoutException> { stop.get(600, TimeUnit.MILLISECONDS) }
+            assertFailsWith<IllegalStateException> { UploadServer("127.0.0.1", 0, root) }
+            release.countDown()
+            assertEquals(WebStopOutcome.STOPPED, stop.get(3, TimeUnit.SECONDS))
+            assertTrue(elapsedMs(started) < 4000)
             assertWholeAuditEntry(root)
             val replacement = UploadServer("127.0.0.1", 0, root)
             try { replacement.start() } finally { replacement.stop() }
         } finally {
+            release.countDown(); caller.shutdownNow()
+            assertTrue(caller.awaitTermination(5, TimeUnit.SECONDS))
             server.stop(); root.toFile().deleteRecursively()
         }
     }
 
-    @Test fun `stop reports an unconfirmed audit append past its bound without throwing and releases ownership after it`() {
+    @Test fun `stop returns audit-pending past the audit bound and retains ownership until the append finishes`() {
         val root = createTempDirectory("web-post-response-audit-bound-")
-        val diagnostics = java.util.concurrent.CopyOnWriteArrayList<String>()
-        val server = UploadServer("127.0.0.1", 0, root, requestShutdownTimeoutMs = 50, auditShutdownTimeoutMs = 200,
-            requestDiagnosticOutput = { diagnostics += it })
+        val server = UploadServer("127.0.0.1", 0, root, requestShutdownTimeoutMs = 50, auditShutdownTimeoutMs = 400)
+        val caller = Executors.newSingleThreadExecutor()
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        val finished = java.util.concurrent.atomic.AtomicBoolean()
+        server.start()
+        try {
+            holdAuditAppends(server, entered, release, finished)
+            assertTrue(auditedRequest(server) >= 400)
+            assertTrue(entered.await(3, TimeUnit.SECONDS))
+            val started = System.nanoTime()
+            val stop = caller.submit<WebStopOutcome> { server.stop() }
+            assertEquals(WebStopOutcome.AUDIT_PENDING, stop.get(3, TimeUnit.SECONDS))
+            val waited = elapsedMs(started)
+            assertTrue(waited in 350..2500, "stop must wait for the audit bound and no longer: $waited ms")
+            assertFalse(finished.get(), "stop returned while the append was still held")
+            // The append still owns the store; a CLI stop reports unknown durability instead of success.
+            assertFailsWith<IllegalStateException> { UploadServer("127.0.0.1", 0, root) }
+            assertFalse(server.awaitStoreRelease(0))
+            assertFailsWith<WebShutdownAuditPending> { stopWebServerForCli(server) }
+            release.countDown()
+            assertTrue(server.awaitStoreRelease(5000))
+            assertEquals(WebStopOutcome.STOPPED, server.stop())
+            assertWholeAuditEntry(root)
+            val replacement = UploadServer("127.0.0.1", 0, root)
+            try { replacement.start() } finally { replacement.stop() }
+        } finally {
+            release.countDown(); caller.shutdownNow()
+            assertTrue(caller.awaitTermination(5, TimeUnit.SECONDS))
+            server.stop(); root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun `an admitted append outside a completed HTTP response keeps the ordinary request bound`() {
+        val root = createTempDirectory("web-unclassified-audit-")
+        val server = UploadServer("127.0.0.1", 0, root, requestShutdownTimeoutMs = 100, auditShutdownTimeoutMs = 5000)
+        val worker = Executors.newSingleThreadExecutor()
         val entered = CountDownLatch(1); val release = CountDownLatch(1)
         server.start()
         try {
-            delayAuditAppends(server) { entered.countDown(); check(release.await(10, TimeUnit.SECONDS)) }
-            assertTrue(auditedRequest(server) >= 400)
+            holdAuditAppends(server, entered, release)
+            // No HTTP exchange sent a response here, so this append is ordinary request work.
+            val request = worker.submit<Boolean> { server.withActiveRequest {
+                server.audit.record(WebAuditActor.OPERATOR, WebAuditAction.SUPPORT_EXPORT, WebAuditTarget(),
+                    WebAuditOutcome.ACCEPTED, 200, null, null)
+            } }
             assertTrue(entered.await(3, TimeUnit.SECONDS))
-            server.stop()
-            assertTrue(diagnostics.any { "audit append did not finish within the shutdown bound" in it }, diagnostics.toString())
-            // The append still owns the store; ownership is retained rather than reported as released.
-            assertFailsWith<IllegalStateException> { UploadServer("127.0.0.1", 0, root) }
+            val started = System.nanoTime()
+            val failure = assertFailsWith<IllegalStateException> { server.stop() }
+            assertEquals("HTTP requests remain active after server stop", failure.message)
+            assertTrue(elapsedMs(started) < 2000, "the audit bound must not apply")
             release.countDown()
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
-            var replacement: UploadServer? = null
-            while (replacement == null) {
-                replacement = try { UploadServer("127.0.0.1", 0, root) } catch (failure: IllegalStateException) {
-                    if (System.nanoTime() - deadline > 0) throw failure
-                    Thread.sleep(10); null
-                }
-            }
-            try { replacement.start() } finally { replacement.stop() }
-            assertWholeAuditEntry(root)
+            assertTrue(request.get(3, TimeUnit.SECONDS))
+            assertTrue(server.awaitStoreRelease(3000))
+            assertWholeAuditEntry(root, WebAuditAction.SUPPORT_EXPORT)
         } finally {
+            release.countDown(); worker.shutdownNow()
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS))
+            server.stop(); root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test fun `a request that reaches its audit append only after the request deadline fails the stop`() {
+        val root = createTempDirectory("web-late-audit-")
+        val server = UploadServer("127.0.0.1", 0, root, requestShutdownTimeoutMs = 100, auditShutdownTimeoutMs = 5000)
+        val worker = Executors.newSingleThreadExecutor()
+        val handling = CountDownLatch(1); val respond = CountDownLatch(1)
+        val appending = CountDownLatch(1); val release = CountDownLatch(1)
+        server.start()
+        try {
+            holdAuditAppends(server, appending, release)
+            val request = worker.submit<Boolean> { server.withActiveRequest {
+                handling.countDown()
+                check(respond.await(10, TimeUnit.SECONDS))
+                server.postResponseAuditAppend {
+                    server.audit.record(WebAuditActor.OPERATOR, WebAuditAction.SUPPORT_EXPORT, WebAuditTarget(),
+                        WebAuditOutcome.ACCEPTED, 200, null, null)
+                }
+            } }
+            assertTrue(handling.await(3, TimeUnit.SECONDS))
+            // The drain decision is made while the request is still doing ordinary work at the request deadline.
+            // Only then does it enter its post-response append, before stop samples ownership.
+            server.requestDrainObserver = { respond.countDown(); check(appending.await(3, TimeUnit.SECONDS)) }
+            val started = System.nanoTime()
+            val failure = assertFailsWith<IllegalStateException> { server.stop() }
+            assertEquals("HTTP requests remain active after server stop", failure.message)
+            assertTrue(elapsedMs(started) < 2000, "a late append must not be reported as an expired audit bound")
             release.countDown()
+            assertTrue(request.get(3, TimeUnit.SECONDS))
+            assertTrue(server.awaitStoreRelease(3000))
+            assertWholeAuditEntry(root, WebAuditAction.SUPPORT_EXPORT)
+        } finally {
+            respond.countDown(); release.countDown(); worker.shutdownNow()
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS))
             server.stop(); root.toFile().deleteRecursively()
         }
     }

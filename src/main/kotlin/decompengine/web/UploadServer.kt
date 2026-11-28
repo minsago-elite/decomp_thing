@@ -302,10 +302,9 @@ class UploadServer(
         setOfNotNull(devFrontendOrigin)), webAccessClock ?: SystemWebAccessClock,
         requestDiagnosticOutput = requestDiagnosticOutput)
     private val jobMutations = WebJobMutationBoundary(access, jobs)
-    internal val audit = WebAuditLog(dataDir, prepareStorage = ownership::ensureLockFile,
-        beforeRecord = { enterPostResponseAudit() })
+    internal val audit = WebAuditLog(dataDir, prepareStorage = ownership::ensureLockFile)
     init { jobs.storageWriterExclusion = { measure -> audit.excludingAppends(measure) } }
-    private val auditRecorder = WebAuditRecorder(access, audit)
+    private val auditRecorder = WebAuditRecorder(access, audit, ::postResponseAuditAppend)
     private val legacySessions = WebSessionController(access)
     // A stream that outlives stop's bounded wait releases store ownership when it finally ends.
     // Before stop has finished its own shutdown sequence, stop alone decides when ownership is released.
@@ -340,7 +339,7 @@ class UploadServer(
     private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources,
         harnessReadiness = harnessReadiness, agentPreflight = agentPreflight, archiveEvidence = archiveEvidence,
         git = WebGitCapability(gitAvailability, gitRepositories), audit = audit, capacity = ::capacitySnapshot,
-        logDownloadPhases = logDownloadPhases) }
+        logDownloadPhases = logDownloadPhases, postResponseAuditAppend = ::postResponseAuditAppend) }
     /** Admitted artifact downloads that have not yet released their stream; test evidence helper. */
     internal fun activeArtifactDownloads(): Int = api?.artifactDownloads?.activeCount() ?: 0
     // A request that finds every worker and queue slot taken is answered by this tiny pool with a stable 429
@@ -365,15 +364,17 @@ class UploadServer(
     private val requestDeadlines = ScheduledThreadPoolExecutor(1) { task ->
         Thread(task, "decomp-web-deadline").apply { isDaemon = true }
     }.apply { removeOnCancelPolicy = true }
-    private val lifecycleLock = Any()
+    // Also the monitor stop waits on for request-drain changes; waiting releases it.
+    private val lifecycleLock = Object()
     private var stopping = false
     private var started = false
     private var activeRequests = 0
-    // Admitted requests that have entered their post-response audit append; a subset of activeRequests.
+    // Admitted requests currently inside the audit append of a response already sent; a subset of activeRequests.
     private var postResponseAudits = 0
-    private class AdmittedRequest { var auditing = false }
-    private val currentRequest = ThreadLocal<AdmittedRequest?>()
-    private val requestsDrained = java.util.concurrent.CountDownLatch(1)
+    private var ownershipReleased = false
+    private val admittedOnThread = ThreadLocal<Boolean>()
+    /** Test seam between the request-drain decision and the ownership decision in [stop]. */
+    @Volatile internal var requestDrainObserver: () -> Unit = {}
     private val stopRequested = java.util.concurrent.atomic.AtomicBoolean(false)
     val serverPort: Int get() = server.address.port
 
@@ -572,7 +573,12 @@ class UploadServer(
         return latch
     }
 
-    fun stop(delaySeconds: Int = 0) {
+    /**
+     * Stops the server. [WebStopOutcome.AUDIT_PENDING] means every response was sent but an audit append
+     * outlived its bounded wait: that entry is unconfirmed and the store stays owned until the append
+     * finishes ([awaitStoreRelease]). Throws when other work still holds the store.
+     */
+    fun stop(delaySeconds: Int = 0): WebStopOutcome {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
         // Signal recovery and the job service even while start or a queued callback holds
         // lifecycleLock through filesystem operations: no queued operation may begin and no
@@ -581,7 +587,6 @@ class UploadServer(
         val callerWasInterrupted = Thread.currentThread().isInterrupted
         val inspection = synchronized(lifecycleLock) {
             stopping = true
-            if (activeRequests == 0) requestsDrained.countDown()
             // JDK HttpServer.stop does not release a bound listener before start. Start its
             // dispatcher only after closing request admission, then close it below. This also
             // covers failed ownership/recovery admission and explicit stop-before-start.
@@ -623,31 +628,16 @@ class UploadServer(
                 if (exception is InterruptedException) restoreInterrupt = true
             }
             // Interrupting the executor does not mean admitted handlers have finished their finally blocks.
-            // Admission is closed, so reaching zero here is permanent. Never hold lifecycleLock while waiting.
-            val drainStarted = System.nanoTime()
-            val requestDeadline = drainStarted + TimeUnit.MILLISECONDS.toNanos(requestShutdownTimeoutMs)
-            // Post-response audit work is tracked separately: once only audit appends remain, they get their own bound.
-            val auditDeadline = drainStarted + TimeUnit.MILLISECONDS.toNanos(maxOf(requestShutdownTimeoutMs, auditShutdownTimeoutMs))
-            while (requestsDrained.count != 0L) {
-                val now = System.nanoTime()
-                val deadline = when {
-                    now - requestDeadline < 0 -> requestDeadline
-                    onlyPostResponseAuditsRemain() -> auditDeadline
-                    else -> break
-                }
-                val remaining = deadline - now
-                if (remaining <= 0) break
-                try { requestsDrained.await(remaining, TimeUnit.NANOSECONDS) }
-                catch (_: InterruptedException) { restoreInterrupt = true }
-            }
+            val drain = awaitRequestDrain { restoreInterrupt = true }
+            requestDrainObserver()
             stopSequenceFinished.set(true)
-            when (releaseOwnership()) {
-                OwnershipRelease.RELEASED -> Unit
-                // Every response was sent; only durability of their audit entries is unconfirmed. Do not
-                // report a failed stop while those appends still own the store: the last one releases it.
-                OwnershipRelease.AUDIT_PENDING -> requestDiagnosticOutput("Web shutdown: audit append did not finish " +
-                    "within the shutdown bound; its entry is unconfirmed and store ownership is released when it finishes.")
-                OwnershipRelease.RETAINED -> throw IllegalStateException("HTTP requests remain active after server stop")
+            val release = releaseOwnership()
+            // The drain snapshot alone decides whether audit work earned its bound: a request that was still
+            // doing ordinary work at the request deadline fails the stop even if it then reached its append.
+            return when {
+                release == OwnershipRelease.RELEASED -> WebStopOutcome.STOPPED
+                drain == RequestDrain.AUDIT_PENDING && release == OwnershipRelease.AUDIT_PENDING -> WebStopOutcome.AUDIT_PENDING
+                else -> throw IllegalStateException("HTTP requests remain active after server stop")
             }
         } finally {
             if (restoreInterrupt) Thread.currentThread().interrupt()
@@ -667,18 +657,16 @@ class UploadServer(
                 return false
             }
         }
-        val request = AdmittedRequest()
-        val outer = currentRequest.get()
-        currentRequest.set(request)
+        val outer = admittedOnThread.get()
+        admittedOnThread.set(true)
         try {
             action()
             return true
         } finally {
-            if (outer == null) currentRequest.remove() else currentRequest.set(outer)
+            if (outer == null) admittedOnThread.remove() else admittedOnThread.set(outer)
             synchronized(lifecycleLock) {
                 activeRequests--
-                if (request.auditing) postResponseAudits--
-                if (stopping && activeRequests == 0) requestsDrained.countDown()
+                lifecycleLock.notifyAll()
             }
             try {
                 releaseOwnershipIfIdle()
@@ -688,16 +676,58 @@ class UploadServer(
         }
     }
 
-    /** The audit append is the handler's last work: its response has been sent. Admission stays counted. */
-    private fun enterPostResponseAudit() {
-        val request = currentRequest.get() ?: return
-        synchronized(lifecycleLock) {
-            if (!request.auditing) { request.auditing = true; postResponseAudits++ }
+    /**
+     * Runs exactly the audit append of a response already sent. Only that append is post-response audit work:
+     * the request stays admitted, and its work before and after the append keeps the ordinary request bound.
+     */
+    internal fun postResponseAuditAppend(append: () -> Unit) {
+        if (admittedOnThread.get() != true) return append()
+        synchronized(lifecycleLock) { postResponseAudits++ }
+        try { append() } finally {
+            synchronized(lifecycleLock) { postResponseAudits-- }
         }
     }
 
-    private fun onlyPostResponseAuditsRemain(): Boolean =
-        synchronized(lifecycleLock) { activeRequests > 0 && activeRequests == postResponseAudits }
+    private enum class RequestDrain { DRAINED, AUDIT_PENDING, ACTIVE }
+
+    /**
+     * Admission is closed, so the active set only shrinks. Requests get [requestShutdownTimeoutMs]. If at that
+     * deadline every remaining request is inside its post-response audit append, the wait extends once to the
+     * audit deadline: those requests have nothing left but the append and their return. The request timeout is
+     * a floor for that deadline. Other shutdown phases (streams, archive verifiers, jobs, Git) wait separately.
+     */
+    private fun awaitRequestDrain(onInterrupt: () -> Unit): RequestDrain {
+        val started = System.nanoTime()
+        val requestDeadline = started + TimeUnit.MILLISECONDS.toNanos(requestShutdownTimeoutMs)
+        val auditDeadline = started + TimeUnit.MILLISECONDS.toNanos(maxOf(requestShutdownTimeoutMs, auditShutdownTimeoutMs))
+        var deadline = requestDeadline
+        synchronized(lifecycleLock) {
+            while (true) {
+                if (activeRequests == 0) return RequestDrain.DRAINED
+                val auditOnly = activeRequests == postResponseAudits
+                var remaining = deadline - System.nanoTime()
+                if (remaining <= 0 && deadline == requestDeadline && auditOnly) {
+                    deadline = auditDeadline
+                    remaining = deadline - System.nanoTime()
+                }
+                if (remaining <= 0) return if (auditOnly) RequestDrain.AUDIT_PENDING else RequestDrain.ACTIVE
+                try { TimeUnit.NANOSECONDS.timedWait(lifecycleLock, remaining) } catch (_: InterruptedException) { onInterrupt() }
+            }
+        }
+    }
+
+    /** Waits for store ownership to be released after stop, for example by the last pending audit append. */
+    internal fun awaitStoreRelease(timeoutMs: Long): Boolean {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        synchronized(lifecycleLock) {
+            while (!ownershipReleased) {
+                val remaining = deadline - System.nanoTime()
+                if (remaining <= 0) return false
+                TimeUnit.NANOSECONDS.timedWait(lifecycleLock, remaining)
+            }
+            return true
+        }
+    }
 
     private enum class OwnershipRelease { RELEASED, AUDIT_PENDING, RETAINED }
 
@@ -711,7 +741,12 @@ class UploadServer(
         return synchronized(lifecycleLock) {
             val servicesIdle = stopping && jobsIdle && gitIdle && streamResources.snapshot().active == 0
             when {
-                servicesIdle && activeRequests == 0 -> { ownership.close(); OwnershipRelease.RELEASED }
+                servicesIdle && activeRequests == 0 -> {
+                    ownership.close()
+                    ownershipReleased = true
+                    lifecycleLock.notifyAll()
+                    OwnershipRelease.RELEASED
+                }
                 // Admission is closed, so the last finishing audit append releases ownership through withActiveRequest.
                 servicesIdle && activeRequests == postResponseAudits -> OwnershipRelease.AUDIT_PENDING
                 else -> OwnershipRelease.RETAINED
@@ -1463,40 +1498,56 @@ internal fun <T : Any> startWebServerLifecycle(
     }
 }
 
+/** Outcome of [UploadServer.stop] that did not throw. */
+enum class WebStopOutcome {
+    /** Every admitted request finished and store ownership is released. */
+    STOPPED,
+    /** Every response was sent, but an audit append outlived its bounded wait; the store is still owned. */
+    AUDIT_PENDING,
+}
+
+/** A CLI stop whose audit append outlived its bound: at process exit that entry's durability is unknown. */
+internal class WebShutdownAuditPending : IllegalStateException(
+    "Web shutdown ended while an audit append was still running after its bounded wait; " +
+        "that audit entry's durability is unknown and it may be missing after exit.")
+
+/** CLI stop: storage is released only on [WebStopOutcome.STOPPED]; a pending audit append is reported, not hidden. */
+internal fun stopWebServerForCli(server: UploadServer) {
+    if (server.stop() == WebStopOutcome.AUDIT_PENDING) throw WebShutdownAuditPending()
+}
+
+private fun runWebShutdownHook(action: () -> Unit) {
+    try { action() } catch (pending: WebShutdownAuditPending) {
+        System.err.println(pending.message)
+    } catch (_: Exception) {
+        System.err.println("Web shutdown did not complete cleanly; recovery is required")
+    }
+}
+
 /** CLI factory form makes constructor recovery observe shutdown before the server exists. */
 internal fun startWebServerWithShutdownHook(create: (() -> Boolean) -> UploadServer): UploadServer {
     val runtime = Runtime.getRuntime()
     return startWebServerLifecycle(registerShutdown = { action ->
-        val hook = Thread({
-            try { action() } catch (_: Exception) {
-                System.err.println("Web shutdown did not complete cleanly; recovery is required")
-            }
-        }, "decomp-web-shutdown")
+        val hook = Thread({ runWebShutdownHook(action) }, "decomp-web-shutdown")
         runtime.addShutdownHook(hook)
         val remove: () -> Unit = {
             try { runtime.removeShutdownHook(hook) } catch (_: IllegalStateException) { }
             Unit
         }
         remove
-    }, create = create, start = { it.start() }, stop = { it.stop() })
+    }, create = create, start = { it.start() }, stop = ::stopWebServerForCli)
 }
 
 /** CLI lifecycle: allow owned workers to record interruption before the JVM exits. */
 internal fun startWebServerWithShutdownHook(server: UploadServer) {
     val runtime = Runtime.getRuntime()
-    val hook = Thread({
-        try {
-            server.stop()
-        } catch (_: Exception) {
-            System.err.println("Web shutdown did not complete cleanly; recovery is required")
-        }
-    }, "decomp-web-shutdown")
+    val hook = Thread({ runWebShutdownHook { stopWebServerForCli(server) } }, "decomp-web-shutdown")
     runtime.addShutdownHook(hook)
     try {
         server.start()
     } catch (failure: Exception) {
         try { runtime.removeShutdownHook(hook) } catch (_: IllegalStateException) { }
-        try { server.stop() } catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
+        try { stopWebServerForCli(server) } catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
         throw failure
     }
 }

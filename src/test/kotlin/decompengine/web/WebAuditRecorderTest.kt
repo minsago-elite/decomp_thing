@@ -19,6 +19,43 @@ import kotlin.test.assertTrue
 
 /** Real session/authorization and recorder components, without job/workflow dependencies. */
 class WebAuditRecorderTest {
+    @Test fun `only the append of a sent response runs in the post-response scope`() {
+        val root = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/web-audit-recorder").toAbsolutePath()), "scope-")
+        val http = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val origin = "http://127.0.0.1:${http.address.port}"
+        val access = LocalWebAccess(LocalWebAccessConfiguration(origin), requestDiagnosticOutput = {})
+        val log = WebAuditLog(root)
+        // Each scoped call records how many entries its block appended; the block must be exactly the append.
+        val scoped = java.util.concurrent.CopyOnWriteArrayList<Int>()
+        val recorder = WebAuditRecorder(access, log) { append ->
+            val before = log.read().entries.size
+            append()
+            scoped += log.read().entries.size - before
+        }
+        http.createContext("/") { exchange ->
+            recorder.around(exchange, WebAuditAction.SUPPORT_EXPORT, WebAuditTarget()) {
+                // The failed path throws before any response is sent.
+                check(exchange.requestURI.path == "/sent") { "handler failed before responding" }
+                exchange.sendResponseHeaders(204, -1); exchange.close()
+            }
+        }
+        val client = HttpClient.newHttpClient()
+        // POST: the client retries an idempotent GET once its connection is reset by the failed handler.
+        fun get(path: String) = client.send(HttpRequest.newBuilder(URI(origin + path)).timeout(java.time.Duration.ofSeconds(10))
+            .POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.discarding())
+        http.start()
+        try {
+            assertEquals(204, get("/sent").statusCode())
+            assertTrue(runCatching { get("/failed") }.let { it.isFailure || it.getOrThrow().statusCode() >= 500 })
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+            while (log.read().entries.size < 2 && System.nanoTime() < deadline) Thread.sleep(10)
+            assertEquals(listOf(WebAuditOutcome.ACCEPTED, WebAuditOutcome.FAILED), log.read().entries.map { it.outcome })
+            assertEquals(listOf(1), scoped.toList(), "only the sent response's append is post-response work")
+        } finally {
+            http.stop(0); root.toFile().deleteRecursively()
+        }
+    }
+
     @Test fun `accepted and denied requests commit preconditions without persisting credential bytes`() {
         val root = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/web-audit-recorder").toAbsolutePath()), "credentials-")
         val http = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)

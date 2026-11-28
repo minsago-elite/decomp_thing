@@ -13,6 +13,9 @@ import java.security.MessageDigest
 internal class WebAuditRecorder(
     private val access: LocalWebAccess,
     private val log: WebAuditLog?,
+    // Runs exactly the append of an entry whose response was already sent; the web server gives
+    // that work its own shutdown bound. Refused or failed handlers append outside it.
+    private val postResponseAppend: (() -> Unit) -> Unit = { it() },
 ) {
     /** Run [handle] and record its outcome when [action] names a sensitive action. */
     fun <T> around(exchange: HttpExchange, action: WebAuditAction?, target: WebAuditTarget, handle: () -> T): T {
@@ -27,7 +30,11 @@ internal class WebAuditRecorder(
             throw failure
         } finally {
             // Auditing never changes the response or turns a handled request into a failure.
-            try { record(exchange, action, target, before, thrown) } catch (_: Exception) { }
+            try {
+                // A handler that returned after sending its response has nothing left but this append.
+                if (!thrown && exchange.responseCode in 100..599) postResponseAppend { record(exchange, action, target, before, false) }
+                else record(exchange, action, target, before, thrown)
+            } catch (_: Exception) { }
             WebDeniedResponseTrace.end(traced)
         }
     }

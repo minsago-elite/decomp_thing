@@ -28,8 +28,9 @@ internal class WebApiController(
     private val capacity: (() -> JsonObject)? = null,
     private val readExplorationArtifact: (String, String, Long) -> decompengine.repair.StableRegularFile = jobs::readArtifact,
     private val logDownloadPhases: WebLogDownloadPhases = WebLogDownloadPhases(),
+    postResponseAuditAppend: (() -> Unit) -> Unit = { it() },
 ) : AutoCloseable {
-    private val auditRecorder = WebAuditRecorder(access, audit)
+    private val auditRecorder = WebAuditRecorder(access, audit, postResponseAuditAppend)
     private val supportExport = WebSupportExport(jobs, audit, ::runtimeJson, ::limitsJson, ::capabilitiesJson, clock)
     private val prefix = "${assets.basePath}api/v1/"
     private val applicationBuildId = applicationBuildId()
