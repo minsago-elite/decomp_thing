@@ -109,6 +109,8 @@ export const uploadCopy = {
   "uploadStorageNeedsAttentionKeepThisPageOpenAndRetry": "Upload storage needs attention. Keep this page open and retry after the local server has recovered.",
   "theJobLibraryIsAtItsCapacityDeleteJobsYouNoLonger": "The job library is at its 10,000-job capacity. Delete jobs you no longer need, then upload again.",
   "openTheJobLibrary": "Open the job library",
+  "theSavedUploadRecordCouldNotBeClearedClearItBefore": "The saved upload record could not be cleared from this tab. Clear it before uploading another file.",
+  "clearSavedUploadRecord": "Clear saved upload record",
   "theServerHasNoUploadCapacityWaitOrFreeStorage": "The server has no upload capacity. Wait or free storage, then retry this file.",
   "transferStoppedTheServerMayAlreadyHavePublishedTheJob": "Transfer stopped. The server may already have published the job. Retry this file to recover the same job.",
   "uploadWasNotConfirmedTheServerMayHavePublishedThe": "Upload was not confirmed. The server may have published the job. Retry this file using its retained identity.",

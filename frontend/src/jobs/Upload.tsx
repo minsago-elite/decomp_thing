@@ -38,7 +38,7 @@ function failureMessage(error: unknown): string {
 }
 
 /** File bytes stay in memory; one tab-scoped retry ticket survives view destruction. */
-export function Upload({ basePath, session }: { basePath: string; session: BrowserSession }) {
+export function Upload({ basePath, session, inLibrary = false }: { basePath: string; session: BrowserSession; inLibrary?: boolean }) {
   const state = useSession(session);
   const location = useLocation();
   const recovery = useMemo(() => createUploadRecovery(basePath), [basePath]);
@@ -50,6 +50,10 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
   // 'refused' is a definite server refusal: nothing was published and retrying the same request cannot succeed.
   const [feedback, setFeedback] = useState<{ message: string; kind: 'status' | 'error' | 'input-error' | 'refused' }>({ message: '', kind: 'status' });
   const [rejectedFileMessage, setRejectedFileMessage] = useState<string | null>(null);
+  // A refused ticket that storage would not remove: never shown as pending and never reused; uploads wait until it is cleared.
+  const [uncleared, setUncleared] = useState(false);
+  const unclearedRef = useRef(false);
+  unclearedRef.current = uncleared;
   const active = useRef<AbortController | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const live = useRef(true);
@@ -82,7 +86,7 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
       }
       return;
     }
-    const next = recovery.read();
+    const next = unclearedRef.current ? { kind: 'empty' as const } : recovery.read();
     setRetained(next);
     setAttempt(null);
     setProgress(null);
@@ -98,7 +102,7 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
   }, [phase]);
 
   function select(files: FileList | null) {
-    if (active.current || (phase === 'retry' && attempt) || retained.kind === 'blocked') return;
+    if (active.current || (phase === 'retry' && attempt) || retained.kind === 'blocked' || uncleared) return;
     if (!files || files.length !== 1) { setFeedback({ message: copy.chooseOneBinaryAtATime, kind: attempt ? 'error' : 'input-error' }); return; }
     const file = files[0];
     if (!file) return;
@@ -112,7 +116,7 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
   }
   async function submit() {
     const csrfToken = session.csrf();
-    if (!attempt || active.current || !csrfToken || !connected) return;
+    if (!attempt || active.current || !csrfToken || !connected || uncleared) return;
     try { recovery.save(attempt.ticket); setRetained(recovery.read()); }
     catch { setRetained(recovery.read()); setPhase('retry'); setFeedback({ message: copy.retryIdentityCouldNotBeSavedNoUploadWasSent, kind: 'error' }); return; }
     const controller = new AbortController(); active.current = controller;
@@ -141,8 +145,9 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
         // A definite refusal before staging: drop the retry identity so nothing suggests the upload may be pending.
         let cleared = true;
         try { recovery.clear(); } catch { cleared = false; }
-        setRetained(recovery.read()); setAttempt(null); setRejectedFileMessage(null); setPhase('idle');
-        setFeedback({ message: cleared ? message : [message, copy.retryContextCouldNotBeClearedCheckTabStorageBefore].join(' '), kind: 'refused' });
+        // Do not re-read storage: a ticket that survived the failed clear belongs to the refused request.
+        setUncleared(!cleared); setRetained({ kind: 'empty' }); setAttempt(null); setRejectedFileMessage(null); setPhase('idle');
+        setFeedback({ message, kind: 'refused' });
         if (input.current) input.current.value = '';
         return;
       }
@@ -150,6 +155,13 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
       if (invalidInput) setRejectedFileMessage(message);
       setPhase('retry'); setFeedback({ message, kind: invalidInput ? 'input-error' : 'error' });
     } finally { clearTimeout(pollTimer); controller.abort(); if (active.current === controller) active.current = null; }
+  }
+  function clearRefused() {
+    if (active.current) return;
+    try { recovery.clear(); } catch { return; }
+    setUncleared(false); setRetained({ kind: 'empty' });
+    // The clear button disappears, so return focus to the refusal notice.
+    notice.current?.focus();
   }
   function discard() {
     if (active.current) return;
@@ -160,7 +172,7 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
     if (input.current) input.current.value = '';
   }
   const invalidField = feedback.kind === 'input-error' || rejectedFileMessage !== null;
-  const errorFeedback = feedback.kind !== 'status' || rejectedFileMessage !== null;
+  const errorFeedback = feedback.kind !== 'status' || rejectedFileMessage !== null || uncleared;
   const feedbackMessage = rejectedFileMessage && feedback.message !== rejectedFileMessage
     ? [rejectedFileMessage, feedback.message].filter(Boolean).join(' ') : feedback.message;
   return <section class="upload-panel" aria-labelledby="upload-title">
@@ -173,7 +185,7 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
         <label htmlFor="binary-file">{copy.binaryFile}</label>
         <input ref={input} id="binary-file" type="file" aria-describedby="upload-guidance upload-feedback"
           aria-invalid={invalidField || undefined} aria-errormessage={invalidField ? 'upload-feedback' : undefined}
-          disabled={phase === 'pending' || (phase === 'retry' && attempt !== null) || retained.kind === 'blocked'} onChange={event => select(event.currentTarget.files)} />
+          disabled={phase === 'pending' || (phase === 'retry' && attempt !== null) || retained.kind === 'blocked' || uncleared} onChange={event => select(event.currentTarget.files)} />
         <p>{copy.useTheFilePickerOrDropOneFileHere}</p>
       </div>
       {retained.kind === 'pending' && !attempt && <p>{displayMessage(copy.retained, { filename: retained.ticket.filename, bytes: retained.ticket.size })}</p>}
@@ -191,12 +203,14 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
       {phase === 'pending' && progress && <MetadataReceipt kind="upload" receipt={observation?.receipt} />}
       <p id="upload-feedback" ref={notice} role={errorFeedback ? 'alert' : 'status'} tabIndex={feedback.kind === 'refused' ? -1 : undefined}
         class={errorFeedback ? 'notice notice-error' : undefined}>{feedbackMessage}
-        {feedback.kind === 'refused' && <> <a href={appPath(basePath, '/')}>{copy.openTheJobLibrary}</a></>}</p>
+        {feedback.kind === 'refused' && !inLibrary && <> <a href={appPath(basePath, '/')}>{copy.openTheJobLibrary}</a></>}
+        {uncleared && <> {copy.theSavedUploadRecordCouldNotBeClearedClearItBefore}</>}</p>
       {phase === 'retry' && <p>{copy.retryKeepsTheSameJobIdentityChoosingAnotherFileDiscards}</p>}
       <div class="job-actions">
         <button type="submit" disabled={!connected || !attempt || phase === 'pending'}>{phase === 'retry' ? copy.retryThisUpload : copy.uploadBinary}</button>
         {phase === 'pending' && <button type="button" onClick={() => active.current?.abort()}>{copy.stopTransfer}</button>}
         {phase === 'retry' && <button type="button" onClick={discard}>{copy.chooseAnotherFile}</button>}
+        {uncleared && <button type="button" onClick={clearRefused}>{copy.clearSavedUploadRecord}</button>}
       </div>
     </form>
     <p>{copy.thisTabRetainsTheRetryKeyAndFilenameSizeFor}</p>
