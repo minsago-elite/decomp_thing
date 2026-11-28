@@ -549,15 +549,25 @@ class WebProductionWorkflowsTest {
 
     @Test
     fun `opt in real bundled Ghidra imports the owner snapshot while the upload path is replaced`() = withRoot { root ->
-        if (System.getenv("RUN_REAL_GHIDRA") != "true") return@withRoot
-        // Ghidra refuses a project path with a dot-prefixed element, as in a local `.t3` worktree. Skip there.
+        // The hosted bundled-ghidra job sets this, so a run that cannot import fails instead of passing or skipping.
+        val required = System.getenv("DECOMP_REQUIRE_REAL_GHIDRA_WEB_SNAPSHOT") == "true"
+        if (System.getenv("RUN_REAL_GHIDRA") != "true") {
+            assertFalse(required, "the required real snapshot import needs RUN_REAL_GHIDRA=true")
+            return@withRoot
+        }
+        // Ghidra refuses a project path with a dot-prefixed element, as in a local `.t3` worktree. Skip there,
+        // except where the import is required.
         val hidden = root.toRealPath().firstOrNull { it.toString().startsWith(".") }
-        org.junit.jupiter.api.Assumptions.assumeTrue(hidden == null,
-            "Ghidra refuses project paths with a dot-prefixed element ($hidden in $root); run from a checkout without one")
+        val incompatible = "Ghidra refuses project paths with a dot-prefixed element ($hidden in $root); run from a checkout without one"
+        if (hidden != null && required) fail(incompatible)
+        org.junit.jupiter.api.Assumptions.assumeTrue(hidden == null, incompatible)
+        // GCC writes intermediates under TMPDIR; keep them inside the fixture root.
+        val compilerTemporary = root.resolve("compiler-tmp").createDirectories()
         fun compile(name: String, result: Int): ByteArray {
             val source = root.resolve("$name.c").also { it.writeText("int main(void) { return $result; }\n") }
             val binary = root.resolve(name)
-            val compiler = ProcessBuilder("gcc", "-O0", source.toString(), "-o", binary.toString()).redirectErrorStream(true).start()
+            val compiler = ProcessBuilder("gcc", "-O0", source.toString(), "-o", binary.toString()).redirectErrorStream(true)
+                .apply { environment()["TMPDIR"] = compilerTemporary.toString() }.start()
             val output = compiler.inputStream.bufferedReader().readText()
             check(compiler.waitFor() == 0) { output }
             return Files.readAllBytes(binary)

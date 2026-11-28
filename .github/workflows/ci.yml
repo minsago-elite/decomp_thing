@@ -733,6 +733,7 @@ jobs:
           RUN_REAL_GHIDRA_CALL_SITES: "true"
           RUN_REAL_GHIDRA_NATIVE_CALLS: "true"
           RUN_REAL_GHIDRA_PURE_RENDERING: "true"
+          DECOMP_REQUIRE_REAL_GHIDRA_WEB_SNAPSHOT: "true"
         run: |
           unset GHIDRA_HOME
           mkdir -p build/exporter-rendering-v16
@@ -750,6 +751,12 @@ jobs:
             --tests decompengine.project.ReconstructionPipelineTest \
             --tests decompengine.web.SourceTreeJobReconstructorTest \
             --tests 'decompengine.web.WebProductionWorkflowsTest.opt in real bundled Ghidra imports the owner snapshot*'
+      - name: Require a passing real bundled snapshot import
+        run: |
+          python3 -B scripts/require-junit-method.py --self-test
+          python3 -B scripts/require-junit-method.py --reports build/test-results/test \
+            --class decompengine.web.WebProductionWorkflowsTest \
+            --method 'opt in real bundled Ghidra imports the owner snapshot while the upload path is replaced'
       - name: Verify ZIP and TAR bundle contents and native executable modes
         run: ./gradlew --no-daemon --offline verifyGhidraDistributionArchives
       - name: Verify atomic bundle publication and refusal controls
