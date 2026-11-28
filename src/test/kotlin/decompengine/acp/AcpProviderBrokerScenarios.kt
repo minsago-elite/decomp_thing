@@ -442,6 +442,20 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
             executor.shutdownNow()
         }
 
+        // A write that finishes normally after close never commits delivery.
+        val lateWrite = BlockingChannel(failAfterRelease = false)
+        val closing = broker(connector = connector(server))
+        val lateExecutor = Executors.newSingleThreadExecutor()
+        try {
+            val delivery = lateExecutor.submit<Result<Unit>> { runCatching { closing.deliverChannelCapability(lateWrite) } }
+            assertTrue(lateWrite.entered.await(10, TimeUnit.SECONDS))
+            closing.close()
+            val failure = delivery.get(10, TimeUnit.SECONDS).exceptionOrNull() as AcpProviderBrokerFailure
+            assertEquals(AcpProviderBrokerFailureKind.CHANNEL_REFUSED, failure.kind)
+        } finally {
+            lateExecutor.shutdownNow()
+        }
+
         // A completed delivery also zeroes its temporary copy, while the delivered bytes still authorize.
         val capturing = CapturingChannel()
         val open = broker(connector = connector(server))
@@ -751,7 +765,7 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
     }
 
     /** A stream that never drains: write blocks until close, then fails. Records the array it was handed. */
-    private class BlockingChannel : java.io.OutputStream() {
+    private class BlockingChannel(private val failAfterRelease: Boolean = true) : java.io.OutputStream() {
         val entered = CountDownLatch(1)
         private val release = CountDownLatch(1)
         @Volatile var written: ByteArray? = null
@@ -763,7 +777,7 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
             written = b
             entered.countDown()
             release.await(30, TimeUnit.SECONDS)
-            throw java.io.IOException("channel closed while writing")
+            if (failAfterRelease) throw java.io.IOException("channel closed while writing")
         }
 
         override fun close() {
