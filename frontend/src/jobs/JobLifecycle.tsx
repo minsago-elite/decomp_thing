@@ -28,7 +28,7 @@ const code = (failure: unknown) => failure instanceof ApiClientError ? failure.s
  */
 export function JobOrganization({ job, client, basePath, session, onChanged, readJob, onDeleted }: {
   job: Job; client: Client; basePath: string; session: Pick<BrowserSession, 'csrf'>;
-  onChanged?: (job: Job) => void; readJob?: (signal: AbortSignal) => Promise<Job | null>; onDeleted?: (failure: unknown) => void;
+  onChanged?: (job: Job) => void; readJob?: (signal: AbortSignal, mode?: 'retry') => Promise<Job | null>; onDeleted?: (failure: unknown) => void;
 }) {
   const copy = jobOrganizationCopy;
   const availability = useBrowserAvailability();
@@ -44,9 +44,12 @@ export function JobOrganization({ job, client, basePath, session, onChanged, rea
   useEffect(() => { active.current = null; setBusy(false); setNotice(''); }, [job.jobId]);
   const trimmed = label.trim();
   const invalid = trimmed.length > 0 && [...trimmed].length > 120;
-  /** One GET of this job; a response naming another job is ignored. Resolves whether the read job is now shown. */
-  async function reread(signal: AbortSignal) {
-    if (readJob) return (await readJob(signal)) !== null && !signal.aborted;
+  /**
+   * One GET of this job; a response naming another job is ignored. Resolves whether the read job is now shown. A
+   * `retry` read rejects instead of returning a job it did not apply, such as one a newer failed Refresh overtook.
+   */
+  async function reread(signal: AbortSignal, mode?: 'retry') {
+    if (readJob) return (await readJob(signal, mode)) !== null && !signal.aborted;
     const fresh = await client.get('job', `/jobs/${job.jobId}`, { signal });
     if (signal.aborted || fresh.data.jobId !== job.jobId) return false;
     onChanged?.(fresh.data); return true;
@@ -85,7 +88,7 @@ export function JobOrganization({ job, client, basePath, session, onChanged, rea
         : code(failure) === 'STORAGE_UNCONFIRMED' ? copy.unconfirmed : copy.failed, failure));
       if (status(failure) === 412) {
         try {
-          if (await reread(controller.signal)) setNotice(withApiFailureReference(copy.changed, failure));
+          if (await reread(controller.signal, 'retry')) setNotice(withApiFailureReference(copy.changed, failure));
         } catch (readFailure: unknown) {
           if (!controller.signal.aborted && isDeletedJob(readFailure)) onDeleted?.(readFailure);
         }
