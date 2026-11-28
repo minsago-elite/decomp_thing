@@ -1,15 +1,31 @@
 import { normalizeBasePath } from '../app/paths';
 
 export type UploadTicket = { version: 1; key: string; filename: string; size: number; createdAt: number };
-export type UploadRecovery = { kind: 'empty' } | { kind: 'pending'; ticket: UploadTicket }
+// 'refused': the stored ticket belongs to a definitely refused request that storage would not remove.
+export type UploadRecovery = { kind: 'empty' } | { kind: 'pending'; ticket: UploadTicket } | { kind: 'refused' }
   | { kind: 'blocked'; reason: 'invalid' | 'expired' | 'unavailable' };
 const MAX_AGE = 24 * 60 * 60 * 1000;
 const slot = (basePath: string) => `decomp.upload.v1:${normalizeBasePath(basePath)}`;
+// Tab-local and memory-only, so every panel mounted after an SPA route change still sees the refusal.
+// A full reload forgets it; that is the documented limit.
+const refusedKeys = new Map<string, string>();
+
+/** Test isolation only: forget every remembered refusal. */
+export function resetRefusedUploads() { refusedKeys.clear(); }
 
 /** Exactly one bounded intent per tab/deployment. No file bytes or session credentials. */
 export function createUploadRecovery(basePath: string, storage: () => Storage = () => window.sessionStorage, now = Date.now) {
   const name = slot(basePath);
   function read(): UploadRecovery {
+    const result = readStored();
+    const refused = refusedKeys.get(name);
+    if (refused === undefined) return result;
+    if (result.kind === 'pending' && result.ticket.key === refused) return { kind: 'refused' };
+    // The refused ticket is gone from storage, so nothing is left to clear.
+    if (result.kind !== 'blocked' || result.reason !== 'unavailable') refusedKeys.delete(name);
+    return result;
+  }
+  function readStored(): UploadRecovery {
     try {
       const raw = storage().getItem(name);
       if (raw === null) return { kind: 'empty' };
@@ -32,14 +48,20 @@ export function createUploadRecovery(basePath: string, storage: () => Storage = 
     save(ticket: UploadTicket) {
       // Never replace an existing unrelated intent, including when a view became stale.
       const current = read();
-      if (current.kind === 'blocked' || (current.kind === 'pending' && JSON.stringify(current.ticket) !== JSON.stringify(ticket))) {
+      if (current.kind === 'blocked' || current.kind === 'refused' || (current.kind === 'pending' && JSON.stringify(current.ticket) !== JSON.stringify(ticket))) {
         throw new Error('Upload recovery needs reconciliation.');
       }
       storage().setItem(name, JSON.stringify(ticket));
       const retained = read();
       if (retained.kind !== 'pending' || retained.ticket.key !== ticket.key) throw new Error('Upload recovery could not be retained.');
     },
-    clear() { storage().removeItem(name); if (storage().getItem(name) !== null) throw new Error('Upload recovery could not be cleared.'); },
+    clear() {
+      storage().removeItem(name);
+      if (storage().getItem(name) !== null) throw new Error('Upload recovery could not be cleared.');
+      refusedKeys.delete(name);
+    },
+    /** Remember that the stored ticket with this key was refused and could not be removed. */
+    refuse(key: string) { refusedKeys.set(name, key); },
     ticket(file: File, key: string): UploadTicket { return { version: 1, key, filename: file.name, size: file.size, createdAt: now() }; },
   };
 }

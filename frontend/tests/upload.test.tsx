@@ -7,6 +7,7 @@ import type { Bootstrap, ResponseOf } from '../src/api/generated';
 import { createBrowserSession } from '../src/session/session';
 import { ApiClientError } from '../src/api/errors';
 import { Upload } from '../src/jobs/Upload';
+import { resetRefusedUploads } from '../src/jobs/uploadRecovery';
 import Home from '../src/routes/Home';
 
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal?: AbortSignal }) => Promise<ResponseOf<'uploadProgress'>>>(), upload: vi.fn<(file: File, options: MutationOptions) => Promise<ResponseOf<'job'>>>(), route: vi.fn() }));
@@ -16,7 +17,7 @@ vi.mock('preact-iso/router', () => ({ useLocation: () => ({ route: transport.rou
 vi.mock('../src/jobs/Dashboard', () => ({ Dashboard: () => null }));
 const fixture = <T,>(name: string) => JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as T;
 const sessions: ReturnType<typeof createBrowserSession>[] = [];
-beforeEach(() => { sessionStorage.clear(); transport.upload.mockReset(); transport.get.mockReset(); transport.route.mockReset(); });
+beforeEach(() => { sessionStorage.clear(); resetRefusedUploads(); transport.upload.mockReset(); transport.get.mockReset(); transport.route.mockReset(); });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); for (const session of sessions.splice(0)) session.dispose(); });
 async function mount(home = false, prepare?: (session: ReturnType<typeof createBrowserSession>) => void) {
   const data = fixture<{ data: Bootstrap }>('bootstrap').data;
@@ -223,6 +224,46 @@ it('keeps an uncleared full-library refusal through a session change in another 
   expect(sessionStorage.getItem(slot)).toBeNull();
   expect(document.activeElement).toBe(notice);
   expect(notice.textContent).not.toContain('could not be cleared');
+});
+
+it('keeps an uncleared full-library refusal in a fresh panel mounted after leaving the upload route', async () => {
+  const slot = 'decomp.upload.v1:/nested';
+  transport.upload.mockRejectedValueOnce(new ApiClientError('http_error', { serverCode: 'JOB_LIBRARY_FULL', status: 409 }));
+  transport.upload.mockResolvedValueOnce(fixture<ResponseOf<'job'>>('job-lossless'));
+  const removeItem = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => { throw new Error('storage unavailable'); });
+  const { session, view } = await mount(); select();
+  fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
+  await screen.findByText(/could not be cleared/);
+  const refusedKey = transport.upload.mock.calls[0]?.[1].idempotencyKey;
+  // Leave /upload without a reload, e.g. through the All jobs breadcrumb, and land on the job library.
+  view.unmount(); (document.activeElement as HTMLElement | null)?.blur();
+  render(<Home basePath="/nested" session={session} />);
+  const notice = screen.getByRole('alert');
+  expect(notice.id).toBe('upload-feedback');
+  expect(notice.textContent).toBe('The job library is at its 10,000-job capacity. Delete jobs you no longer need, then upload again. The saved upload record could not be cleared from this tab. Clear it before uploading another file.');
+  expect(notice.getAttribute('tabindex')).toBe('-1');
+  expect(document.activeElement).toBe(document.body);
+  expect(JSON.parse(sessionStorage.getItem(slot) ?? 'null')).toMatchObject({ key: refusedKey });
+  expect(screen.queryByText(/Upload was not confirmed|An unconfirmed upload is retained|Retry keeps the same job identity|Selected: binary.elf/)).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Retry this upload' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Choose another file' })).toBeNull();
+  expect(screen.queryByRole('link', { name: 'Open the job library' })).toBeNull();
+  const picker = screen.getByLabelText<HTMLInputElement>('Binary file');
+  expect(picker.disabled).toBe(true);
+  select(); fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
+  expect(screen.queryByText(/Selected: binary.elf/)).toBeNull();
+  expect(transport.upload).toHaveBeenCalledOnce();
+  removeItem.mockRestore();
+  const clear = screen.getByRole('button', { name: 'Clear saved upload record' });
+  clear.focus(); fireEvent.click(clear);
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Clear saved upload record' })).toBeNull());
+  expect(sessionStorage.getItem(slot)).toBeNull();
+  expect(document.activeElement).toBe(notice);
+  expect(notice.textContent).toBe('The job library is at its 10,000-job capacity. Delete jobs you no longer need, then upload again.');
+  expect(picker.disabled).toBe(false);
+  select(); fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
+  await waitFor(() => expect(transport.upload).toHaveBeenCalledTimes(2));
+  expect(transport.upload.mock.calls[1]?.[1].idempotencyKey).not.toBe(refusedKey);
 });
 
 it('omits the job library link when the refusal is shown on the job library itself', async () => {

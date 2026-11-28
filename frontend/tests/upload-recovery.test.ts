@@ -1,7 +1,19 @@
 import { beforeEach, expect, it } from 'vitest';
-import { createUploadRecovery } from '../src/jobs/uploadRecovery';
+import { createUploadRecovery, resetRefusedUploads } from '../src/jobs/uploadRecovery';
 
-beforeEach(() => sessionStorage.clear());
+beforeEach(() => { sessionStorage.clear(); resetRefusedUploads(); });
+it('reports a remembered refused ticket to every instance until a clear succeeds', () => {
+  const recovery = createUploadRecovery('/nested', () => sessionStorage, () => 1000);
+  const ticket = recovery.ticket(new File(['x'], 'refused.elf'), 'r'.repeat(32)); recovery.save(ticket);
+  recovery.refuse(ticket.key);
+  expect(createUploadRecovery('/nested/', () => sessionStorage, () => 1001).read()).toEqual({ kind: 'refused' });
+  expect(createUploadRecovery('/elsewhere', () => sessionStorage, () => 1001).read()).toEqual({ kind: 'empty' });
+  expect(() => recovery.save(recovery.ticket(new File(['x'], 'refused.elf'), 'n'.repeat(32)))).toThrow();
+  recovery.clear();
+  expect(recovery.read()).toEqual({ kind: 'empty' });
+  const next = recovery.ticket(new File(['x'], 'refused.elf'), 'n'.repeat(32)); recovery.save(next);
+  expect(recovery.read()).toEqual({ kind: 'pending', ticket: next });
+});
 it('retains one bounded ticket across instances and isolates deployment paths without file bytes', () => {
   const file = new File(['PRIVATE_BINARY_SENTINEL'], 'original.elf');
   const recovery = createUploadRecovery('/nested/', () => sessionStorage, () => 1000);
