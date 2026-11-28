@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import { ApiClientError } from '../src/api/client';
-import type { Bootstrap, RevisionDirectory, RevisionFile, SourceChunk, SourceSearch } from '../src/api/generated';
+import type { Bootstrap, RevisionDirectory, RevisionFile, Run, SourceChunk, SourceSearch } from '../src/api/generated';
 import { App } from '../src/app/App';
 import { sourceCopy } from '../src/copy/sources';
 import { archiveCopy } from '../src/copy/archive';
@@ -541,5 +541,89 @@ it('keeps an ordinary revision comparison failure in place', async () => {
     await new Promise(done => setTimeout(done, 20));
     expect(screen.queryByText(sourceCopy.jobDeleted, { exact: false })).toBeNull();
     expect(screen.getByRole('link', { name: sourceCopy.returnAttempt })).toBeTruthy();
+  } finally { auth.dispose(); }
+});
+
+function comparisonAttempts() {
+  const run = fixture<Run>('run-completed-unaccepted');
+  return [
+    { ...run, jobId, runId: binding.runId, resultRevisionId: binding.revisionId, previousRunId: 'run_base' },
+    { ...run, jobId, runId: 'run_base', resultRevisionId: 'revision_base' },
+  ];
+}
+
+for (const moveFocus of [false, true]) {
+  it(`recovers focus after Compare revisions confirms deletion (focus moved: ${moveFocus})`, async () => {
+    chromeRemovalBlur();
+    const pending = heldRead();
+    const attempts = comparisonAttempts();
+    transport.get.mockImplementation((kind: string) => {
+      if (kind === 'run') return Promise.resolve({ data: attempts[0] });
+      if (kind === 'runs') return Promise.resolve({ data: { jobId, items: attempts, page: { nextCursor: null } } });
+      if (kind === 'sourceDiff') return pending.promise;
+      throw new Error(kind);
+    });
+    const auth = await mount(`${revision}/source-diff`);
+    try {
+      const compare = await screen.findByRole('button', { name: sourceCopy.diffCompare });
+      const signOut = screen.getByRole('button', { name: 'Sign out' });
+      retain(jobId);
+      compare.focus();
+      fireEvent.click(compare);
+      await waitFor(() => expect(reads('sourceDiff')).toBe(1));
+      expect(compare.isConnected).toBe(false);
+      if (moveFocus) signOut.focus();
+      await act(async () => { pending.reject(gone()); await Promise.resolve(); });
+      const notice = await waitFor(expectGone);
+      expect(sessionStorage.getItem(slot)).toBeNull();
+      if (moveFocus) expect(document.activeElement).toBe(signOut);
+      else expect(document.activeElement?.closest('[role="alert"]')).toBe(notice);
+    } finally { auth.dispose(); }
+  });
+}
+
+it('loads the current comparison continuation after a fragment replaces an unfinished page', async () => {
+  const pending = heldRead();
+  const attempts = comparisonAttempts();
+  const cursors: (string | null)[] = [];
+  let previous: AbortSignal | undefined;
+  transport.get.mockImplementation((kind: string, path: string, options: { signal: AbortSignal }) => {
+    if (kind === 'run') return Promise.resolve({ data: attempts[0] });
+    if (kind !== 'runs') throw new Error(kind);
+    const cursor = new URL(path, location.origin).searchParams.get('cursor');
+    cursors.push(cursor);
+    if (cursor === 'old_page') {
+      previous = options.signal;
+      return pending.promise;
+    }
+    if (cursor === 'new_page') {
+      const extra = { ...attempts[1], runId: 'run_older', resultRevisionId: 'revision_older' };
+      return Promise.resolve({ data: { jobId, items: [extra], page: { nextCursor: null } } });
+    }
+    return Promise.resolve({ data: { jobId, items: attempts, page: { nextCursor: previous ? 'new_page' : 'old_page' } } });
+  });
+  const auth = await mount(`${revision}/source-diff`);
+  try {
+    retain(jobId);
+    const saved = sessionStorage.getItem(slot);
+    const name = sourceCopy.diffLoadOlder;
+    fireEvent.click(await screen.findByRole('button', { name }));
+    await waitFor(() => expect(previous).toBeDefined());
+    await act(async () => {
+      history.pushState(null, '', location.pathname + '#source-title');
+      dispatchEvent(new HashChangeEvent('hashchange'));
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(cursors).toEqual([null, 'old_page', null]));
+    expect(previous?.aborted).toBe(true);
+    await act(async () => { pending.reject(gone()); await Promise.resolve(); });
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(sessionStorage.getItem(slot)).toBe(saved);
+    const older = await screen.findByRole<HTMLButtonElement>('button', { name });
+    expect(older.disabled).toBe(false);
+    fireEvent.click(older);
+    await screen.findByRole('option', { name: /run_older/ });
+    expect(cursors).toEqual([null, 'old_page', null, 'new_page']);
+    expect(screen.queryByRole('button', { name })).toBeNull();
   } finally { auth.dispose(); }
 });

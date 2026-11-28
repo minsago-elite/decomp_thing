@@ -5,6 +5,7 @@ import { ApiClientError } from '../api/errors';
 import { apiPath, sourceDirectoryPath, sourceFilePath } from '../app/paths';
 import type { SourceSelection, SourceSnapshotPin } from '../app/paths';
 import { sourceCopy as copy } from '../copy/sources';
+import { holdFocusThroughTransition } from '../shared/departingFocus';
 import { useHeadingHandoff } from '../shared/useHeadingHandoff';
 import { message, textMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
@@ -90,7 +91,11 @@ function BaseChooser({ selected, basePath, onChoose, onDeleted }: { selected: So
   const [older, setOlder] = useState<SourceReadState<Attempts> | null>(null);
   const [choice, setChoice] = useState('');
   const stopOlder = useRef<(() => void) | null>(null);
-  useEffect(() => () => { stopOlder.current?.(); stopOlder.current = null; }, [onDeleted]);
+  // Loading and errors from an older page belong to the first-page read that supplied its cursor.
+  useEffect(() => {
+    setOlder(null);
+    return () => { stopOlder.current?.(); stopOlder.current = null; };
+  }, [client, key, onDeleted]);
   useEffect(() => beginSourceRead(key, async signal => {
     const head = (await client.get('run', `/jobs/${selected.jobId}/runs/${selected.runId}`, { signal })).data;
     const page = (await client.get('runs', jobRunsRoute(selected.jobId), { signal })).data;
@@ -135,7 +140,11 @@ function BaseChooser({ selected, basePath, onChoose, onDeleted }: { selected: So
     {value && (options.length === 0 ? <p>{copy.diffNoOtherRevision}</p> : <form class="source-search-form" onSubmit={event => {
       event.preventDefault();
       const [runId, revisionId] = selectedValue.split('/');
-      if (runId && revisionId && shown.has(selectedValue)) { onChoose(); location.route(sourceDiffPath(basePath, selected, { runId, revisionId })); }
+      if (!runId || !revisionId || !shown.has(selectedValue)) return;
+      const focused = document.activeElement;
+      if (event.currentTarget.contains(focused)) holdFocusThroughTransition(focused);
+      onChoose();
+      location.route(sourceDiffPath(basePath, selected, { runId, revisionId }));
     }}>
       <label>{copy.diffBaseChoice}
         <select value={selectedValue} onChange={event => setChoice((event.target as HTMLSelectElement).value)}>
