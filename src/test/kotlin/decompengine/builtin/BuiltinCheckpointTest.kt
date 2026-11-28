@@ -271,21 +271,21 @@ class BuiltinCheckpointTest {
         val fixture = fixture("contender")
         val reference = suspended(fixture)
         val commitment = BuiltinCheckpointStore(fixture.checkpoint, fixture.journal, request()).read(reference)
-        assertEquals("FREE", BuiltinJournalLockProbe.observe(fixture.journal.path))
+        assertEquals("FREE", BuiltinJournalLockProbe.observe(fixture.journal.path, directory))
         // The first resume holds append authority while it is still validating the stage, before RESUME.
         val (first, _) = BuiltinJournal.reopenCheckpoint(fixture.journal, request(), commitment, emptyList())
         first.use {
-            assertEquals("LOCKED", BuiltinJournalLockProbe.observe(fixture.journal.path))
+            assertEquals("LOCKED", BuiltinJournalLockProbe.observe(fixture.journal.path, directory))
             var calls = 0
             val rejected = harness(fixture, ModelProvider { _, _ -> calls++; answer() }).resumeReceipt(request(), reference, acceptedRevision) {}
             assertIs<AgentExecutionOutcome.Failed>(rejected.outcome); assertEquals(0, calls)
             assertFailsWith<BuiltinJournalException> {
                 BuiltinJournal.inspect(fixture.journal, AgentExecutionRequestBinding.capture(request()), commitment)
             }
-            assertEquals("LOCKED", BuiltinJournalLockProbe.observe(fixture.journal.path),
+            assertEquals("LOCKED", BuiltinJournalLockProbe.observe(fixture.journal.path, directory),
                 "a refused same-JVM contender must not release the first holder's operating-system lock")
         }
-        assertEquals("FREE", BuiltinJournalLockProbe.observe(fixture.journal.path))
+        assertEquals("FREE", BuiltinJournalLockProbe.observe(fixture.journal.path, directory))
         val resumed = harness(fixture, ModelProvider { _, _ -> answer() }).resumeReceipt(request(), reference, acceptedRevision) {}
         assertEquals(BuiltinStop.VALIDATION_REQUIRED, assertIs<BuiltinLoopEvidence>(resumed.providerEvidence).stop)
     }
@@ -322,7 +322,48 @@ class BuiltinCheckpointTest {
         }
     }
 
-    private inner class Session(val source: Path, val description: String = "edit fixture") : BuiltinToolSession {
+    @Test fun `error paths release the journal lease so the same path can resume`() {
+        fun latestCheckpoint(fixture: Fixture): BuiltinCheckpointReference {
+            val marker = Files.list(fixture.checkpoint.directory).use { paths -> paths.toList().maxBy { it.fileName.toString().split('-')[1].toInt() } }
+            val parts = marker.fileName.toString().removeSuffix(".json").split('-')
+            return BuiltinCheckpointReference(parts[1].toInt(), parts[2])
+        }
+        fun assertReleased(fixture: Fixture, path: String) {
+            assertTrue(runCatching { BuiltinJournalLeases.acquire(fixture.journal.path).close() }.isSuccess, "journal lease leaked: $path")
+            assertEquals("FREE", BuiltinJournalLockProbe.observe(fixture.journal.path, directory), "journal lock leaked: $path")
+        }
+
+        // Tool-session teardown throws an Error after checkpoint publication and before the journal closes.
+        val teardown = fixture("teardown-error")
+        val failing = Session(teardown.source, closeFailure = AssertionError("session teardown failed"))
+        assertFailsWith<AssertionError> {
+            harness(teardown, ModelProvider { _, _ -> answer(listOf(edit())) }, failing).executeReceipt(request()) {}
+        }
+        assertTrue(failing.closed)
+        assertReleased(teardown, "session teardown")
+        val resumed = harness(teardown, ModelProvider { _, _ -> answer() }).resumeReceipt(request(), latestCheckpoint(teardown), acceptedRevision) {}
+        assertEquals(BuiltinStop.VALIDATION_REQUIRED, assertIs<BuiltinLoopEvidence>(resumed.providerEvidence).stop)
+
+        // Both factories throw an Error after taking the lease and the channel lock, before ownership transfers.
+        val poisoned = object : AbstractList<String>() {
+            override val size = 1
+            override fun get(index: Int): String = throw AssertionError("secret source failed")
+        }
+        val reopen = fixture("reopen-error")
+        val reference = suspended(reopen)
+        val commitment = BuiltinCheckpointStore(reopen.checkpoint, reopen.journal, request()).read(reference)
+        assertFailsWith<AssertionError> { BuiltinJournal.reopenCheckpoint(reopen.journal, request(), commitment, poisoned) }
+        assertReleased(reopen, "reopenCheckpoint")
+        val reopened = harness(reopen, ModelProvider { _, _ -> answer() }).resumeReceipt(request(), reference, acceptedRevision) {}
+        assertEquals(BuiltinStop.VALIDATION_REQUIRED, assertIs<BuiltinLoopEvidence>(reopened.providerEvidence).stop)
+
+        val open = fixture("open-error")
+        assertFailsWith<AssertionError> { BuiltinJournal.open(open.journal, request(), poisoned) }
+        assertReleased(open, "open")
+    }
+
+    private inner class Session(val source: Path, val description: String = "edit fixture",
+        val closeFailure: Throwable? = null) : BuiltinToolSession {
         var executions = 0
         var closed = false
         override val definitions = listOf(ModelToolDefinition("edit", description, buildJsonObject {
@@ -340,6 +381,6 @@ class BuiltinCheckpointTest {
             control.checkpoint(); return BuiltinWorkspaceSnapshot.capture(mapOf(sourcePath to Files.readAllBytes(source)))
         }
         override fun changes(control: BuiltinExecutionControl) = emptyList<AgentFileChange>()
-        override fun close() { closed = true }
+        override fun close() { closed = true; closeFailure?.let { throw it } }
     }
 }

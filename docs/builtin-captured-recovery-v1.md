@@ -12,19 +12,20 @@ baseline. This distinction preserves exact before/after hashes and lets a later 
 an earlier patch instead of treating that patch as accepted source.
 
 The tool session hashes a detached snapshot of the actual captured filesystem while callbacks are
-open. Checkpoint state schema 3 binds the repair resource budget and the bounded sink's effective
-replacement allowlist. Changing either prevents restoration/provider execution even if the
-request's path rules and model-visible tool schemas remain unchanged. Schema 3 also binds the
-provider and model identity exposed by the actual provider instance, the logical stage digest and
-the accepted-revision digest.
+open. As schema 2 did, checkpoint state schema 3 binds the repair resource budget and the bounded
+sink's effective replacement allowlist. Changing either prevents restoration/provider execution
+even if the request's path rules and model-visible tool schemas remain unchanged. Schema 3 also
+binds the provider and model identity exposed by the actual provider instance, the logical stage
+digest and the accepted-revision digest.
 
 A resuming `BuiltinCapturedRepairHarness` requires the `expectedAcceptedRevisionSha256` argument,
 supplied independently of the journal configuration. It must be a lowercase SHA-256 digest that
 matches both the trusted journal identity and the checkpoint; a missing or different value stops
 before checkpoint access, restoration or provider execution. This is a continuation precondition,
 not proof that a workflow accepted or published that revision. Schema-1 and schema-2 states are
-rejected rather than migrated, even when their journal and commitment are valid: they lack the
-authority, provider-identity and accepted-revision bindings.
+rejected rather than migrated, even when their journal and commitment are valid. Schema 2 already
+bound the repair tool authority; schema 1 lacked that binding. Neither binds the provider
+identity, logical stage or accepted revision.
 
 During resume, the loop first verifies the journal, state, request and tool authority as described
 in the [checkpoint contract](builtin-checkpoint-v1.md). The adapter then:

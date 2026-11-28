@@ -16,7 +16,7 @@ EXPECTED = {
     "decompengine.builtin.BuiltinCapturedContextToolsTest": 11,
     "decompengine.builtin.BuiltinContextPackageTest": 8,
     "decompengine.builtin.BuiltinJournalTest": 11,
-    "decompengine.builtin.BuiltinCheckpointTest": 13,
+    "decompengine.builtin.BuiltinCheckpointTest": 14,
     "decompengine.builtin.BuiltinDeterminismTest": 4,
     "decompengine.builtin.BuiltinCapturedResumeTest": 8,
     "decompengine.builtin.BuiltinSourceStoreTest": 9,

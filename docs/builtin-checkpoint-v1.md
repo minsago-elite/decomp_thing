@@ -42,7 +42,10 @@ On explicit `resumeReceipt`, the loop:
    An active writer or intervening append is rejected; no source/model work is replayed. A
    JVM-wide lease per journal path is taken before any channel on the journal opens. A same-JVM
    contender is refused without opening one, because closing its channel would also drop the
-   holder's process-owned POSIX lock.
+   holder's process-owned POSIX lock. Every exit path, including an `Error` from tool-session
+   teardown, closes the journal and releases its lease. The lease is keyed by path: workflow
+   maintenance must keep the journal file and its parent at a fixed path until every holder closes.
+   Live relocation is unsupported; binding the lease to the opened file's identity is future work.
 3. Validates the checkpoint state digest, schema, limit fingerprint, correlated history and counters.
    Both remaining duration and absolute expiry constrain the original deadline, including downtime.
 4. Opens the workflow-supplied stage and compares its actual source hash and registered tools with

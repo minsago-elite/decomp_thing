@@ -1,6 +1,7 @@
 package decompengine.builtin
 
 import java.nio.channels.FileChannel
+import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption.READ
@@ -21,16 +22,32 @@ object BuiltinJournalLockProbe {
         }
     }
 
-    /** Returns LOCKED or FREE as observed by a fresh JVM. */
-    fun observe(path: Path): String {
+    /**
+     * Returns LOCKED or FREE as observed by a fresh JVM. Output goes to a file under [scratch] so waiting never depends
+     * on stream EOF. The wait has a deadline, and a surviving child is forcibly terminated and reaped.
+     */
+    fun observe(path: Path, scratch: Path): String {
         val classPath = listOf(BuiltinJournalLockProbe::class.java, KotlinVersion::class.java).joinToString(java.io.File.pathSeparator) {
             Path.of(requireNotNull(it.protectionDomain.codeSource).location.toURI()).toString()
         }
+        val output = Files.createTempFile(scratch, "journal-lock-probe-", ".out")
         val process = ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-            "-cp", classPath, BuiltinJournalLockProbe::class.java.name, path.toString()).redirectErrorStream(true).start()
-        val output = process.inputStream.readAllBytes().toString(Charsets.UTF_8)
-        check(process.waitFor(120, TimeUnit.SECONDS)) { "lock probe timed out" }
-        check(process.exitValue() == 0) { "lock probe failed: $output" }
-        return output
+            "-cp", classPath, BuiltinJournalLockProbe::class.java.name, path.toString())
+            .redirectErrorStream(true).redirectOutput(output.toFile()).redirectInput(ProcessBuilder.Redirect.from(java.io.File("/dev/null")))
+            .start()
+        try {
+            check(process.waitFor(PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS)) { "lock probe timed out" }
+            val text = Files.readString(output)
+            check(process.exitValue() == 0) { "lock probe failed: $text" }
+            return text
+        } finally {
+            if (process.isAlive) {
+                process.destroyForcibly()
+                check(process.waitFor(REAP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) { "lock probe survived forced termination" }
+            }
+        }
     }
+
+    private const val PROBE_TIMEOUT_SECONDS = 120L
+    private const val REAP_TIMEOUT_SECONDS = 30L
 }
