@@ -187,7 +187,7 @@ class WebLegacyMigrationTest {
 
     private class Server(val server: UploadServer, val executions: AtomicInteger) : AutoCloseable {
         val origin get() = "http://127.0.0.1:${server.serverPort}"
-        override fun close() = server.stop()
+        override fun close() { server.stop() }
     }
 
     private fun start(mode: WebUiMode, data: Path = root): Server {

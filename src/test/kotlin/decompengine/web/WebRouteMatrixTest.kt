@@ -429,6 +429,7 @@ class WebRouteMatrixTest {
             JobReconstructor { _, _ -> error("reconstruction must remain inert") }, uiMode = WebUiMode.SPA, basePath = "/w/",
             sensitiveValues = emptyList(), authenticationInspector = { error("inert fixture: no agent is launched") })
         upload.start()
+        listening = upload
         try {
             val server = Server(upload)
             val session = signIn(server)
@@ -437,7 +438,12 @@ class WebRouteMatrixTest {
                 .getValue("sourceArtifact").jsonObject.getValue("contentHref").jsonPrimitive.content
             val artifactId = href.substringAfter("/artifacts/").substringBefore('/')
             block(server, Fixture(job.id, runId, artifactId))
-        } finally { upload.stop() }
+        } finally {
+            // stop() waits for post-response audit appends; confirm the store is released before cleanup deletes it.
+            upload.stop()
+            assertTrue(upload.awaitStoreRelease(30_000), "the stopped server still owns its store")
+            listening = null
+        }
     }
 
     private fun signIn(server: Server): Session {
@@ -502,7 +508,13 @@ class WebRouteMatrixTest {
     private fun HttpResponse<ByteArray>.header(name: String): String? = headers().firstValue(name).orElse(null)
     private fun HttpResponse<ByteArray>.text(): String = body().decodeToString()
 
-    private fun storageDigest(): Map<String, String> = Files.walk(root).use { paths ->
+    // The listener under test; snapshots quiesce its post-response audit appends.
+    private var listening: UploadServer? = null
+
+    // Audit appends follow their responses; never snapshot one mid-write (its loss marker is briefly "1").
+    private fun storageDigest(): Map<String, String> = listening?.withAuditAppendsQuiesced(::walkStorageDigest) ?: walkStorageDigest()
+
+    private fun walkStorageDigest(): Map<String, String> = Files.walk(root).use { paths ->
         paths.filter(Files::isRegularFile).toList().associate { file ->
             val relative = root.relativize(file).toString()
             // The append-only audit segment is kept as text so probes can be checked to only append to it.

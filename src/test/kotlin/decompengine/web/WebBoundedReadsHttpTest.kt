@@ -47,11 +47,24 @@ class WebBoundedReadsHttpTest {
 
     @AfterTest fun cleanup() { root.toFile().deleteRecursively() }
 
+    // The listener under test; snapshots quiesce its post-response audit appends.
+    private var live: UploadServer? = null
+
     private fun server() = UploadServer("127.0.0.1", 0, root, JobAnalyzer { _, _ -> error("analysis must remain inert") },
         JobReconstructor { _, _ -> error("reconstruction must remain inert") }, uiMode = WebUiMode.SPA, basePath = "/w/",
-        sensitiveValues = emptyList()).also { it.start() }
+        sensitiveValues = emptyList()).also { it.start(); live = it }
 
-    private fun digest(): Map<String, String> = Files.walk(root).use { paths ->
+    /** Stop, then confirm the store is released before cleanup deletes it, even if an audit append outlived stop. */
+    private fun stop(server: UploadServer) {
+        server.stop()
+        assertTrue(server.awaitStoreRelease(30_000), "the stopped server still owns its store")
+        live = null
+    }
+
+    // Audit appends follow their responses; never snapshot one mid-write (its loss marker is briefly "1").
+    private fun digest(): Map<String, String> = live?.withAuditAppendsQuiesced(::walkDigest) ?: walkDigest()
+
+    private fun walkDigest(): Map<String, String> = Files.walk(root).use { paths ->
         paths.filter { Files.isRegularFile(it) && it.fileName.toString() != ".web-owner.lock" }.toList().associate { file ->
             val relative = root.relativize(file).toString()
             // The append-only audit segment is retained as text so restoration can check it is a prefix.
@@ -168,7 +181,7 @@ class WebBoundedReadsHttpTest {
                 awaitHandlers(server)
                 assertStorageRestored(names, before)
             }
-        } finally { server.stop() }
+        } finally { stop(server) }
     }
 
     @Test
@@ -243,7 +256,7 @@ class WebBoundedReadsHttpTest {
             uploadPeers.forEach { runCatching { it.socket.close() } }
             statusExecutor.shutdownNow()
             assertTrue(statusExecutor.awaitTermination(5, TimeUnit.SECONDS))
-            server.stop()
+            stop(server)
         }
     }
 
@@ -394,7 +407,7 @@ class WebBoundedReadsHttpTest {
                     assertEquals("INVALID_CURSOR", foreign.errorCode())
                 }
             }
-        } finally { server.stop() }
+        } finally { stop(server) }
     }
 
     @Test
@@ -551,7 +564,7 @@ class WebBoundedReadsHttpTest {
                 assertEquals(beforeNames, entries(), "read requests create no storage entries")
                 assertEquals(beforeBytes, digest(), "read requests do not mutate persisted upload or source artifacts")
             }
-        } finally { server.stop() }
+        } finally { stop(server) }
     }
 
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes)
