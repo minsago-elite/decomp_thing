@@ -2111,7 +2111,21 @@ class WebJobService(
             if (!stillOwned() || capture == null || capture.sha256 != recovery.checkpointSha256 || capture.restores != recovery.restores) {
                 return refused
             }
-            return continuation.continueFrom(context, capture)
+            // Cancellation may land between that check and the adapter's first side effect; the fence repeats
+            // it under the service monitor, atomically with the launch, so a cancelled successor starts nothing.
+            var launchRefused = false
+            val fence = object : DurableWebWorkflowContinuationFence {
+                override fun <T> launch(start: () -> T): T = synchronized(this@WebJobService) {
+                    if (!stillOwned()) {
+                        launchRefused = true
+                        throw ContinuationLaunchRefused()
+                    }
+                    start()
+                }
+            }
+            val outcome = try { continuation.continueFrom(context, capture, fence) }
+            catch (failure: ContinuationLaunchRefused) { return refused }
+            return if (launchRefused) refused else outcome
         }
 
         override fun stopPending() = finish(interrupted())
@@ -2142,6 +2156,8 @@ class WebJobService(
             WorkflowTransition.Finish(WorkflowRunState.CANCELLED, WorkflowTerminalReason.CANCELLED)
         else WorkflowTransition.Finish(WorkflowRunState.INTERRUPTED, WorkflowTerminalReason.PROCESS_INTERRUPTED)
     }
+
+    private class ContinuationLaunchRefused : IllegalStateException("The admitted continuation changed before launch")
 
     private fun legacyStatus(state: WorkflowRunState): String = when (state) {
         WorkflowRunState.QUEUED -> "queued"

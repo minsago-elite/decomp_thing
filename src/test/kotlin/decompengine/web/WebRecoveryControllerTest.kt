@@ -34,6 +34,7 @@ class WebRecoveryControllerTest {
         val checkpoints: DurableWebWorkflowCheckpointPolicy? = null,
         val captureBytes: (DurableWebWorkflowCheckpointRequest) -> ByteArray = { CONTINUATION_BYTES },
         val afterCapture: (DurableWebWorkflowCheckpointRequest) -> Unit = {},
+        val beforeLaunch: () -> Unit = {},
         seed: ((WorkflowAttemptStore, String) -> Unit)? = null,
         private val deleteRoot: Boolean = true,
     ) : AutoCloseable {
@@ -73,9 +74,13 @@ class WebRecoveryControllerTest {
                             afterCapture(request)
                             return captured
                         }
-                        override fun continueFrom(context: DurableWebWorkflowContext, checkpoint: VerifiedWebCheckpoint): DurableWebWorkflowOutcome {
-                            contexts += context
-                            restored += checkpoint.bytes()
+                        override fun continueFrom(context: DurableWebWorkflowContext, checkpoint: VerifiedWebCheckpoint,
+                            fence: DurableWebWorkflowContinuationFence): DurableWebWorkflowOutcome {
+                            beforeLaunch()
+                            fence.launch {
+                                contexts += context
+                                restored += checkpoint.bytes()
+                            }
                             return outcomes.poll() ?: DurableWebWorkflowOutcome.Failed()
                         }
                     }
@@ -382,6 +387,52 @@ class WebRecoveryControllerTest {
         lateinit var fixture: Fixture
         Fixture(checkpoints = { DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE) },
             afterCapture = {
+                val running = fixture.snapshot().latestRun!!
+                fixture.fault = WorkflowStoreFaultPoint.AFTER_RENAME
+                val failure = assertFailsWith<WebJobServiceException> {
+                    fixture.service.cancelDurable(fixture.job.id, running.runId, running.version)
+                }
+                assertEquals("RECOVERY_REQUIRED", failure.code)
+                fixture.fault = null
+            }).use { f ->
+            fixture = f
+            val predecessor = f.start()
+            f.deferred = true
+            run(f.recover(predecessor, mode = "resume"))
+            val failure = assertFailsWith<WebJobServiceException> { f.pending.remove().run() }
+            assertEquals("RECOVERY_REQUIRED", failure.code)
+            assertTrue(f.restored.isEmpty())
+            assertEquals(1, f.contexts.size)
+        }
+    }
+
+    @Test
+    fun `cancellation after the last ownership check refuses the continuation launch`() {
+        lateinit var fixture: Fixture
+        Fixture(checkpoints = { DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE) },
+            beforeLaunch = {
+                val running = fixture.snapshot().latestRun!!
+                fixture.service.cancelDurable(fixture.job.id, running.runId, running.version)
+            }).use { f ->
+            fixture = f
+            val predecessor = f.start()
+            f.deferred = true
+            val successor = run(f.recover(predecessor, mode = "resume")).getValue("runId").jsonPrimitive.content
+            f.outcomes += DurableWebWorkflowOutcome.Completed()
+            try { f.pending.remove().run() } finally { Thread.interrupted() }
+            assertEquals(WorkflowRunState.CANCELLED, f.attempt(successor).state)
+            assertEquals(WorkflowTerminalReason.CANCELLED, f.attempt(successor).terminalReason)
+            assertNull(f.attempt(successor).candidate)
+            assertTrue(f.restored.isEmpty())
+            assertEquals(1, f.contexts.size)
+        }
+    }
+
+    @Test
+    fun `uncertain cancellation publication after the last ownership check refuses the continuation launch`() {
+        lateinit var fixture: Fixture
+        Fixture(checkpoints = { DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE) },
+            beforeLaunch = {
                 val running = fixture.snapshot().latestRun!!
                 fixture.fault = WorkflowStoreFaultPoint.AFTER_RENAME
                 val failure = assertFailsWith<WebJobServiceException> {
