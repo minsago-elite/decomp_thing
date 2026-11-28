@@ -1,7 +1,19 @@
 import { beforeEach, expect, it } from 'vitest';
-import { createUploadRecovery } from '../src/jobs/uploadRecovery';
+import { createUploadRecovery, resetRefusedUploads } from '../src/jobs/uploadRecovery';
 
-beforeEach(() => sessionStorage.clear());
+beforeEach(() => { sessionStorage.clear(); resetRefusedUploads(); });
+it('reports a remembered refused ticket to every instance until a clear succeeds', () => {
+  const recovery = createUploadRecovery('/nested', () => sessionStorage, () => 1000);
+  const ticket = recovery.ticket(new File(['x'], 'refused.elf'), 'r'.repeat(32)); recovery.save(ticket);
+  recovery.refuse(ticket.key);
+  expect(createUploadRecovery('/nested/', () => sessionStorage, () => 1001).read()).toEqual({ kind: 'refused' });
+  expect(createUploadRecovery('/elsewhere', () => sessionStorage, () => 1001).read()).toEqual({ kind: 'empty' });
+  expect(() => recovery.save(recovery.ticket(new File(['x'], 'refused.elf'), 'n'.repeat(32)))).toThrow();
+  recovery.clear();
+  expect(recovery.read()).toEqual({ kind: 'empty' });
+  const next = recovery.ticket(new File(['x'], 'refused.elf'), 'n'.repeat(32)); recovery.save(next);
+  expect(recovery.read()).toEqual({ kind: 'pending', ticket: next });
+});
 it('retains one bounded ticket across instances and isolates deployment paths without file bytes', () => {
   const file = new File(['PRIVATE_BINARY_SENTINEL'], 'original.elf');
   const recovery = createUploadRecovery('/nested/', () => sessionStorage, () => 1000);
@@ -12,6 +24,24 @@ it('retains one bounded ticket across instances and isolates deployment paths wi
   expect(sessionStorage.getItem(sessionStorage.key(0)!)).not.toContain('PRIVATE_BINARY_SENTINEL');
   expect(() => recovery.save({ ...ticket, key: 'other'.repeat(8) })).toThrow();
   recovery.clear(); expect(recovery.read()).toEqual({ kind: 'empty' });
+});
+it('keeps a remembered refusal through unreadable storage and ticket expiry, and forgets it only once readable storage lacks the ticket', () => {
+  let readable = true;
+  const storage = () => readable ? sessionStorage : { getItem: () => { throw new Error('unavailable'); } } as unknown as Storage;
+  let clock = 1000;
+  const recovery = createUploadRecovery('/nested', storage, () => clock);
+  const ticket = recovery.ticket(new File(['x'], 'refused.elf'), 'r'.repeat(32)); recovery.save(ticket);
+  readable = false;
+  expect(createUploadRecovery('/nested', storage, () => clock).read()).toEqual({ kind: 'blocked', reason: 'unavailable' });
+  recovery.refuse(ticket.key);
+  expect(createUploadRecovery('/nested', storage, () => clock).read()).toEqual({ kind: 'refused' });
+  readable = true; clock = 1000 + 24 * 60 * 60 * 1000;
+  expect(createUploadRecovery('/nested', storage, () => clock).read()).toEqual({ kind: 'refused' });
+  expect(createUploadRecovery('/nested', storage, () => clock).read()).toEqual({ kind: 'refused' });
+  sessionStorage.setItem('decomp.upload.v1:/nested', JSON.stringify({ ...ticket, key: 'o'.repeat(32), createdAt: clock }));
+  expect(recovery.read()).toMatchObject({ kind: 'pending', ticket: { key: 'o'.repeat(32) } });
+  sessionStorage.setItem('decomp.upload.v1:/nested', JSON.stringify(ticket));
+  expect(recovery.read()).toEqual({ kind: 'blocked', reason: 'expired' });
 });
 it('blocks malformed, oversized, future and expired records without silently minting another intent', () => {
   const recovery = createUploadRecovery('', () => sessionStorage, () => 86400001);
