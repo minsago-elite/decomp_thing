@@ -123,6 +123,37 @@ class ChildJvmTest {
         assertEquals(listOf(JdkLaunchScan.Kind.NON_JDK_LITERAL), kinds("val p = Runtime.getRuntime().exec(\"printf java\")"))
         assertEquals(listOf(JdkLaunchScan.Kind.CHILD_JVM), kinds(
             "val p = ProcessBuilder(\"prlimit\", \"--nofile=64:64\", \"--\", *ChildJvm.command().toTypedArray(), \"-cp\", cp)"))
+        // Wrappers: only the wrapped executable position counts.
+        assertEquals(listOf(direct), kinds("val p = ProcessBuilder(\"env\", \"java\", \"-version\", ChildJvm.command().toString())"))
+        assertEquals(listOf(JdkLaunchScan.Kind.NON_JDK_LITERAL), kinds("val p = ProcessBuilder(\"env\", \"printf\", \"%s\", \"java\")"))
+        assertEquals(listOf(direct), kinds("val p = ProcessBuilder(\"env\", \"-i\", \"A=1\", \"-u\", \"B\", \"--\", \"java\", \"-version\")"))
+        assertEquals(listOf(direct), kinds("val p = ProcessBuilder(\"timeout\", \"-k\", \"1\", \"5s\", \"java\", \"-version\")"))
+        assertEquals(listOf(JdkLaunchScan.Kind.NON_JDK_LITERAL), kinds("val p = ProcessBuilder(\"timeout\", \"5s\", \"printf\", \"java\")"))
+        assertEquals(listOf(direct), kinds("val p = ProcessBuilder(\"unshare\", \"--propagation\", \"private\", \"-m\", \"java\")"))
+        assertEquals(listOf(direct), kinds("val p = ProcessBuilder(\"setsid\", \"-w\", \"java\", \"-version\")"))
+        // An unmodelled wrapper or wrapper form is opaque, not trusted.
+        assertEquals(listOf(JdkLaunchScan.Kind.NON_JDK), kinds("val p = ProcessBuilder(\"nice\", \"-n\", \"5\", \"printf\", \"x\")"))
+        assertEquals(listOf(JdkLaunchScan.Kind.OPAQUE_IN_JDK_FILE), kinds(
+            "val p = ProcessBuilder(\"env\", \"-S\", \"printf x\")\nval home = System.getProperty(\"java.home\")"))
+        assertEquals(listOf(JdkLaunchScan.Kind.OPAQUE_IN_JDK_FILE), kinds(
+            "val p = ProcessBuilder(\"prlimit\", \"-n64\", \"printf\")\nval home = System.getProperty(\"java.home\")"))
+        // An identifier declared more than once, or shadowed by a parameter, is never resolved.
+        assertEquals(listOf(JdkLaunchScan.Kind.OPAQUE_IN_JDK_FILE), kinds(
+            "val tool = \"java\"\nfun run() {\n    val tool = \"true\"\n    ProcessBuilder(tool).start()\n}"))
+        assertEquals(listOf(JdkLaunchScan.Kind.OPAQUE_IN_JDK_FILE), kinds(
+            "val tool = \"true\"\nfun run(tool: String) = ProcessBuilder(tool)\nval home = System.getProperty(\"java.home\")"))
+        // exec(String) keeps scalar semantics through an alias and splits on StringTokenizer whitespace.
+        assertEquals(listOf(direct), kinds("val cmd = \"java -version\"\nval p = Runtime.getRuntime().exec(cmd)"))
+        assertEquals(listOf(direct), kinds("val p = Runtime.getRuntime().exec(\"\"\"java\n-version\"\"\")"))
+        assertEquals(listOf(direct), kinds("val p = Runtime.getRuntime().exec(\"\"\"java\t-version\"\"\")"))
+        assertEquals(listOf(JdkLaunchScan.Kind.OPAQUE_IN_JDK_FILE), kinds(
+            "val p = Runtime.getRuntime().exec(\"\${'$'}tool -version\")\nval home = System.getProperty(\"java.home\")"))
+        // The lexically enclosing function owns a launch, even after a local function declared above it.
+        val owned = JdkLaunchScan.scan("fun outer() {\n    fun helper() = 1\n    fun other() {\n        helper()\n    }\n" +
+            "    ProcessBuilder(listOf(\"a\", \"b\", \"c\", \"d\", \"e\", \"f\", \"g\", \"h\", \"i\", \"j\", \"k\", \"l\", \"m\")).start()\n}").sites.single()
+        assertEquals("outer", owned.function)
+        // The full executable expression is kept in the key.
+        assertEquals("listOf(\"a\",\"b\",\"c\",\"d\",\"e\",\"f\",\"g\",\"h\",\"i\",\"j\",\"k\",\"l\",\"m\")", owned.executable)
         // Anchors name the enclosing function and the executable, not the line.
         val anchored = JdkLaunchScan.scan("fun `launches a probe`() {\n  val p = ProcessBuilder(command)\n}\n" +
             "val home = System.getProperty(\"java.home\")").sites.single()
@@ -145,35 +176,35 @@ class ChildJvmTest {
     @Test
     fun `every test-launched JDK child takes its command from ChildJvm unless reviewed`() {
         val reviewed: Map<String, Pair<Int, String>> = mapOf(
-            "InstalledReconstructionCliTest.kt :: `installed CLI validates profile selection before creating reconstruction output` :: launcher.toString()" to (1 to START_SCRIPT),
-            "oracle/gcc/GccInstalledCliInvocation.kt :: invokeInstalledGccCli :: selectedCommand" to (1 to START_SCRIPT),
+            "InstalledReconstructionCliTest.kt :: `installed CLI validates profile selection before creating reconstruction output` :: listOf(launcher.toString(),\"reconstruct\") + case.first" to (1 to START_SCRIPT),
             "acp/LinuxBubblewrapBoundaryTest.kt :: `private controls reject native bind aliases and late callback exposure without denying disjoint grants` :: \"unshare\"" to (1 to PRIVATE_ROOT),
             "acp/LinuxBubblewrapBoundaryTest.kt :: `private controls reject native bind aliases and late callback exposure without denying disjoint grants` :: java.toString()" to (1 to PRIVATE_ROOT),
-            "acp/LinuxBubblewrapBoundaryTest.kt :: `unproved partial control creation poisons all later authority admission without descriptor leaks` :: Path.of(System.getProperty(\"java.home\"),\"bin\",\"java\").toStri…" to (1 to PRIVATE_ROOT),
-            "acp/LinuxBubblewrapBoundaryTest.kt :: command :: argv" to (1 to NON_JDK),
-            "acp/LinuxBubblewrapBoundaryTest.kt :: runDirectGate :: GATE_HELPER.toString()" to (1 to NON_JDK),
+            "acp/LinuxBubblewrapBoundaryTest.kt :: `unproved partial control creation poisons all later authority admission without descriptor leaks` :: Path.of(System.getProperty(\"java.home\"),\"bin\",\"java\").toString()" to (1 to PRIVATE_ROOT),
+            "acp/LinuxBubblewrapBoundaryTest.kt :: command :: *argv" to (1 to NON_JDK),
+            "acp/LinuxBubblewrapBoundaryTest.kt :: runDirectGate :: listOf( GATE_HELPER.toString(), stdinDispositionArgument, environmentPath.toString(), target.toString(), ) + targetArguments" to (1 to NON_JDK),
             "analysis/BoundedProgramModelAcquisitionProcessTest.kt :: main :: workerCommand(root,\"fifo\")" to (1 to PRIVATE_ROOT),
             "analysis/BoundedProgramModelAcquisitionProcessTest.kt :: start :: command" to (1 to PRIVATE_ROOT),
             "analysis/BundledGhidraTest.kt :: `installed native collector source and complete compiled closure match the production reference` :: command" to (1 to PRIVATE_ROOT),
             "analysis/BundledGhidraTest.kt :: `installed worker initializes outside the application directory without an external installation` :: bundle.probeCommand()" to (1 to PRODUCTION),
             "analysis/BundledGhidraTest.kt :: `installed worker requires the exact parent permit before Ghidra initialization` :: command" to (1 to PRIVATE_ROOT),
-            "analysis/BundledGhidraTest.kt :: `passive JVM sampler bounds transport and preserves blocked or failed worker outcomes` :: Path.of(System.getProperty(\"java.home\"),\"bin\",\"java\").toStri…" to (1 to PRIVATE_ROOT),
+            "analysis/BundledGhidraTest.kt :: `passive JVM sampler bounds transport and preserves blocked or failed worker outcomes` :: Path.of(System.getProperty(\"java.home\"),\"bin\",\"java\").toString()" to (1 to PRIVATE_ROOT),
             "oracle/behavior/LlvmBehaviorHostedWorkerImageLiveIntegrationTest.kt :: execute :: command" to (1 to NON_JDK),
             "oracle/behavior/LlvmBehaviorNativeHelperBuildV2Test.kt :: `compiler child environment clears inherited include and tool redirection` :: command" to (1 to PRIVATE_ROOT),
             "oracle/behavior/LlvmBehaviorNativeHelperDeploymentReferenceV1Test.kt :: probe :: command" to (1 to PRIVATE_ROOT),
             "oracle/behavior/LlvmBehaviorNativeRuntimeMeasurementV2Test.kt :: run :: command" to (1 to PRIVATE_ROOT),
             "oracle/behavior/LlvmBehaviorNativeRuntimeMeasurementV2Test.kt :: runChild :: command" to (1 to PRIVATE_ROOT),
-            "oracle/externalcalls/IndependentExternalCallWorkerV1Test.kt :: freshWorker :: Path.of(System.getProperty(\"java.home\"),\"bin/java\").toString…" to (1 to PRIVATE_ROOT),
-            "oracle/fulltree/FullTreeFunctionObservationIsolatedRunnerTest.kt :: `fresh JNA bootstrap stays inside exact temporary directory without creating home caches` :: javaExecutable.toString()" to (1 to PRIVATE_ROOT),
+            "oracle/externalcalls/IndependentExternalCallWorkerV1Test.kt :: freshWorker :: Path.of(System.getProperty(\"java.home\"),\"bin/java\").toString()" to (1 to PRIVATE_ROOT),
+            "oracle/fulltree/FullTreeFunctionObservationIsolatedRunnerTest.kt :: `fresh JNA bootstrap stays inside exact temporary directory without creating home caches` :: listOf(javaExecutable.toString(), ChildJvm.NO_PERF_DATA,\"-Duser.home=\$run\") + arguments + listOf(\"-classpath\", jnaJar.toString(),\"com.sun.jna.Native\")" to (1 to PRIVATE_ROOT),
             "oracle/fulltree/FullTreeFunctionObservationIsolatedRunnerTest.kt :: availableConfiguration :: systemctl.toString()" to (1 to NON_JDK),
-            "oracle/fulltree/FullTreeFunctionObservationIsolatedRunnerTest.kt :: runTestSystemctl :: configuration.scopeInspectorExecutable.toString()" to (1 to NON_JDK),
+            "oracle/fulltree/FullTreeFunctionObservationIsolatedRunnerTest.kt :: runTestSystemctl :: listOf(configuration.scopeInspectorExecutable.toString(),\"--user\") + arguments" to (1 to NON_JDK),
             "oracle/fulltree/FullTreeFunctionObservationIsolatedRunnerTest.kt :: startOccupiedObservationUnit :: configuration.scopeSupervisorExecutable.toString()" to (1 to NON_JDK),
-            "oracle/fulltree/FullTreeWorkerFailureOwnershipTest.kt :: publishStart :: command" to (1 to PRIVATE_ROOT),
+            "oracle/fulltree/FullTreeWorkerFailureOwnershipTest.kt :: assertFailurePreservesParentTree :: command" to (1 to PRIVATE_ROOT),
             "oracle/fulltree/KotlinContainedCommandKeeperTest.kt :: withLocalKeeper :: arguments" to (1 to PRIVATE_ROOT),
-            "oracle/fulltree/OracleNativeLibrariesTest.kt :: noexecNamespace :: prefix + listOf(tools[2].toString(),\"--noheadings\",\"--output…" to (1 to NON_JDK),
-            "oracle/fulltree/OracleNativeLibrariesTest.kt :: runJava :: prefix + listOf(Path.of(System.getProperty(\"java.home\"),\"bin…" to (1 to PRIVATE_ROOT),
+            "oracle/fulltree/OracleNativeLibrariesTest.kt :: noexecNamespace :: prefix + listOf(tools[2].toString(),\"--noheadings\",\"--output\",\"OPTIONS\",\"--mountpoint\", target)" to (1 to NON_JDK),
+            "oracle/fulltree/OracleNativeLibrariesTest.kt :: runJava :: prefix + listOf(Path.of(System.getProperty(\"java.home\"),\"bin\",\"java\").toString(),\"-XX:-UsePerfData\",\"-Duser.home=\$root\") + arguments" to (1 to PRIVATE_ROOT),
             "oracle/gcc/GccBundledGhidraDeploymentReferenceTest.kt :: runInstalledProbe :: command" to (1 to PRIVATE_ROOT),
-            "oracle/machinecalls/IndependentMachineCallWorkerV1Test.kt :: `pinned bundled runtime initializes and decodes bytes in a fresh worker JVM` :: Path.of(System.getProperty(\"java.home\"),\"bin/java\").toString…" to (1 to PRIVATE_ROOT),
+            "oracle/gcc/GccInstalledCliInvocation.kt :: invokeInstalledGccCli :: selectedCommand" to (1 to START_SCRIPT),
+            "oracle/machinecalls/IndependentMachineCallWorkerV1Test.kt :: `pinned bundled runtime initializes and decodes bytes in a fresh worker JVM` :: Path.of(System.getProperty(\"java.home\"),\"bin/java\").toString()" to (1 to PRIVATE_ROOT),
             "project/GhidraReferencedBytesExporterTest.kt :: run :: arguments" to (1 to PRIVATE_ROOT),
             "project/NativeCallCollectorRealTest.kt :: run :: arguments" to (1 to PRIVATE_ROOT),
             "project/NativeInferredInterfaceCollectorRealTest.kt :: run :: arguments" to (1 to PRIVATE_ROOT),
