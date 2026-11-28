@@ -239,6 +239,49 @@ test('a byte-identical continued refetch is benign, as on master (R3)', async ()
   assert.equal(later.consumedResponse(modulePath, rendered('module_0041')).evidence.networkId, 'net-2');
 });
 
+test('captured bytes, not replacement-decoded strings, decide identical refetches (R3)', async () => {
+  // Both bodies decode to the same string with U+FFFD replacement, but their bytes differ (0xff versus 0xfe).
+  const json = moduleBody('module_0041');
+  const variant = (byte) => Buffer.concat([Buffer.from(json.slice(0, -1) + ',"note":"'), Buffer.from([byte]), Buffer.from('"}')]);
+  assert.equal(variant(0xff).toString('utf8'), variant(0xfe).toString('utf8'), 'the control needs bodies that collide after decoding');
+  assert.notDeepEqual(variant(0xff), variant(0xfe));
+  const base64Cdp = (bodies) => ({ calls: [], call: async (method, params) =>
+    method === 'Fetch.getResponseBody' ? { body: bodies[params.requestId].toString('base64'), base64Encoded: true } : {} });
+  const collided = createStructureResponseRecorder();
+  const cdp = base64Cdp({ 'interception-1': variant(0xff), 'interception-2': variant(0xfe) });
+  const intercept = createModuleResponseInterceptor({ call: cdp.call, recorder: collided, browserOrigin });
+  await intercept(paused());
+  await intercept(paused({ requestId: 'interception-2', networkId: 'net-2' }));
+  deliver(collided, 'net-1');
+  deliver(collided, 'net-2');
+  assert.throws(() => collided.consumedResponse(modulePath, rendered('module_0041')),
+    /No captured module response matches the rendered identity.*id=net-1.*capture=invalid-utf8.*id=net-2.*capture=invalid-utf8/);
+
+  // A plain-text body that cannot be UTF-8 (a lone surrogate) is refused the same way.
+  const lone = createStructureResponseRecorder();
+  lone.bodyCaptured('net-1', modulePath, { status: 200, body: `${json.slice(0, -1)},"note":"\ud800"}`, base64Encoded: false });
+  assert.throws(() => lone.consumedResponse(modulePath, rendered('module_0041')), /capture=invalid-utf8/);
+
+  // The same bytes delivered once as base64 and once as text are one response: digests, not encodings, compare.
+  const mixed = createStructureResponseRecorder();
+  mixed.bodyCaptured('net-1', modulePath, { status: 200, body: Buffer.from(json).toString('base64'), base64Encoded: true });
+  mixed.bodyCaptured('net-2', modulePath, { status: 200, body: json, base64Encoded: false });
+  for (const id of ['net-1', 'net-2']) { mixed.continued(id, true); deliver(mixed, id); }
+  assert.equal(mixed.consumedResponse(modulePath, rendered('module_0041')).evidence.identicalRefetches, 1);
+
+  // Valid bodies that differ by one byte still conflict.
+  const differing = createStructureResponseRecorder();
+  differing.bodyCaptured('net-1', modulePath, { status: 200, body: json, base64Encoded: false });
+  differing.bodyCaptured('net-2', modulePath, { status: 200, body: `${json.slice(0, -1)} }`, base64Encoded: false });
+  for (const id of ['net-1', 'net-2']) { differing.continued(id, true); deliver(differing, id); }
+  assert.throws(() => differing.consumedResponse(modulePath, rendered('module_0041')), /Conflicting module responses/);
+
+  // An over-long encoded body is refused before it is decoded.
+  const bounded = createStructureResponseRecorder({ bodyLimitBytes: 30 });
+  bounded.bodyCaptured('net-1', modulePath, { status: 200, body: Buffer.alloc(31, 0x61).toString('base64'), base64Encoded: true });
+  assert.throws(() => bounded.consumedResponse(modulePath, () => true), /capture=oversize/);
+});
+
 test('conflicting or undelivered matching captures still fail (R3)', async () => {
   // Both bodies show the rendered identity but their bytes differ: nothing proves which one the page consumed.
   const conflicting = createStructureResponseRecorder();
