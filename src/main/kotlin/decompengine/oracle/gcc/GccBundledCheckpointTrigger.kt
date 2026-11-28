@@ -101,7 +101,6 @@ internal class GccBundledCheckpointTrigger(val minimumCompletedFunctions: Long) 
                 "checkpoint threshold differs from the bound CLI selection"
             }
             val restored = GccBundledCheckpointTrigger(threshold)
-            val minimumCompletedFunctions = threshold
             val policy = restored.policy
             require(authorization["provider"] == JsonPrimitive("kotlin-contained-command-interrupt-authorization-v1") &&
                 authorization["policy"] == OracleJson.parseCanonical(policy) &&
@@ -124,7 +123,7 @@ internal class GccBundledCheckpointTrigger(val minimumCompletedFunctions: Long) 
             }
             val completed = count("completed")
             val total = count("total")
-            require(completed >= minimumCompletedFunctions && completed % 512L == 0L && completed < total) {
+            require(completed >= threshold && completed % 512L == 0L && completed < total) {
                 "GCC durable trigger is not a whole fresh planning checkpoint at the bound threshold"
             }
             restored.observed = Selected(digest("stateSha256"), digest("progressSha256"), completed, total)
