@@ -343,7 +343,7 @@ class UploadServer(
     /** Admitted artifact downloads that have not yet released their stream; test evidence helper. */
     internal fun activeArtifactDownloads(): Int = api?.artifactDownloads?.activeCount() ?: 0
     /** Admitted HTTP handlers still running, including post-response audit appends; for test quiescence only. */
-    internal fun activeRequestCount(): Int = synchronized(lifecycleLock) { activeRequests }
+    internal fun activeRequestCount(): Int = synchronized(lifecycleLock) { requestDrain.active }
     // A request that finds every worker and queue slot taken is answered by this tiny pool with a stable 429
     // instead of a reset connection. It has no queue, so overload still never buffers more than the main pool does;
     // when it too is busy the rejection propagates and the dispatcher closes the connection, as before.
@@ -370,9 +370,8 @@ class UploadServer(
     private val lifecycleLock = Object()
     private var stopping = false
     private var started = false
-    private var activeRequests = 0
-    // Admitted requests currently inside the audit append of a response already sent; a subset of activeRequests.
-    private var postResponseAudits = 0
+    // Admitted requests and their post-response audit appends; guarded by lifecycleLock.
+    private val requestDrain = WebRequestDrain()
     private var ownershipReleased = false
     private val admittedOnThread = ThreadLocal<Boolean>()
     /** Test seam between the request-drain decision and the ownership decision in [stop]. */
@@ -437,7 +436,9 @@ class UploadServer(
         // Every connection task, including one refused to the responder tier, is bounded while it reads its
         // request line and headers; the JDK parses them on the worker before any handler can install a deadline.
         server.executor = java.util.concurrent.Executor { task -> requestExecutor.execute(HeaderDeadlineTask(task)) }
-        val context = server.createContext("/") { exchange ->
+        val context = server.createContext("/") { received ->
+            // Audit classification needs confirmed response completion, not just a sent status code.
+            val exchange = WebResponseCompletion(received)
             WebResponseAccounting.around(capacity::recordResponse, exchange) { handleAdmitted(exchange) }
         }
         WebRedactionPolicy.install(context, redaction)
@@ -634,11 +635,12 @@ class UploadServer(
             requestDrainObserver()
             stopSequenceFinished.set(true)
             val release = releaseOwnership()
-            // The drain snapshot alone decides whether audit work earned its bound: a request that was still
-            // doing ordinary work at the request deadline fails the stop even if it then reached its append.
+            // The frozen drain decision alone decides whether audit work earned its bound, and it is carried through
+            // finalization: an audit request may be unwinding from its append, and an ordinary request that reached
+            // its append after the request deadline still fails the stop.
             return when {
                 release == OwnershipRelease.RELEASED -> WebStopOutcome.STOPPED
-                drain == RequestDrain.AUDIT_PENDING && release == OwnershipRelease.AUDIT_PENDING -> WebStopOutcome.AUDIT_PENDING
+                drain == WebRequestDrain.Outcome.AUDIT_PENDING && release == OwnershipRelease.REQUESTS_ACTIVE -> WebStopOutcome.AUDIT_PENDING
                 else -> throw IllegalStateException("HTTP requests remain active after server stop")
             }
         } finally {
@@ -650,12 +652,12 @@ class UploadServer(
     internal fun withActiveRequest(action: () -> Unit): Boolean {
         synchronized(lifecycleLock) {
             if (stopping || stopRequested.get()) return false
-            activeRequests++
+            requestDrain.admit()
             // stop() publishes stopRequested outside lifecycleLock, so a handler that read
             // the flag before the signal must still be refused when the signal preceded this
             // reservation instead of staying admitted past the stop request.
             if (stopRequested.get()) {
-                activeRequests--
+                requestDrain.exitRequest()
                 return false
             }
         }
@@ -667,7 +669,7 @@ class UploadServer(
         } finally {
             if (outer == null) admittedOnThread.remove() else admittedOnThread.set(outer)
             synchronized(lifecycleLock) {
-                activeRequests--
+                requestDrain.exitRequest()
                 lifecycleLock.notifyAll()
             }
             try {
@@ -684,35 +686,26 @@ class UploadServer(
      */
     internal fun postResponseAuditAppend(append: () -> Unit) {
         if (admittedOnThread.get() != true) return append()
-        synchronized(lifecycleLock) { postResponseAudits++ }
+        synchronized(lifecycleLock) { requestDrain.enterAudit() }
         try { append() } finally {
-            synchronized(lifecycleLock) { postResponseAudits-- }
+            synchronized(lifecycleLock) { requestDrain.exitAudit() }
         }
     }
 
-    private enum class RequestDrain { DRAINED, AUDIT_PENDING, ACTIVE }
-
     /**
-     * Admission is closed, so the active set only shrinks. Requests get [requestShutdownTimeoutMs]. If at that
-     * deadline every remaining request is inside its post-response audit append, the wait extends once to the
-     * audit deadline: those requests have nothing left but the append and their return. The request timeout is
-     * a floor for that deadline. Other shutdown phases (streams, archive verifiers, jobs, Git) wait separately.
+     * Waits up to [requestShutdownTimeoutMs], extended once to [auditShutdownTimeoutMs] when only post-response
+     * audit appends remained at the request deadline (see [WebRequestDrain]). The request timeout is a floor for
+     * the audit deadline. Other shutdown phases (streams, archive verifiers, jobs, Git) wait separately.
      */
-    private fun awaitRequestDrain(onInterrupt: () -> Unit): RequestDrain {
+    private fun awaitRequestDrain(onInterrupt: () -> Unit): WebRequestDrain.Outcome {
         val started = System.nanoTime()
-        val requestDeadline = started + TimeUnit.MILLISECONDS.toNanos(requestShutdownTimeoutMs)
-        val auditDeadline = started + TimeUnit.MILLISECONDS.toNanos(maxOf(requestShutdownTimeoutMs, auditShutdownTimeoutMs))
-        var deadline = requestDeadline
         synchronized(lifecycleLock) {
+            requestDrain.begin(started + TimeUnit.MILLISECONDS.toNanos(requestShutdownTimeoutMs),
+                started + TimeUnit.MILLISECONDS.toNanos(auditShutdownTimeoutMs))
             while (true) {
-                if (activeRequests == 0) return RequestDrain.DRAINED
-                val auditOnly = activeRequests == postResponseAudits
-                var remaining = deadline - System.nanoTime()
-                if (remaining <= 0 && deadline == requestDeadline && auditOnly) {
-                    deadline = auditDeadline
-                    remaining = deadline - System.nanoTime()
-                }
-                if (remaining <= 0) return if (auditOnly) RequestDrain.AUDIT_PENDING else RequestDrain.ACTIVE
+                requestDrain.decide()?.let { return it }
+                val remaining = requestDrain.waitNanos()
+                if (remaining <= 0) continue
                 try { TimeUnit.NANOSECONDS.timedWait(lifecycleLock, remaining) } catch (_: InterruptedException) { onInterrupt() }
             }
         }
@@ -731,7 +724,7 @@ class UploadServer(
         }
     }
 
-    private enum class OwnershipRelease { RELEASED, AUDIT_PENDING, RETAINED }
+    private enum class OwnershipRelease { RELEASED, REQUESTS_ACTIVE, RETAINED }
 
     private fun releaseOwnershipIfIdle(): Boolean = releaseOwnership() == OwnershipRelease.RELEASED
 
@@ -743,14 +736,14 @@ class UploadServer(
         return synchronized(lifecycleLock) {
             val servicesIdle = stopping && jobsIdle && gitIdle && streamResources.snapshot().active == 0
             when {
-                servicesIdle && activeRequests == 0 -> {
+                servicesIdle && requestDrain.active == 0 -> {
                     ownership.close()
                     ownershipReleased = true
                     lifecycleLock.notifyAll()
                     OwnershipRelease.RELEASED
                 }
-                // Admission is closed, so the last finishing audit append releases ownership through withActiveRequest.
-                servicesIdle && activeRequests == postResponseAudits -> OwnershipRelease.AUDIT_PENDING
+                // Only admitted requests hold the store; the last one to leave releases it through withActiveRequest.
+                servicesIdle -> OwnershipRelease.REQUESTS_ACTIVE
                 else -> OwnershipRelease.RETAINED
             }
         }

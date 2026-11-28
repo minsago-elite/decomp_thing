@@ -210,6 +210,40 @@ class UploadServerShutdownTest {
         }
     }
 
+    @Test fun `an audit request unwinding from its append after the audit deadline keeps the audit-pending outcome`() {
+        val root = createTempDirectory("web-unwinding-audit-")
+        val server = UploadServer("127.0.0.1", 0, root, requestShutdownTimeoutMs = 50, auditShutdownTimeoutMs = 300)
+        val worker = Executors.newSingleThreadExecutor()
+        val appending = CountDownLatch(1); val release = CountDownLatch(1)
+        val unwinding = CountDownLatch(1); val exit = CountDownLatch(1)
+        server.start()
+        try {
+            holdAuditAppends(server, appending, release)
+            val request = worker.submit<Boolean> { server.withActiveRequest {
+                server.postResponseAuditAppend {
+                    server.audit.record(WebAuditActor.OPERATOR, WebAuditAction.SUPPORT_EXPORT, WebAuditTarget(),
+                        WebAuditOutcome.ACCEPTED, 200, null, null)
+                }
+                unwinding.countDown()
+                check(exit.await(10, TimeUnit.SECONDS))
+            } }
+            assertTrue(appending.await(10, TimeUnit.SECONDS), "the audit append was reached")
+            // After the audit deadline decision, the append finishes and the request is still unwinding
+            // when stop samples ownership.
+            server.requestDrainObserver = { release.countDown(); check(unwinding.await(10, TimeUnit.SECONDS)) }
+            assertEquals(WebStopOutcome.AUDIT_PENDING, server.stop())
+            assertFailsWith<IllegalStateException> { UploadServer("127.0.0.1", 0, root) }
+            exit.countDown()
+            assertTrue(request.get(10, TimeUnit.SECONDS))
+            assertTrue(server.awaitStoreRelease(10_000), "the finished request released the store")
+            assertWholeAuditEntry(root, WebAuditAction.SUPPORT_EXPORT)
+        } finally {
+            release.countDown(); exit.countDown(); worker.shutdownNow()
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS))
+            server.stop(); root.toFile().deleteRecursively()
+        }
+    }
+
     @Test fun `stop waits for an admitted handler and retains ownership until it leaves`() = checkDrain(false)
 
     @Test fun `interrupted stop still drains admitted handlers and restores the interrupt flag`() = checkDrain(true)

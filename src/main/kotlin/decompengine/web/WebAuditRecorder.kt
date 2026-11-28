@@ -13,8 +13,8 @@ import java.security.MessageDigest
 internal class WebAuditRecorder(
     private val access: LocalWebAccess,
     private val log: WebAuditLog?,
-    // Runs exactly the append of an entry whose response was already sent; the web server gives
-    // that work its own shutdown bound. Refused or failed handlers append outside it.
+    // Runs exactly the append of an entry whose response completed (see [WebResponseCompletion]); the web
+    // server gives that work its own shutdown bound. Failed, incomplete or unsent responses append outside it.
     private val postResponseAppend: (() -> Unit) -> Unit = { it() },
 ) {
     /** Run [handle] and record its outcome when [action] names a sensitive action. */
@@ -31,17 +31,16 @@ internal class WebAuditRecorder(
             throw failure
         } finally {
             // Auditing never changes the response or turns a handled request into a failure.
-            try {
-                // A handler that returned after sending its response has nothing left but this append.
-                if (!thrown && exchange.responseCode in 100..599) postResponseAppend { record(exchange, action, target, before, false) }
-                else record(exchange, action, target, before, thrown)
-            } catch (_: Exception) { }
+            // A handler that returned after its response completed has nothing left but this append.
+            try { record(exchange, action, target, before, thrown, !thrown && WebResponseCompletion.completed(exchange)) }
+            catch (_: Exception) { }
             WebAuditSourceTarget.close()
             WebDeniedResponseTrace.end(traced)
         }
     }
 
-    private fun record(exchange: HttpExchange, action: WebAuditAction, target: WebAuditTarget, before: String?, thrown: Boolean) {
+    private fun record(exchange: HttpExchange, action: WebAuditAction, target: WebAuditTarget, before: String?, thrown: Boolean,
+                       postResponse: Boolean) {
         val log = log ?: return
         run {
             val reason = WebDeniedResponseTrace.current()
@@ -69,7 +68,8 @@ internal class WebAuditRecorder(
             val revisionId = source?.revisionId?.let { confirmedOr(it, ::revisionCommitment) }
                 ?: location?.third?.takeIf { it == target.revisionId && !policy.leaks(it) }
                 ?: target.revisionId?.let(::revisionCommitment)
-            log.record(
+            // Attribution and field preparation above are ordinary request work; only the durable append is scoped.
+            val append = { log.record(
                 actor = sessionId?.let(WebAuditActor::browserSession) ?: WebAuditActor.UNAUTHENTICATED,
                 action = action,
                 target = WebAuditTarget(
@@ -83,7 +83,8 @@ internal class WebAuditRecorder(
                 status = status,
                 reasonCode = reason ?: if (outcome == WebAuditOutcome.FAILED) "INTERNAL_ERROR" else null,
                 requestId = headers.getFirst("X-Request-ID"),
-            )
+            ); Unit }
+            if (postResponse) postResponseAppend(append) else append()
         }
     }
 

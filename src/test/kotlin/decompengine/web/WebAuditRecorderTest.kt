@@ -19,7 +19,7 @@ import kotlin.test.assertTrue
 
 /** Real session/authorization and recorder components, without job/workflow dependencies. */
 class WebAuditRecorderTest {
-    @Test fun `only the append of a sent response runs in the post-response scope`() {
+    @Test fun `only the append of a completed response runs in the post-response scope`() {
         val root = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/web-audit-recorder").toAbsolutePath()), "scope-")
         val http = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val origin = "http://127.0.0.1:${http.address.port}"
@@ -32,25 +32,38 @@ class WebAuditRecorderTest {
             append()
             scoped += log.read().entries.size - before
         }
-        http.createContext("/") { exchange ->
+        http.createContext("/") { received ->
+            val exchange = WebResponseCompletion(received)
             recorder.around(exchange, WebAuditAction.SUPPORT_EXPORT, WebAuditTarget()) {
-                // The failed path throws before any response is sent.
-                check(exchange.requestURI.path == "/sent") { "handler failed before responding" }
-                exchange.sendResponseHeaders(204, -1); exchange.close()
+                when (exchange.requestURI.path) {
+                    "/sent" -> { exchange.sendResponseHeaders(200, 2); exchange.responseBody.use { it.write("ok".toByteArray()) } }
+                    // Headers are sent, then the body write fails; the dispatcher swallows it and returns normally.
+                    "/incomplete" -> try {
+                        exchange.sendResponseHeaders(200, 10)
+                        exchange.responseBody.use { it.write("ok".toByteArray()) }
+                    } catch (_: java.io.IOException) { exchange.close() }
+                    // The failed path throws before any response is sent.
+                    else -> error("handler failed before responding")
+                }
             }
         }
         val client = HttpClient.newHttpClient()
-        // POST: the client retries an idempotent GET once its connection is reset by the failed handler.
-        fun get(path: String) = client.send(HttpRequest.newBuilder(URI(origin + path)).timeout(java.time.Duration.ofSeconds(10))
-            .POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.discarding())
+        // POST: the client retries an idempotent GET once its connection is reset by a failed handler.
+        fun post(path: String) = runCatching { client.send(HttpRequest.newBuilder(URI(origin + path)).timeout(java.time.Duration.ofSeconds(10))
+            .POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.discarding()).statusCode() }
         http.start()
         try {
-            assertEquals(204, get("/sent").statusCode())
-            assertTrue(runCatching { get("/failed") }.let { it.isFailure || it.getOrThrow().statusCode() >= 500 })
+            assertEquals(200, post("/sent").getOrThrow())
+            // The truncated body never completes for the client; only its audit scope matters, and stopping the
+            // listener below closes the connection.
+            val incomplete = client.sendAsync(HttpRequest.newBuilder(URI("$origin/incomplete")).POST(HttpRequest.BodyPublishers.noBody()).build(),
+                HttpResponse.BodyHandlers.discarding())
+            assertTrue(post("/failed").let { it.isFailure || it.getOrThrow() >= 500 })
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
-            while (log.read().entries.size < 2 && System.nanoTime() < deadline) Thread.sleep(10)
-            assertEquals(listOf(WebAuditOutcome.ACCEPTED, WebAuditOutcome.FAILED), log.read().entries.map { it.outcome })
-            assertEquals(listOf(1), scoped.toList(), "only the sent response's append is post-response work")
+            while (log.read().entries.size < 3 && System.nanoTime() < deadline) Thread.sleep(10)
+            assertEquals(3, log.read().entries.size)
+            assertEquals(listOf(1), scoped.toList(), "only the completed response's append is post-response work")
+            incomplete.cancel(true)
         } finally {
             http.stop(0); root.toFile().deleteRecursively()
         }
