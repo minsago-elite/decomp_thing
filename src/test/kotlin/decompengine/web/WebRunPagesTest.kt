@@ -25,8 +25,10 @@ class WebRunPagesTest {
             assertEquals(result, pages.page("owner", jobId, query))
             val items = result.getValue("items").jsonArray
             assertTrue(items.size <= 200)
+            val page = result.getValue("page").jsonObject
+            assertEquals(seen.size / 200 + 1, page.getValue("pageNumber").jsonPrimitive.int)
             seen += items.map { it.jsonObject.getValue("runId").jsonPrimitive.content }
-            cursor = result.getValue("page").jsonObject.getValue("nextCursor").jsonPrimitive.contentOrNull
+            cursor = page.getValue("nextCursor").jsonPrimitive.contentOrNull
         } while (cursor != null)
         assertEquals((0 until 1024).reversed().map { "run_$it" }, seen)
     }

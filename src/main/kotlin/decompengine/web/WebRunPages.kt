@@ -32,6 +32,7 @@ internal class WebRunPages(private val source: (String) -> WorkflowJobSnapshot) 
             put("jobId", jobId); put("items", JsonArray(items))
             put("page", buildJsonObject {
                 put("limit", query.limit); put("snapshotVersion", snapshot.version)
+                put("pageNumber", offset / query.limit + 1)
                 put("nextCursor", if (next < snapshot.attempts.size) JsonPrimitive("${version}_${next}_${signature(owner, jobId, query.limit, version, next.toString())}") else JsonNull)
             })
         }

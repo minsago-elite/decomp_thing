@@ -1,0 +1,41 @@
+{
+  "apiVersion": 1,
+  "kind": "sourceArchive",
+  "requestId": "request_archive_3",
+  "data": {
+    "binding": {
+      "jobId": "job_1",
+      "runId": "run_1",
+      "revisionId": "revision_1"
+    },
+    "sourceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "metadataVersion": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "archive": {
+      "state": "missing",
+      "artifactId": null,
+      "sha256": null,
+      "sizeBytes": null,
+      "contentHref": null,
+      "mediaType": "application/zip"
+    },
+    "verification": {
+      "authority": "archive-verifier",
+      "state": "missing",
+      "operationId": null,
+      "verifiedAt": null,
+      "failureCode": null,
+      "previousVerifiedSha256": null
+    },
+    "build": {
+      "state": "not-recorded",
+      "contractSha256": null,
+      "executableSha256": null,
+      "executableBytes": null
+    },
+    "acceptance": "not-evaluated",
+    "git": {
+      "state": "unavailable",
+      "reason": "not-recorded"
+    }
+  }
+}
