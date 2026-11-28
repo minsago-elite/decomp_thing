@@ -2,9 +2,7 @@ package decompengine.acp
 
 import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentExecutionRequestBinding
-import decompengine.builtin.provider.boundedProviderJson
 import decompengine.builtin.provider.parseProviderObject
-import decompengine.builtin.provider.writeProviderValue
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -16,20 +14,17 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
-import java.net.InetSocketAddress
-import java.net.Proxy
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
-import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.time.Clock
+import java.time.Duration
 import java.util.Locale
-import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLException
 import javax.net.ssl.SSLSocket
-import javax.net.ssl.TrustManagerFactory
 
 enum class AcpProviderBrokerFailureKind {
     TRANSPORT_DISABLED,
@@ -72,56 +67,14 @@ internal fun interface AcpProviderDestinationResolver {
     }
 }
 
-/** Opens the TCP connection to the pinned numeric destination. Production connects directly, never via a proxy. */
-internal fun interface AcpProviderDialer {
-    fun connect(destination: InetSocketAddress, timeoutMillis: Int): Socket
-
-    companion object {
-        val DIRECT = AcpProviderDialer { destination, timeoutMillis ->
-            check(!destination.isUnresolved) { "provider destination is not a pinned address" }
-            val socket = Socket(Proxy.NO_PROXY)
-            try {
-                socket.connect(destination, timeoutMillis)
-            } catch (failure: Exception) {
-                socket.close()
-                throw failure
-            }
-            socket
-        }
-    }
-}
-
 /**
- * Upstream TLS layered on the connected socket: PKIX trust, SNI and HTTPS hostname verification for the policy
- * host, TLS 1.3 or 1.2, and no ALPN. Production uses the platform trust store; only the trust anchors differ for
- * credential-free controls.
+ * Opens the verified TLS connection to the pinned numeric address. Production uses
+ * [AcpProviderUpstreamTls.connect] with platform trust: a direct connection with no proxy, and the policy host,
+ * never the address, as the TLS identity. Credential-free controls connect to a local server and then call
+ * [AcpProviderUpstreamTls.handshake] with test trust anchors.
  */
-internal class AcpProviderUpstreamTls private constructor(private val context: SSLContext) {
-    fun handshake(socket: Socket, policy: AcpProviderTransportPolicy.Approved): SSLSocket {
-        val tls = context.socketFactory.createSocket(socket, policy.endpoint.host, PROVIDER_HTTPS_PORT, true) as SSLSocket
-        try {
-            val parameters = AcpProviderRouting.upstreamSslParameters(policy, tls.sslParameters)
-            AcpProviderRouting.requireMandatoryUpstreamTls(policy, parameters)
-            tls.sslParameters = parameters
-            tls.startHandshake()
-        } catch (failure: Exception) {
-            tls.close()
-            throw failure
-        }
-        return tls
-    }
-
-    companion object {
-        fun platform(): AcpProviderUpstreamTls = withTrustStore(null)
-
-        /** Credential-free controls only: the same PKIX and hostname checks against test trust anchors. */
-        internal fun withTrustAnchors(trustAnchors: KeyStore): AcpProviderUpstreamTls = withTrustStore(trustAnchors)
-
-        private fun withTrustStore(store: KeyStore?): AcpProviderUpstreamTls {
-            val trust = TrustManagerFactory.getInstance("PKIX").apply { init(store) }
-            return AcpProviderUpstreamTls(SSLContext.getInstance("TLS").apply { init(null, trust.trustManagers, null) })
-        }
-    }
+internal fun interface AcpProviderUpstreamConnector {
+    fun open(address: InetAddress, timeout: Duration): SSLSocket
 }
 
 /**
@@ -141,18 +94,21 @@ internal class AcpProviderChannelGrant internal constructor(capability: ByteArra
 
 /**
  * One request frame received on the private channel. The capability occupies the frame's reserved field, apart
- * from the agent's HTTP head and body, and the sequence reserves the frame: each value authorizes at most one
- * upstream request. Every field is untrusted.
+ * from the agent's HTTP request, and the sequence reserves the frame: each value authorizes at most one upstream
+ * request. [head] is the exact request-head bytes, ending with the empty line, and [body] the bytes after it.
+ * Every field is untrusted.
  */
 internal class AcpProviderChannelRequest(
     val sequence: Long,
     capability: ByteArray,
-    val head: AcpProviderRelayRequest,
+    head: ByteArray,
     body: ByteArray,
 ) {
     private val capabilityContent = capability.copyOf()
+    private val headContent = head.copyOf()
     private val bodyContent = body.copyOf()
     internal fun capability(): ByteArray = capabilityContent.copyOf()
+    internal fun head(): ByteArray = headContent.copyOf()
     internal fun body(): ByteArray = bodyContent.copyOf()
 
     override fun toString(): String = "AcpProviderChannelRequest(sequence=$sequence, <untrusted>)"
@@ -178,8 +134,9 @@ internal data class AcpProviderBrokerIdentity(
 /**
  * Host-side provider broker for one admitted invocation. It alone holds the credential and the upstream
  * authority. [open] resolves the credential and pins the destination before the caller starts any ACP session
- * or prompt. Every forwarded request is rebuilt from broker-owned values and the validated body, sent to the
- * pinned numeric address over verified TLS for the policy host, and never redirected.
+ * or prompt. Every forwarded request is rebuilt from policy-owned headers, the broker's credential headers and
+ * the validated body, sent to the pinned numeric address over verified TLS for the policy host, and never
+ * redirected.
  *
  * Deadlines and budgets (#960), revocation and typed provider outcomes (#961) and provenance (#962) extend this
  * owner. No production path opens one yet.
@@ -188,9 +145,8 @@ internal class AcpProviderBroker private constructor(
     private val policy: AcpProviderTransportPolicy.Approved,
     private val credentialSource: AcpProviderCredentialSource,
     credential: AcpProviderCredential,
-    private val destination: InetSocketAddress,
-    private val dialer: AcpProviderDialer,
-    private val upstreamTls: AcpProviderUpstreamTls,
+    private val destination: InetAddress,
+    private val connector: AcpProviderUpstreamConnector,
     requestBinding: AgentExecutionRequestBinding,
 ) : AutoCloseable {
     private val lock = Any()
@@ -233,12 +189,12 @@ internal class AcpProviderBroker private constructor(
             this.credential ?: refuse(AcpProviderBrokerFailureKind.CHANNEL_REFUSED)
         }
         try {
-            val routed = when (val decision = AcpProviderRouting.route(policy, request.head)) {
+            val routed = when (val decision = AcpProviderRouting.route(policy, request.head())) {
                 is AcpProviderRouteDecision.Routed -> decision
                 is AcpProviderRouteDecision.Refused ->
                     throw AcpProviderBrokerFailure(AcpProviderBrokerFailureKind.ROUTE_REFUSED, routeRefusal = decision.reason)
             }
-            val body = validatedBody(request.head, request.body(), credential)
+            val body = validatedBody(routed, request.body(), credential)
             return forward(routed, body, credential, request.sequence)
         } finally {
             synchronized(lock) {
@@ -285,18 +241,10 @@ internal class AcpProviderBroker private constructor(
     private fun liveSecrets(credential: AcpProviderCredential?): List<String> =
         listOf(capability.brokerHex()) + credential?.secretValues().orEmpty()
 
-    private fun validatedBody(head: AcpProviderRelayRequest, body: ByteArray, credential: AcpProviderCredential): ByteArray {
-        // The channel frame delimits the body. Agent framing headers are checked against it and never forwarded.
-        if (head.headers.any { (name, _) -> name.equals("transfer-encoding", ignoreCase = true) }) {
-            refuse(AcpProviderBrokerFailureKind.REQUEST_REFUSED)
-        }
-        head.headers.singleOrNull { (name, _) -> name.equals("content-length", ignoreCase = true) }?.let { (_, value) ->
-            val declared = value.trim()
-            if (!declared.matches(CANONICAL_DECIMAL) || declared.toLongOrNull() != body.size.toLong()) {
-                refuse(AcpProviderBrokerFailureKind.REQUEST_REFUSED)
-            }
-        }
-        if (body.isEmpty() || body.size > policy.bounds.maximumRequestBytes) refuse(AcpProviderBrokerFailureKind.REQUEST_REFUSED)
+    /** The exact body the routed head declared, as one strict JSON object that carries no channel secret. */
+    private fun validatedBody(routed: AcpProviderRouteDecision.Routed, body: ByteArray, credential: AcpProviderCredential): ByteArray {
+        // The frame's body must be exactly the length the routed head declared; the upstream framing uses it.
+        if (body.size != routed.contentLength || body.isEmpty()) refuse(AcpProviderBrokerFailureKind.REQUEST_REFUSED)
         val document = try {
             parseProviderObject(brokerStrictUtf8(body), policy.bounds.maximumRequestBytes)
         } catch (_: Exception) {
@@ -305,12 +253,8 @@ internal class AcpProviderBroker private constructor(
         // Decoded names and strings, so JSON escapes cannot carry the capability or a credential upstream.
         val secrets = synchronized(lock) { liveSecrets(credential) }
         if (containsSecret(document, secrets)) refuse(AcpProviderBrokerFailureKind.SECRET_EXPOSURE)
-        // #960 adds the model, token and budget checks here, before the body is encoded again.
-        return try {
-            boundedProviderJson(policy.bounds.maximumRequestBytes) { it.writeProviderValue(document) }
-        } catch (_: Exception) {
-            refuse(AcpProviderBrokerFailureKind.REQUEST_REFUSED)
-        }
+        // #960 adds the model, token and budget checks here.
+        return body
     }
 
     private fun forward(
@@ -319,66 +263,60 @@ internal class AcpProviderBroker private constructor(
         credential: AcpProviderCredential,
         sequence: Long,
     ): AcpProviderExchangeResult {
-        val timeoutMillis = minOf(policy.bounds.idleTimeout.toMillis(), Int.MAX_VALUE.toLong()).toInt()
-        val raw = try {
-            dialer.connect(destination, timeoutMillis)
+        val tls = try {
+            connector.open(destination, policy.bounds.idleTimeout)
+        } catch (refused: AcpProviderUpstreamRefusedException) {
+            throw AcpProviderBrokerFailure(AcpProviderBrokerFailureKind.DESTINATION_REFUSED, routeRefusal = refused.reason)
+        } catch (_: SSLException) {
+            refuse(AcpProviderBrokerFailureKind.TLS_REFUSED)
+        } catch (_: IllegalStateException) {
+            // The TLS client's own protocol check.
+            refuse(AcpProviderBrokerFailureKind.TLS_REFUSED)
         } catch (_: Exception) {
             refuse(AcpProviderBrokerFailureKind.TRANSPORT)
         }
         synchronized(lock) {
             if (closed) {
-                runCatching { raw.close() }
+                runCatching { tls.close() }
                 refuse(AcpProviderBrokerFailureKind.CHANNEL_REFUSED)
             }
-            upstream = raw
+            upstream = tls
         }
-        raw.use {
+        tls.use {
             try {
-                raw.soTimeout = timeoutMillis
-                raw.tcpNoDelay = true
-            } catch (_: Exception) {
+                val output = BufferedOutputStream(tls.outputStream, 16 * 1024)
+                output.write(upstreamHead(routed, credential))
+                output.write(body)
+                output.flush()
+                return readResponse(BufferedInputStream(tls.inputStream, 16 * 1024), routed, sequence, credential)
+            } catch (failure: Exception) {
+                // A close during the exchange shows up as an I/O error or an early EOF; report it as the closed channel.
+                if (synchronized(lock) { closed }) refuse(AcpProviderBrokerFailureKind.CHANNEL_REFUSED)
+                if (failure is AcpProviderBrokerFailure) throw failure
                 refuse(AcpProviderBrokerFailureKind.TRANSPORT)
             }
-            val tls = try {
-                upstreamTls.handshake(raw, policy)
-            } catch (_: Exception) {
-                refuse(AcpProviderBrokerFailureKind.TLS_REFUSED)
-            }
-            tls.use {
-                try {
-                    val output = BufferedOutputStream(tls.outputStream, 16 * 1024)
-                    output.write(upstreamHead(routed, body.size, credential))
-                    output.write(body)
-                    output.flush()
-                    return readResponse(BufferedInputStream(tls.inputStream, 16 * 1024), sequence, credential)
-                } catch (failure: AcpProviderBrokerFailure) {
-                    throw failure
-                } catch (_: Exception) {
-                    refuse(AcpProviderBrokerFailureKind.TRANSPORT)
-                }
-            }
         }
     }
 
-    /** Broker-owned request line and headers. Nothing from the agent's head is copied. */
-    private fun upstreamHead(routed: AcpProviderRouteDecision.Routed, contentLength: Int, credential: AcpProviderCredential): ByteArray {
-        val fields = buildList {
-            add("Host" to routed.endpoint.host)
-            addAll(credential.authorizationHeaders())
-            add("Content-Type" to "application/json")
-            add("Accept" to "text/event-stream")
-            add("Content-Length" to contentLength.toString())
-            add("User-Agent" to PROVIDER_BROKER_USER_AGENT)
-            add("Connection" to "close")
-        }
-        return buildString {
+    /**
+     * The policy request line, the policy-owned header set for the validated length, then the broker's own
+     * credential headers. Nothing from the agent's head is copied.
+     */
+    private fun upstreamHead(routed: AcpProviderRouteDecision.Routed, credential: AcpProviderCredential): ByteArray =
+        buildString {
             append(routed.operation.method).append(' ').append(routed.endpoint.rawPath).append(" HTTP/1.1\r\n")
-            fields.forEach { (name, value) -> append(name).append(": ").append(value).append("\r\n") }
+            (routed.upstreamHeaders() + credential.authorizationHeaders()).forEach { (name, value) ->
+                append(name).append(": ").append(value).append("\r\n")
+            }
             append("\r\n")
         }.toByteArray(StandardCharsets.US_ASCII)
-    }
 
-    private fun readResponse(input: InputStream, sequence: Long, credential: AcpProviderCredential): AcpProviderExchangeResult {
+    private fun readResponse(
+        input: InputStream,
+        routed: AcpProviderRouteDecision.Routed,
+        sequence: Long,
+        credential: AcpProviderCredential,
+    ): AcpProviderExchangeResult {
         val head = ResponseHeadReader(input, policy.bounds)
         val status = head.statusLine()
         // A 3xx is refused before its headers are read, so no Location value is ever parsed or followed.
@@ -388,15 +326,16 @@ internal class AcpProviderBroker private constructor(
             } else AcpProviderBrokerFailureKind.MALFORMED_RESPONSE
             throw AcpProviderBrokerFailure(kind, routeRefusal = reason)
         }
-        // Interim and protocol-switching responses are never expected: the broker sends no Expect or Upgrade.
+        // Interim and protocol-switching responses are never expected: no Expect or Upgrade is sent.
         if (status < 200) refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE)
         val headers = head.fields()
         // Error bodies can echo request material. They are never read or forwarded; only the status is.
         if (status != 200) return AcpProviderExchangeResult(sequence, status, null, ByteArray(0))
+        val mediaType = routed.operation.responseMediaType
         val contentTypes = headers.filter { (name, _) -> name == "content-type" }
-        if (contentTypes.size != 1 ||
-            contentTypes.single().second.substringBefore(';').trim().lowercase(Locale.ROOT) != PROVIDER_STREAM_MEDIA_TYPE
-        ) refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE)
+        if (contentTypes.size != 1 || contentTypes.single().second.substringBefore(';').trim().lowercase(Locale.ROOT) != mediaType) {
+            refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE)
+        }
         val body = readResponseBody(input, headers, policy.bounds)
         val text = String(body, StandardCharsets.ISO_8859_1)
         val secrets = synchronized(lock) { liveSecrets(credential) }
@@ -404,7 +343,7 @@ internal class AcpProviderBroker private constructor(
             body.fill(0)
             refuse(AcpProviderBrokerFailureKind.SECRET_EXPOSURE)
         }
-        return AcpProviderExchangeResult(sequence, status, PROVIDER_STREAM_MEDIA_TYPE, body)
+        return AcpProviderExchangeResult(sequence, status, mediaType, body)
     }
 
     companion object {
@@ -419,18 +358,18 @@ internal class AcpProviderBroker private constructor(
             request: AgentExecutionRequest,
             credentialSource: AcpProviderCredentialSource,
             resolver: AcpProviderDestinationResolver = AcpProviderDestinationResolver.UNAVAILABLE,
-        ): AcpProviderBroker = open(
-            policy, request, credentialSource, resolver, AcpProviderDialer.DIRECT, AcpProviderUpstreamTls.platform(), Clock.systemUTC(),
-        )
+        ): AcpProviderBroker = open(policy, request, credentialSource, resolver, null, Clock.systemUTC())
 
-        /** Credential-free controls only: a loopback dialer, test trust anchors and a fixed clock. */
+        /**
+         * Credential-free controls only: a connector that reaches a local server through the module TLS client
+         * with test trust anchors, and a fixed clock. A null connector is production platform trust.
+         */
         internal fun open(
             policy: AcpProviderTransportPolicy,
             request: AgentExecutionRequest,
             credentialSource: AcpProviderCredentialSource,
             resolver: AcpProviderDestinationResolver,
-            dialer: AcpProviderDialer,
-            upstreamTls: AcpProviderUpstreamTls,
+            connector: AcpProviderUpstreamConnector?,
             clock: Clock,
         ): AcpProviderBroker {
             val approved = policy as? AcpProviderTransportPolicy.Approved
@@ -449,15 +388,18 @@ internal class AcpProviderBroker private constructor(
                 refuse(AcpProviderBrokerFailureKind.CREDENTIAL_UNAVAILABLE)
             }
             val destination = pinnedDestination(approved, resolver)
+            val upstream = connector ?: AcpProviderUpstreamTls.platform(approved).let { tls ->
+                AcpProviderUpstreamConnector { address, timeout -> tls.connect(address, timeout, timeout) }
+            }
             return AcpProviderBroker(
-                approved, credentialSource, credential, destination, dialer, upstreamTls, AgentExecutionRequestBinding.capture(request),
+                approved, credentialSource, credential, destination, upstream, AgentExecutionRequestBinding.capture(request),
             )
         }
 
         private fun pinnedDestination(
             policy: AcpProviderTransportPolicy.Approved,
             resolver: AcpProviderDestinationResolver,
-        ): InetSocketAddress {
+        ): InetAddress {
             val resolved = try {
                 resolver.resolve(policy.endpoint.host)
             } catch (_: Exception) {
@@ -469,16 +411,13 @@ internal class AcpProviderBroker private constructor(
             AcpProviderRouting.destinationRefusal(policy, numeric)?.let {
                 throw AcpProviderBrokerFailure(AcpProviderBrokerFailureKind.DESTINATION_REFUSED, routeRefusal = it)
             }
-            return InetSocketAddress(numeric.first(), PROVIDER_HTTPS_PORT)
+            return numeric.first()
         }
     }
 }
 
 private const val PROVIDER_CHANNEL_CAPABILITY_BYTES = 32
-private const val PROVIDER_HTTPS_PORT = 443
 private const val MAXIMUM_PROVIDER_DESTINATION_ADDRESSES = 64
-private const val PROVIDER_STREAM_MEDIA_TYPE = "text/event-stream"
-private const val PROVIDER_BROKER_USER_AGENT = "decomp-acp-provider-broker/1"
 private val CANONICAL_DECIMAL = Regex("0|[1-9][0-9]{0,9}")
 private val RESPONSE_STATUS_LINE = Regex("HTTP/1\\.1 ([1-5][0-9]{2})(?: [\\t -~]*)?")
 private val RESPONSE_FIELD_NAME = Regex("[!#$%&'*+.^_`|~0-9A-Za-z-]+")

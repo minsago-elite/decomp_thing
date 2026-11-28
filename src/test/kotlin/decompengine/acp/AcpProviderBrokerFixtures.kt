@@ -38,6 +38,7 @@ import java.security.SecureRandom
 import java.security.Signature
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
+import java.time.Duration
 import java.time.Instant
 import java.util.Base64
 import java.util.Collections
@@ -66,6 +67,11 @@ internal fun providerFixtureRequest(): AgentExecutionRequest = AgentExecutionReq
 
 internal fun approvedProviderPolicy(vararg overrides: Pair<String, String>): AcpProviderTransportPolicy.Approved =
     AcpProviderTransportPolicy.fromOperatorPolicy(providerPolicyConfiguration() + overrides) as AcpProviderTransportPolicy.Approved
+
+/** The exact request-head bytes a contained relay would pass on, ending with the empty line. */
+internal fun relayHead(method: String, target: String, fields: List<Pair<String, String>>): ByteArray =
+    (listOf("$method $target HTTP/1.1") + fields.map { (name, value) -> "$name: $value" })
+        .joinToString("\r\n", postfix = "\r\n\r\n").toByteArray(StandardCharsets.US_ASCII)
 
 /** A synthetic ChatGPT-shaped access token. It authenticates nothing: the signature segment is fixed text. */
 internal fun syntheticAccessToken(expiry: Instant, marker: String = randomMarker()): String {
@@ -253,15 +259,19 @@ internal fun sseResponse(events: String, framing: String = "length"): ByteArray 
 
 internal fun rawResponse(text: String): ByteArray = text.toByteArray(StandardCharsets.ISO_8859_1)
 
-/** Records each pinned destination the broker asks for, and connects to the local server instead. */
-internal class LoopbackProviderDialer(private val serverPort: Int) : AcpProviderDialer {
-    val destinations: MutableList<InetSocketAddress> = Collections.synchronizedList(ArrayList())
+/**
+ * Records each pinned address the broker asks for, connects to the local server instead, and layers the module
+ * TLS client over that socket. Only the destination socket differs from production; TLS verification does not.
+ */
+internal class LoopbackProviderConnector(private val serverPort: Int, private val tls: AcpProviderUpstreamTls) :
+    AcpProviderUpstreamConnector {
+    val addresses: MutableList<InetAddress> = Collections.synchronizedList(ArrayList())
 
-    override fun connect(destination: InetSocketAddress, timeoutMillis: Int): Socket {
-        destinations += destination
+    override fun open(address: InetAddress, timeout: Duration): SSLSocket {
+        addresses += address
         val socket = Socket()
-        socket.connect(InetSocketAddress(InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1)), serverPort), timeoutMillis)
-        return socket
+        socket.connect(InetSocketAddress(InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1)), serverPort), timeout.toMillis().toInt())
+        return tls.handshake(socket, timeout)
     }
 }
 

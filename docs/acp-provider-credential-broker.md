@@ -67,8 +67,8 @@ visibility. Even a copied capability authorizes nothing without the private chan
 `identity.invocationBindingSha256` binds the policy descriptor digest, the admitted request binding and a fresh
 nonce. Two brokers for the same request have different bindings.
 
-Each `AcpProviderChannelRequest` carries the capability in the frame's reserved field, apart from the agent's
-HTTP head and body, and a sequence number. `exchange` refuses with `CHANNEL_REFUSED` when the broker is
+Each `AcpProviderChannelRequest` carries the capability in the frame's reserved field, a sequence number, the
+exact request-head bytes the contained relay received (ending with the empty line) and the body bytes. `exchange` refuses with `CHANNEL_REFUSED` when the broker is
 closed, no grant was made, the capability differs (compared in constant time) or the sequence is not the next
 one. One request may be outstanding. A sequence is consumed when the frame is admitted, whether or not the
 request is then forwarded, so a refused frame cannot be replayed with a corrected head.
@@ -78,24 +78,25 @@ request is then forwarded, so a refused frame cannot be replayed with a correcte
 After the frame is admitted, the request goes through these checks. A request that fails one sends nothing
 upstream.
 
-1. `AcpProviderRouting.route` must route it, otherwise `ROUTE_REFUSED` with the routing refusal.
-2. The channel frame delimits the body. A `Transfer-Encoding` header, a `Content-Length` that differs from the
-   body, an empty or oversized body, or a body that is not one strict JSON object is refused with
-   `REQUEST_REFUSED`.
+1. `AcpProviderRouting.route` must route the exact head bytes, otherwise `ROUTE_REFUSED` with the routing
+   refusal. Routing requires one canonical `Content-Length` and refuses `Transfer-Encoding`, `Expect` and the
+   other unsupported framing fields, as well as a declared length above the request bound.
+2. The body must be exactly the routed `contentLength`, nonempty, and one strict UTF-8 JSON object with no
+   duplicate keys. Otherwise the request is refused with `REQUEST_REFUSED`.
 3. A body whose decoded names or strings contain the capability or the access token is refused with
    `SECRET_EXPOSURE`.
-4. The validated JSON is encoded again. The agent's raw bytes are never forwarded.
 
-The upstream request is built only from broker-owned values: the policy method and endpoint path, `Host` set
-to the policy host, `Authorization` and the optional `ChatGPT-Account-ID` from the credential,
-`Content-Type: application/json`, `Accept: text/event-stream`, a `Content-Length` computed from the re-encoded
-body, a fixed `User-Agent` and `Connection: close`. No agent header is copied.
+The upstream request line is the policy method and endpoint path. Its headers are
+`Routed.upstreamHeaders()` (the policy host, the operation's request and response media types, and the
+validated `Content-Length`), followed by the broker's own `Authorization` and optional `ChatGPT-Account-ID`
+from the credential. No agent header or framing is copied. The validated body is sent as admitted, so the
+validated length frames it exactly.
 
-The broker connects directly to the pinned address with `Proxy.NO_PROXY`, then layers TLS over the socket with
-`AcpProviderUpstreamTls`. TLS uses PKIX trust, SNI and HTTPS hostname verification for the policy host, and
-TLS 1.3 or 1.2 through `upstreamSslParameters` and `requireMandatoryUpstreamTls`. Production uses the platform
-trust store. A certificate for another name, or from an untrusted issuer, fails with `TLS_REFUSED` before any
-request byte is sent.
+The broker connects through the module TLS client `AcpProviderUpstreamTls`. In production, `connect` opens a
+direct `Proxy.NO_PROXY` connection to the pinned address, re-checks it with `destinationRefusal`, and keeps the
+policy host as the TLS identity: PKIX platform trust, SNI and HTTPS hostname verification, TLS 1.3 or 1.2 only.
+A refused address is `DESTINATION_REFUSED`. A certificate for another name, or from an untrusted issuer, fails
+with `TLS_REFUSED` before any request byte is sent. Other connection failures are `TRANSPORT`.
 
 ## Responses
 
@@ -131,7 +132,9 @@ path or socket.
 ## Closing
 
 `close` drops the credential, zeroes the capability and closes any in-flight upstream connection. A request on
-a closed broker is refused with `CHANNEL_REFUSED`. An in-flight exchange fails with `TRANSPORT`.
+a closed broker is refused with `CHANNEL_REFUSED`. An in-flight exchange also fails with `CHANNEL_REFUSED`,
+whatever I/O error or early EOF the close caused. A close during the TLS handshake takes effect when the
+handshake returns or reaches its timeout; prompt revocation is #961.
 
 ## Evidence
 
@@ -147,13 +150,15 @@ The tests use no real credentials and make no external connection. Hosted CI sta
   `build/test-tmp/acp-provider-broker/`.
 - `AcpProviderBrokerTest` is the integration control. It uses a synthetic Codex login, and a test CA and leaf
   certificate generated at run time and written under `build/test-tmp/acp-provider-broker/`. A synthetic
-  resolver returns a public numeric address, and a recording dialer connects to a local TLS server on
-  127.0.0.1 instead. The control shows that:
+  resolver returns a public numeric address. A recording connector connects to a local TLS server on 127.0.0.1
+  instead, and then completes the module client's `handshake` with `withTestTrustAnchors`, so certificate and
+  host name verification are the production checks. The control shows that:
   - the credential is checked before any resolution or connection;
   - the pinned numeric address is used without re-resolution;
   - SNI and hostname verification use the policy host;
   - redirects are refused without a second connection;
-  - the upstream head and body are exactly the broker-owned values and the re-encoded body;
+  - the upstream head is exactly the policy-owned headers and the credential headers, and the body is the
+    validated body;
   - capability and sequence binding hold;
   - routing, framing and disclosure refusals send nothing upstream;
   - responses are redacted;
