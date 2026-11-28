@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import vm from 'node:vm';
+import { recordCleanupTruth } from './packaged-browser-capture.mjs';
 import { assertGracefulShutdown, bootstrapHashExpression, assertOnlyPinWrites, boundReport, findBootstrap, hasOpenEventStream, isProgressReadUrl, matchingResponse, publishAtomically, publishReport, scrubTokens, summarizeRequests, MAX_REPORT_BYTES, MAX_REPORT_PARTS, REPORT_PART_BYTES } from './packaged-browser-restart.mjs';
 
 const origin = 'http://127.0.0.1:4000';
@@ -387,8 +388,8 @@ async function runDriverFinalizer({ report, root, sensitiveValues, values = { mo
   const calls = [];
   const logs = [];
   const process = { exitCode: report.status === 'failed' ? 1 : undefined };
-  const context = vm.createContext({ report, root, sensitiveValues, values, process, join, publishReport, boundReport, scrubTokens,
-    cdp: { call: async method => { calls.push(`cdp ${method}`); } },
+  const context = vm.createContext({ report, root, sensitiveValues, values, process, join, publishReport, boundReport, scrubTokens, recordCleanupTruth,
+    cdp: { call: async method => { calls.push(`cdp ${method}`); }, lateEvidence: () => ({ settlements: [], dropped: 0 }) },
     stop: async child => { calls.push(`stop ${child}`); if (rejectStop && child === 'application') throw new Error(`stuck ${sensitiveValues[0]}`); },
     browser: 'browser', application: 'application', vite: null, forcedKill: new Set(), profile: '/fake/profile', browserTmp: null,
     safeDiagnostic: value => scrubTokens(String(value), sensitiveValues),

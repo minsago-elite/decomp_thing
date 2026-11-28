@@ -135,6 +135,24 @@ step, the exact announcement when it is wrong, and the fix or a scoped exception
 7. **Recovery.** Session expiry, a server version change and an offline notice are each announced
    once with their next step.
 
+   Session status semantics (#1895): the header and page placements of `SessionStatus` each keep
+   one persistent `role="status"` paragraph (`data-session-announcement="header"` / `"page"`) for
+   their whole lifetime. Cold startup publishes its first state (checking, invalid link, uncleared
+   link) before the first render, so a paragraph mounted with text first appears empty and receives
+   its text after one paint; meanwhile the same text is shown in a plain sibling, so the first screen
+   is unchanged and fragment removal and session requests are not delayed or repeated. Text appears
+   in only one paragraph at a time: the header speaks only an application-instance change; the page
+   speaks checking, signing-out, sign-in-required and unavailable states. Only the single active
+   visible container has the `.session-notice` class. An idle placement is an out-of-flow `.sr-only`
+   wrapper (never `display:none` or `aria-hidden`); the idle page wrapper is `aside[role=none]`
+   without a name, so it is no landmark. Check session and Sign out stay outside the status text.
+   When a focused Sign out or Check session button is activated and removed, focus moves to the page
+   notice (`tabindex="-1"`) while signing out or checking, stays there for a sign-in-required or
+   unavailable outcome, and moves to Sign out when the outcome is connected. It moves only while focus
+   is on the body or where it was last placed; focus moved elsewhere, programmatic or other-tab
+   transitions and a page that loads already connected are left alone. This is component (jsdom +
+   axe-core) evidence, not screen-reader evidence; that remains in #617.
+
 ## Git workflows (#618)
 
 The SPA has no Git views yet: the runtime reports managed Git as unsupported, and the staging,
