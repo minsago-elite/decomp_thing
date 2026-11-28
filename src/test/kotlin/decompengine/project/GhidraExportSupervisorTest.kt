@@ -57,9 +57,16 @@ class GhidraExportSupervisorTest {
         }
 
     @Test
-    fun `an unauthenticated supervisor fails the export before any worker starts`() = inControlTemporaryDirectory { root ->
+    fun `an unauthenticated supervisor fails the export before any worker starts`() {
+        // Another program, and the real supervisor with one byte changed so only its digest differs.
+        val genuine = Files.readAllBytes(ExportSupervisorHelper.verifiedDefaultArtifact())
+        val tampered = genuine.copyOf().also { it[it.size - 1] = (it[it.size - 1].toInt() xor 1).toByte() }
+        for (impostorBytes in listOf(Files.readAllBytes(Path.of("/bin/true")), tampered)) refusesImpostor(impostorBytes)
+    }
+
+    private fun refusesImpostor(impostorBytes: ByteArray) = inControlTemporaryDirectory { root ->
         val impostor = Files.createDirectory(root.resolve("libexec")).resolve(ExportSupervisorHelper.BINARY_NAME)
-        Files.copy(Path.of("/bin/true"), impostor)
+        Files.write(impostor, impostorBytes)
         Files.setPosixFilePermissions(impostor, PosixFilePermissions.fromString("rwxr-xr-x"))
         val marker = root.resolve("worker-started")
         val analyzer = GhidraHeadlessProgramModelAnalyzer(
