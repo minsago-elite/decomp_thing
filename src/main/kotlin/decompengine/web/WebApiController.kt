@@ -201,6 +201,8 @@ internal class WebApiController(
                     if (!acceptsWebMediaType(exchange, "application/octet-stream")) {
                         throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns application/octet-stream.")
                     }
+                    // Refused before either guard: closing an exchange drains an unread request body.
+                    requireNoDownloadBody(exchange)
                     val parts = resource.split('/')
                     jobs.downloadLease(parts[1]).use {
                         artifactDownloads.admit(session.sessionId) { artifactContent.send(exchange, parts[1], parts[3]) }
@@ -314,7 +316,7 @@ internal class WebApiController(
                         val query = WebSourceChunkQuery.parse(exchange.requestURI.rawQuery)
                         val content = jobs.readRevisionSourceFile(parts[1], parts[3], parts[5], parts[7], WebSourceReadPurpose.PREVIEW, query.metadataVersion)
                         sendWebApiResponse(exchange, 200, "sourceChunk", content.chunk(query))
-                    } else jobs.downloadLease(parts[1]).use {
+                    } else requireNoDownloadBody(exchange).let { jobs.downloadLease(parts[1]) }.use {
                         val metadataVersion = parseWebSourceDownloadVersion(exchange.requestURI.rawQuery)
                         if (!acceptsWebMediaType(exchange, "application/octet-stream")) {
                             throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns application/octet-stream.")
@@ -331,6 +333,8 @@ internal class WebApiController(
                     if (!acceptsWebMediaType(exchange, "application/octet-stream")) {
                         throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns application/octet-stream.")
                     }
+                    // Refused before either guard: closing an exchange drains an unread request body.
+                    requireNoDownloadBody(exchange)
                     val parts = resource.split('/')
                     // The job lease and the shared download admission are held until delivery ends, so deletion
                     // cannot remove a record mid-response and slow clients cannot hold unbounded deliveries.
@@ -797,6 +801,18 @@ internal inline fun <T> abortAfterHeaders(write: () -> T): T = try { write() } c
     if (failure is InterruptedException) Thread.currentThread().interrupt()
     if (failure is WebResponseAborted) throw failure
     throw WebResponseAborted(failure)
+}
+
+/**
+ * Download requests carry no body. Any declared body, or a chunked one, exceeds that limit and is refused before the
+ * job lease or download admission is taken, so no later close can drain it while either guard is held.
+ */
+internal fun requireNoDownloadBody(exchange: HttpExchange) {
+    val headers = exchange.requestHeaders
+    val declared = headers["Content-Length"].orEmpty().any { it.trim() != "0" }
+    if (declared || headers.containsKey("Transfer-Encoding")) {
+        throw WebAccessDenied(413, "BODY_TOO_LARGE", "Download requests carry no request body.")
+    }
 }
 
 /** Strict bounded `archiveVerificationRequest` body: the one archive digest the caller displayed. */

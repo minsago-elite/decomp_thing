@@ -110,7 +110,11 @@ function Functions({ selected, basePath, search }: { selected: SourceSelection; 
   const offset = query.cursor ? Number(query.cursor.split('_')[1]) : 0;
   const unscoped = withField(withField(query, 'module', ''), 'cursor', '');
   return <Frame selected={selected} data={data} read={read} onRefresh={() => { moveFocus.current = true; if (query.cursor) go(query); else refresh(); }}
-    navigation={<p><a href={structureListPath(basePath, selected, 'modules')}>{copy.browseModules}</a></p>}>
+    navigation={<>
+      <p><a href={structureListPath(basePath, selected, 'modules')}>{copy.browseModules}</a></p>
+      {query.module && <p>{message(copy.moduleFilter, { module: <bdi>{query.module}</bdi> })}{' '}
+        <a href={structureListPath(basePath, selected, 'functions', functionSearch(unscoped))}>{copy.clearModule}</a></p>}
+    </>}>
     <form class="job-filters" aria-label={copy.filters} onSubmit={event => { event.preventDefault(); go({ ...draft }); }}>
       <label>{copy.search}<input name="search" type="search" maxLength={256} value={draft.search ?? ''} aria-describedby="structure-search-hint"
         onInput={event => { const value = event.currentTarget.value; setDraft(current => withField(current, 'search', value)); }} /></label>
@@ -134,8 +138,6 @@ function Functions({ selected, basePath, search }: { selected: SourceSelection; 
       <div class="job-actions"><button type="submit">{copy.apply}</button>
         <button type="button" onClick={() => { setDraft(DEFAULT_FUNCTION_QUERY); go(DEFAULT_FUNCTION_QUERY); }}>{copy.reset}</button></div>
     </form>
-    {query.module && <p>{message(copy.moduleFilter, { module: <bdi>{query.module}</bdi> })}{' '}
-      <a href={structureListPath(basePath, selected, 'functions', functionSearch(unscoped))}>{copy.clearModule}</a></p>}
     <EvidenceMeanings />
     <h2 ref={results} tabIndex={-1}>{copy.results}</h2>
     {data?.state === 'available' && data.matchedFunctions !== null && data.totalFunctions !== null && <>

@@ -32,7 +32,7 @@ class WebStructureRecordRouteTest {
     /** Larger than any loopback socket buffering, so the second pass is still reading when the record changes. */
     private val padding = 24 * 1024 * 1024
 
-    @Test fun `a record that changes mid-stream is truncated promptly and its delivery released, even with an unread request body`() {
+    @Test fun `a record that changes mid-stream is truncated promptly and its delivery released, and a request body is refused first`() {
         val parent = Files.createDirectories(Path.of("build/test-tmp/web-structure-records").toAbsolutePath())
         val root = createTempDirectory(parent, "records-")
         val input = elfFixture()
@@ -78,12 +78,11 @@ class WebStructureRecordRouteTest {
             val version = Json.parseToJsonElement(functions.body()).jsonObject.getValue("data").jsonObject.getValue("structureVersion").jsonPrimitive.content
             val path = "$revision/records/program-model?structureVersion=$version"
 
-            // Once with no request body, once with a declared body the client never finishes sending: aborting must not
-            // wait to drain it while the delivery lease and download admission are held.
-            for (unreadBody in listOf(false, true)) {
-                abortMidStream(server, path, cookie, job.id, model, padded.size, unreadBody)
-                RandomAccessFile(model.toFile(), "rw").use { it.seek(padded.size - 1L); it.write(' '.code) }
-            }
+            abortMidStream(server, path, cookie, job.id, model, padded.size, unreadBody = false)
+            RandomAccessFile(model.toFile(), "rw").use { it.seek(padded.size - 1L); it.write(' '.code) }
+            // An unchanged record requested with a body the client never finishes sending is refused before either
+            // guard is taken, so no close can drain that body while the lease or admission is held.
+            refusedWithBody(server, path, cookie, job.id)
 
             // With the committed bytes back, the same route serves the record in full.
             val complete = client.send(HttpRequest.newBuilder(URI("$origin$path")).timeout(Duration.ofSeconds(60))
@@ -130,6 +129,21 @@ class WebStructureRecordRouteTest {
             // Released while this client still holds its unfinished request body open.
             awaitReleased(server, jobId)
         }
+    }
+
+    private fun refusedWithBody(server: UploadServer, path: String, cookie: String, jobId: String) {
+        Socket().use { socket ->
+            socket.connect(InetSocketAddress("127.0.0.1", server.serverPort), 5_000)
+            socket.soTimeout = 15_000
+            socket.getOutputStream().write(("GET $path HTTP/1.1\r\nHost: 127.0.0.1:${server.serverPort}\r\n" +
+                "Accept: application/octet-stream\r\nCookie: $cookie\r\nContent-Type: application/octet-stream\r\n" +
+                "Content-Length: 1048576\r\nConnection: close\r\n\r\n").toByteArray())
+            socket.getOutputStream().write(ByteArray(1024)); socket.getOutputStream().flush()
+            val headers = readHeaders(socket.getInputStream())
+            assertTrue(headers.first().startsWith("HTTP/1.1 413"), headers.toString())
+            assertEquals(0 to 0, server.activeDownloads(jobId), "neither guard is taken for a request with a body")
+        }
+        awaitReleased(server, jobId)
     }
 
     private fun awaitReleased(server: UploadServer, jobId: String) {

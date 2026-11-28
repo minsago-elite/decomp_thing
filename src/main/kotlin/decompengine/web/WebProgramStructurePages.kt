@@ -87,10 +87,7 @@ internal class WebProgramStructurePages(
             pinned(index, query)
             // A module filter is a selector, resolved against the recorded plan before anything is echoed. One that is not
             // recorded and one this policy would rewrite get the same denial, so a reply never reveals the difference.
-            val module = moduleFilter?.let { selector ->
-                index.moduleIndex[selector]?.takeIf { index.available && index.planOutcome.state == "available" && selectable(selector, policy) }
-                    ?: moduleNotFound()
-            }
+            val module = moduleFilter?.let { selector -> index.publishedSelectors(policy).module(selector) ?: moduleNotFound() }
             val route = listOf("functions", jobId, runId, revisionId).joinToString("/")
             header(index).apply {
                 put("query", buildJsonObject {
@@ -178,7 +175,7 @@ internal class WebProgramStructurePages(
                     return@apply
                 }
                 // A module this policy would rewrite is never offered as a selector; it is denied exactly as an unrecorded one.
-                val moduleRow = index.moduleIndex[selector]?.takeIf { selectable(selector, policy) } ?: moduleNotFound()
+                val moduleRow = index.publishedSelectors(policy).module(selector) ?: moduleNotFound()
                 val module = index.modules[moduleRow]
                 put("module", moduleItem(index, moduleRow, policy).toMutableMap().apply {
                     put("implementationPath", JsonPrimitive(module.sourcePath))
@@ -230,7 +227,7 @@ internal class WebProgramStructurePages(
                 if (!index.available) { put("entity", JsonNull); return@apply }
                 val table = index.table(kind)
                 // An entity this policy would rewrite is never offered as a selector; it is denied exactly as an unrecorded one.
-                val row = table.index[selector]?.takeIf { selectable(selector, policy) } ?: entityNotFound(kind.wire)
+                val row = index.publishedSelectors(policy).entity(kind, selector) ?: entityNotFound(kind.wire)
                 val fields = records.entity(checkNotNull(index.model), WebProgramStructureBuilder.MAXIMUM_MODEL_BYTES,
                     table.offsets[row], policy)
                 put("entity", fitDetail(JsonObject(entityItem(index, table, row, policy) + detail(index, table, row, fields, policy))))
@@ -262,12 +259,9 @@ internal class WebProgramStructurePages(
             // The focus is resolved against the recorded population before it is echoed. Without the model (calls) or the
             // plan (modules) nothing is recorded, so every focus is denied; a focus this policy would rewrite is never
             // offered and is denied the same way. The denial never depends on how the supplied focus redacts.
-            val start = when {
-                !index.available -> null
-                view == "calls" -> index.table(WebStructureKind.FUNCTION).index[focus]
-                index.planOutcome.state == "available" -> index.moduleIndex[focus]
-                else -> null
-            }?.takeIf { selectable(focus, policy) } ?: throw WebAccessDenied(404, if (view == "calls") "ENTITY_NOT_FOUND" else "MODULE_NOT_FOUND",
+            val published = index.publishedSelectors(policy)
+            val start = (if (view == "calls") published.entity(WebStructureKind.FUNCTION, focus) else published.module(focus))
+                ?: throw WebAccessDenied(404, if (view == "calls") "ENTITY_NOT_FOUND" else "MODULE_NOT_FOUND",
                 "The requested focus is not recorded in this revision's ${if (view == "calls") "program model" else "module plan"}.")
             header(index).apply {
                 put("query", buildJsonObject {

@@ -234,7 +234,14 @@ scores as a supplementary bar chart followed by the same values in a table, and 
 download of the exact confidence record (`GET R/records/confidence?structureVersion=`).
 
 Record downloads hold the job's delivery lease and the shared download admission (four
-reads in all, two per session) for the whole response. A first pinned pass reproduces the
+reads in all, two per session) for the whole response. A download request that carries a
+body (`Content-Length` above zero, or chunked) is refused with `413 BODY_TOO_LARGE` before
+either is taken, since closing an exchange drains an unread body; artifact and source-file
+downloads follow the same rule. The first pass also reads the record's decoded content
+(its UTF-8 text and, while it parses as JSON, every name and scalar token): a record that
+contains a value the listener's redaction policy conceals is refused with
+`409 RECORD_WITHHELD` before any header, so a download never bypasses the aliases of the
+JSON views. Other records keep their committed digest and exact bytes. A first pinned pass reproduces the
 manifest-committed digest before any header is sent; the second pass streams through a
 held-back final chunk that is released only after that pass reproduces the digest too, so
 memory stays at one read chunk and a record that changes mid-response is closed short of
@@ -254,7 +261,10 @@ itself published unchanged: when a configured value would overlap it, the digest
 re-derived with a salt, and when no safe alias exists the read fails with
 `409 STRUCTURE_IDENTITY_WITHHELD`. Every selector (a path selector, a neighborhood focus or
 a function-inventory `module` filter) is resolved against the recorded population before it
-is echoed. An ID that the policy would rewrite is denied exactly as an unrecorded one: same
+is echoed, through a lookup of the selectors that the policy publishes unchanged. The lookup
+is built once per projection and policy and charged to the structure cache, so a concealed
+selector and an unrecorded one take the same single map miss and the supplied value is
+never scanned. An ID that the policy would rewrite is denied exactly as an unrecorded one: same
 status, code and message, so no reply reveals whether a selector overlaps a configured
 value. A `module` filter that names no recorded module (including when no plan is
 available) is `404 MODULE_NOT_FOUND` rather than an empty page; an accepted filter is

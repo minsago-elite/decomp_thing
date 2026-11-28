@@ -33,7 +33,28 @@ class WebStructureIdentityHttpTest {
     private fun function(id: String, name: String, address: ULong, calls: Set<String> = emptySet()) =
         RecoveredFunction(id, name, address, "void $name(void)", null, calls = calls)
 
-    /** A listener over three revisions (`run_2` has no module plan, `run_3` no model) whose policy configures [credentials]. */
+    /** The policy installed on the most recent listener. */
+    private lateinit var installed: WebRedactionPolicy
+
+    /** Records stream from the fixture's committed bytes, through the production delivery. */
+    private val records = WebStructureRecordDelivery { _, runId, path, declared, consume, cancellation ->
+        val file = fixture.files.getValue("reports/runs/$runId/$path")
+        declared(file.bytes.size.toLong())
+        var offset = 0
+        while (offset < file.bytes.size) {
+            cancellation()
+            val count = minOf(8 * 1024, file.bytes.size - offset)
+            consume(file.bytes.copyOfRange(offset, offset + count), count)
+            offset += count
+        }
+        decompengine.repair.StableFileDigest(file.sha256, file.bytes.size.toLong(), file.identity, true)
+    }
+
+    /**
+     * A listener over five revisions whose policy configures [credentials]: `run_1` records the concealed identities,
+     * `run_2` has no module plan, `run_3` no model, `run_4` holds only clean identities, and `run_5` records the
+     * credential only as a JSON escape. Denials go through the production writer.
+     */
     private fun <T> listener(credentials: Map<String, String> = mapOf("API_TOKEN" to literal), block: (String) -> T): T {
         val model = fixture.model(listOf(
             function(main, "main", 0x401000u, setOf(syntax, secret, other)), function(syntax, "shaped", 0x401010u),
@@ -43,6 +64,12 @@ class WebStructureIdentityHttpTest {
                 fixture.planned(secretModule, listOf(secret)))))
         fixture.revision("run_2", "revision_2", model, null)
         fixture.revision("run_3", "revision_3", null, null)
+        val clean = fixture.model(listOf(function(main, "main", 0x401000u, setOf(other)), function(other, "other", 0x401030u)))
+        fixture.revision("run_4", "revision_4", clean, ModulePlan(modules = listOf(fixture.planned("core", listOf(main, other)))))
+        // The same identity, with its first credential character escaped: only a decoded JSON token reveals it.
+        val escaped = model.toJson().replace(secret, "fn_\\u005a${literal.drop(1)}").toByteArray()
+        fixture.revision("run_5", "revision_5", model, null, modelBytes = escaped)
+        val access = LocalWebAccess(LocalWebAccessConfiguration("http://127.0.0.1:8080"))
         val http = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val worker = Executors.newFixedThreadPool(2)
         http.executor = worker
@@ -53,12 +80,15 @@ class WebStructureIdentityHttpTest {
             val job = fixture.jobId
             try {
                 val raw = exchange.requestURI.rawPath
-                val (run, revision) = when {
-                    raw.startsWith("/unplanned/") -> "run_2" to "revision_2"
-                    raw.startsWith("/unmodeled/") -> "run_3" to "revision_3"
-                    else -> "run_1" to "revision_1"
+                val prefixes = mapOf("/unplanned/" to 2, "/unmodeled/" to 3, "/clean/" to 4, "/escaped/" to 5)
+                val prefix = prefixes.keys.firstOrNull(raw::startsWith)
+                val number = prefix?.let(prefixes::getValue) ?: 1
+                val (run, revision) = "run_$number" to "revision_$number"
+                val path = prefix?.let { raw.removePrefix(it.dropLast(1)) } ?: raw
+                if (path.startsWith("/records/")) {
+                    records.send(exchange, job, pages.record(job, run, revision, path.removePrefix("/records/"), query))
+                    return@createContext
                 }
-                val path = raw.removePrefix("/unplanned").removePrefix("/unmodeled")
                 val (kind, data) = when {
                     path == "/graph" -> "structureNeighborhood" to pages.neighborhood(job, run, revision, query, policy)
                     path == "/scorecard" -> "structureScorecard" to pages.scorecard("owner", job, run, revision, query, policy)
@@ -71,18 +101,16 @@ class WebStructureIdentityHttpTest {
                 }
                 sendWebApiResponse(exchange, 200, kind, data)
             } catch (failure: WebAccessDenied) {
-                // The fields the production error envelope carries, besides its per-request ID.
-                val body = buildJsonObject { put("code", failure.code); put("message", failure.message) }.toString().toByteArray()
-                exchange.sendResponseHeaders(failure.status, body.size.toLong())
-                exchange.responseBody.use { it.write(body) }
+                access.sendDenied(exchange, failure)
             }
         }
-        WebRedactionPolicy.install(context, WebRedactionPolicy.create(credentials, emptyList(), emptyList()))
+        installed = WebRedactionPolicy.create(credentials, emptyList(), emptyList())
+        WebRedactionPolicy.install(context, installed)
         http.start()
         try {
             return block("http://127.0.0.1:${http.address.port}")
         } finally {
-            http.stop(0); worker.shutdownNow(); worker.awaitTermination(3, TimeUnit.SECONDS)
+            http.stop(0); worker.shutdownNow(); worker.awaitTermination(3, TimeUnit.SECONDS); access.close()
         }
     }
 
@@ -203,7 +231,7 @@ class WebStructureIdentityHttpTest {
         listener(mapOf("API_TOKEN" to literal, "AUTH_TOKEN" to "_withheld.")) { origin ->
             val refused = get(origin, "/modules")
             assertEquals(409, refused.statusCode())
-            assertEquals("STRUCTURE_IDENTITY_WITHHELD", Json.parseToJsonElement(refused.body()).jsonObject.text("code"))
+            assertEquals("STRUCTURE_IDENTITY_WITHHELD", Json.parseToJsonElement(refused.body()).jsonObject.getValue("error").jsonObject.text("code"))
         }
     }
 
@@ -224,11 +252,15 @@ class WebStructureIdentityHttpTest {
         assertTrue(rows.all { it.text("moduleSelector") == syntaxModule })
     }
 
-    /** Status and body without the per-request ID, which is the only part allowed to differ between two requests. */
-    private fun reply(origin: String, path: String): Pair<Int, String> {
+    /**
+     * Status, headers and body without the per-request ID and the transport date, the only parts allowed to differ
+     * between two requests.
+     */
+    private fun reply(origin: String, path: String): Triple<Int, Map<String, List<String>>, String> {
         val response = get(origin, path)
         val body = Json.parseToJsonElement(response.body()).jsonObject
-        return response.statusCode() to JsonObject(body - "requestId").toString()
+        val headers = response.headers().map().filterKeys { it.lowercase() !in setOf("x-request-id", "date") }
+        return Triple(response.statusCode(), headers.toSortedMap(String.CASE_INSENSITIVE_ORDER), JsonObject(body - "requestId").toString())
     }
 
     @Test fun `a concealed selector is denied exactly as an unknown one on every path`() = listener { origin ->
@@ -251,7 +283,49 @@ class WebStructureIdentityHttpTest {
             val (concealed, unknown) = values
             val denied = reply(origin, path(concealed))
             assertEquals(reply(origin, path(unknown)), denied, name)
-            assertFalse(denied.second.contains(literal), name)
+            assertFalse(denied.third.contains(literal), name)
         }
+    }
+
+    @Test fun `concealed and unknown selectors resolve through the published lookup without scanning the supplied value`() = listener { origin ->
+        // One successful read builds the policy-scoped lookup of published selectors for the projection.
+        data(get(origin, "/functions/$main"), "entityDetail")
+        val index = fixture.cache.retained().single { it.reference.runId == "run_1" }
+        val lookup = index.publishedSelectors(installed)
+        assertTrue(index.retainsDerived("published-selectors:${installed.selectorScope}"), "the lookup is charged and retained with the projection")
+        for ((name, path) in listOf(
+            "inventory module filter" to { selector: String -> "/functions?module=${encode(selector)}" },
+            "module detail" to { selector: String -> "/modules/${encode(selector)}" },
+            "entity detail" to { selector: String -> "/functions/${encode(selector)}" },
+            "call graph focus" to { selector: String -> "/graph?view=calls&focus=${encode(selector)}" },
+            "module graph focus" to { selector: String -> "/graph?view=modules&focus=${encode(selector)}" },
+        )) {
+            val concealed = if (name.startsWith("entity") || name.startsWith("call")) secret else secretModule
+            val unknown = if (concealed == secret) "fn_unrecorded" else "mod_unrecorded"
+            for (selector in listOf(concealed, unknown)) {
+                val (scans, lookups) = installed.opaqueChecks.get() to lookup.lookups.get()
+                assertEquals(404, get(origin, path(selector)).statusCode(), "$name $selector")
+                // One map miss, and no configured-value scan of the supplied selector.
+                assertEquals(lookups + 1, lookup.lookups.get(), "$name $selector")
+                assertEquals(scans, installed.opaqueChecks.get(), "$name $selector")
+            }
+        }
+    }
+
+    @Test fun `a record whose content holds a concealed value is withheld and a clean record downloads exactly`() = listener { origin ->
+        fun version(prefix: String) = data(get(origin, "$prefix/functions"), "functionInventory").text("structureVersion")!!
+        for ((prefix, record) in listOf("" to "program-model", "" to "module-plan", "" to "confidence", "/escaped" to "program-model")) {
+            val refused = get(origin, "$prefix/records/$record?structureVersion=${version(prefix)}")
+            assertEquals(409, refused.statusCode(), "$prefix $record")
+            assertFalse(refused.headers().firstValue("Content-Disposition").isPresent, "refused before any download header")
+            assertEquals("RECORD_WITHHELD", Json.parseToJsonElement(refused.body()).jsonObject.getValue("error").jsonObject.text("code"))
+            assertFalse(refused.body().contains(literal) || refused.body().contains(literal.drop(1)))
+        }
+        val clean = client.send(HttpRequest.newBuilder(URI("$origin/clean/records/program-model?structureVersion=${version("/clean")}"))
+            .timeout(Duration.ofSeconds(10)).build(), HttpResponse.BodyHandlers.ofByteArray())
+        assertEquals(200, clean.statusCode())
+        val committed = fixture.files.getValue("reports/runs/run_4/source-tree/reports/program_model.json")
+        assertContentEquals(committed.bytes, clean.body())
+        assertEquals(committed.sha256, clean.headers().firstValue("X-Decomp-Content-SHA256").orElseThrow())
     }
 }

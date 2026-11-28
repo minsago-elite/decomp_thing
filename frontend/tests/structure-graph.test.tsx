@@ -168,7 +168,7 @@ it('cancels drawing work without hiding the tables, and draws again on request',
   } finally { auth.dispose(); }
 });
 
-it('states truncation with exact omitted counts and refuses an unavailable graph as an empty one', async () => {
+it('states truncation with exact omitted counts and shows a graph over unavailable records as not recorded', async () => {
   const auth = await session();
   const truncated = fixture<StructureNeighborhood>('structure-neighborhood-truncated');
   transport.get.mockResolvedValue({ data: truncated });
@@ -180,12 +180,21 @@ it('states truncation with exact omitted counts and refuses an unavailable graph
     expect(within(facts).getByText(copy.omittedNodes).nextElementSibling?.textContent).toBe('3');
     expect(within(facts).getByText(copy.omittedEdges).nextElementSibling?.textContent).toBe('4');
     view.unmount();
-    transport.get.mockResolvedValue({ data: { ...fixture<StructureNeighborhood>('structure-neighborhood-not-recorded'), binding: selected } });
+    // Without the model the producer records no focus and answers 404, the same as for an unrecorded function.
+    transport.get.mockRejectedValue(new ApiClientError('http_error', { status: 404, serverCode: 'ENTITY_NOT_FOUND' }));
     history.replaceState(null, '', `${revision}/graph?view=calls&focus=fn_0000000000401000`);
     render(<App basePath="/nested" session={auth} />);
-    await screen.findByText(copy.graphStates['not-recorded'], { exact: false });
+    expect((await screen.findByRole('alert')).textContent).toContain(structureCopy.missing);
     expect(screen.queryByRole('table', { name: copy.nodesTitle })).toBeNull();
+    expect(screen.getByRole('link', { name: structureCopy.returnFunctions }).getAttribute('href')).toBe(`${revision}/functions`);
   } finally { auth.dispose(); }
+});
+
+it('still decodes the retained not-recorded neighborhood fixture (decoder compatibility only)', () => {
+  // The producer no longer emits an unavailable neighborhood; the fixture keeps the decoder's handling of that shape.
+  const retained = fixture<StructureNeighborhood>('structure-neighborhood-not-recorded');
+  const document = { apiVersion: 1, kind: 'structureNeighborhood', requestId: 'r', data: retained };
+  expect(decodeResponse(JSON.stringify(document), 'structureNeighborhood').data.graphState).toBe('not-recorded');
 });
 
 it('keeps inventory navigation after a changed pinned neighborhood and refreshes to current records', async () => {
