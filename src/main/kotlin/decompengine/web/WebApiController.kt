@@ -105,6 +105,7 @@ internal class WebApiController(
         "jobs/[^/]+/artifacts/[^/]+/content",
         "jobs/[^/]+/runs/[^/]+/queue-position",
         "jobs/[^/]+/repositories(?:/[^/]+(?:/operations/[^/]+)?)?",
+        "jobs/[^/]+/repositories/[^/]+/(?:status|history|diff|refs)",
         "jobs/[^/]+/(?:deletion-preview|operations/[^/]+)",
         "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-search",
         "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-diff(?:/(?:file|patch))?",
@@ -218,7 +219,7 @@ internal class WebApiController(
                     }
                 }
                 resource == "agent/preflight" -> agentPreflights.handle(exchange)
-                resource.matches(Regex("jobs/[^/]+/repositories(?:/[^/]+(?:/operations/[^/]+)?)?")) -> gitRoutes.handle(exchange, resource.split('/'))
+                resource.matches(Regex("jobs/[^/]+/repositories(?:/[^/]+(?:/operations/[^/]+|/(?:status|history|diff|refs))?)?")) -> gitRoutes.handle(exchange, resource.split('/'))
                 resource == "storage" || resource == "storage/maintenance-preview" -> lifecycle.storage(exchange, resource != "storage")
                 resource.matches(Regex("jobs/[^/]+/deletion-preview")) -> lifecycle.deletionPreview(exchange, resource.split('/')[1])
                 resource.matches(Regex("jobs/[^/]+/operations/[^/]+")) -> {

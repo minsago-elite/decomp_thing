@@ -111,6 +111,11 @@ jobs:
             | tee "$RUNNER_TEMP/frontend-ci/api-drift-tests.txt"
       - name: Verify generated large web fixtures
         run: node --test scripts/web-scale-fixtures.test.mjs | tee "$RUNNER_TEMP/frontend-ci/scale-fixtures-tests.txt"
+      - name: Verify packaged Git API scale controls
+        timeout-minutes: 1
+        run: |
+          node --test scripts/generate-git-scale-repo.test.mjs scripts/packaged-browser-git-scale.test.mjs
+          node --check scripts/packaged-browser-git-scale.mjs
       - name: Verify live dashboard audit preservation controls
         run: node --test scripts/packaged-browser-live.test.mjs | tee "$RUNNER_TEMP/frontend-ci/live-audit-tests.txt"
       - name: Check frontend freshness diagnostic controls
@@ -296,6 +301,12 @@ jobs:
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode scale --no-sandbox
+      - name: Verify bounded Git history and diff API with ten thousand commits
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode git-scale --no-sandbox
       - name: Verify bounded program-structure views with one hundred thousand recorded functions
         run: |
           node scripts/check-packaged-web-browser.mjs \

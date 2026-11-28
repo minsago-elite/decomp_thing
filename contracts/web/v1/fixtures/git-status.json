@@ -1,0 +1,68 @@
+{
+  "apiVersion": 1,
+  "kind": "gitStatus",
+  "requestId": "request_example_1",
+  "data": {
+    "repositoryId": "repository_example_2",
+    "worktreeId": "worktree_example_2",
+    "repositoryVersion": "repository_v_1",
+    "worktreeVersion": "worktree_v_1",
+    "headState": "attached",
+    "headObjectId": "0123456789abcdef0123456789abcdef01234567",
+    "headRefName": "refs/heads/trunk",
+    "busy": false,
+    "complete": true,
+    "counts": {
+      "staged": 1,
+      "unstaged": 1,
+      "untracked": 1,
+      "ignored": 1,
+      "conflicted": 0
+    },
+    "notices": [
+      {
+        "code": "dirty",
+        "message": "The work tree has uncommitted changes. Review, stage and commit them, or keep them; nothing is discarded automatically."
+      }
+    ],
+    "entries": [
+      {
+        "fileId": "file_0123456789abcdef0123456789abcdef",
+        "path": "src/new name.c",
+        "pathEscaped": false,
+        "originalPath": "src/old name.c",
+        "staged": "renamed",
+        "unstaged": "modified",
+        "untracked": false,
+        "ignored": false,
+        "conflict": null,
+        "submodule": false
+      },
+      {
+        "fileId": "file_1123456789abcdef0123456789abcdef",
+        "path": "src/line\\nbreak.c",
+        "pathEscaped": true,
+        "originalPath": null,
+        "staged": "none",
+        "unstaged": "none",
+        "untracked": true,
+        "ignored": false,
+        "conflict": null,
+        "submodule": false
+      },
+      {
+        "fileId": "file_2123456789abcdef0123456789abcdef",
+        "path": "input.elf",
+        "pathEscaped": false,
+        "originalPath": null,
+        "staged": "none",
+        "unstaged": "none",
+        "untracked": false,
+        "ignored": true,
+        "conflict": null,
+        "submodule": false
+      }
+    ],
+    "nextCursor": null
+  }
+}

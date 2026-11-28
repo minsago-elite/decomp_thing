@@ -1526,6 +1526,26 @@
     {
       "file": "fixtures/invalid-artifact-family-role-projection.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/git-diff.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-history-many-parents.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-history.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-refs.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-status.json",
+      "valid": true
     }
   ]
 }

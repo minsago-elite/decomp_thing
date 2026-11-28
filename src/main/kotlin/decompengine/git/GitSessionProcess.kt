@@ -61,12 +61,13 @@ internal class GitSessionProcess(
             }
             // glibc POSIX_SPAWN_SETSID | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK.
             nativeResult(libc.posix_spawnattr_setflags(attributes, 0x8c.toShort()))
-            val stdin = libc.open("/dev/null", O_CLOEXEC)
-            if (stdin < 0) throw IOException("Git session stdin failed")
-            descriptors += stdin
+            val stdinPipe = invocation.input?.let { pipe() }
+            val stdin = if (stdinPipe == null) libc.open("/dev/null", O_CLOEXEC) else -1
+            if (stdinPipe == null && stdin < 0) throw IOException("Git session stdin failed")
+            if (stdin >= 0) descriptors += stdin
             val stdout = pipe()
             val stderr = pipe()
-            nativeResult(libc.posix_spawn_file_actions_adddup2(actions, stdin, 0))
+            nativeResult(libc.posix_spawn_file_actions_adddup2(actions, stdinPipe?.first ?: stdin, 0))
             nativeResult(libc.posix_spawn_file_actions_adddup2(actions, stdout.second, 1))
             nativeResult(libc.posix_spawn_file_actions_adddup2(actions, stderr.second, 2))
             nativeResult(libc.posix_spawn_file_actions_addclosefrom_np(actions, 3))
@@ -84,12 +85,15 @@ internal class GitSessionProcess(
             }
             checkBound()
             if (pid <= 0) throw IOException("Git session returned an invalid process ID")
-            close(stdin); close(stdout.second); close(stderr.second)
-            for (fd in listOf(stdout.first, stderr.first)) {
+            if (stdin >= 0) close(stdin)
+            stdinPipe?.let { close(it.first) }
+            close(stdout.second); close(stderr.second)
+            val inputWriter = stdinPipe?.second
+            for (fd in listOf(stdout.first, stderr.first) + listOfNotNull(inputWriter)) {
                 val flags = libc.fcntl(fd, F_GETFL, 0)
                 if (flags < 0 || libc.fcntl(fd, F_SETFL, flags or O_NONBLOCK) < 0) throw IOException("Git session pipe setup failed")
             }
-            return capture(stdout.first, stderr.first)
+            return capture(stdout.first, stderr.first, inputWriter)
         } catch (interrupted: InterruptedException) {
             Thread.currentThread().interrupt()
             throw GitCommandException(GitCommandException.Kind.INTERRUPTED, "Git was interrupted.")
@@ -112,16 +116,30 @@ internal class GitSessionProcess(
         }
     }
 
-    private fun capture(stdoutFd: Int, stderrFd: Int): GitCommandResult {
+    private fun capture(stdoutFd: Int, stderrFd: Int, inputWriterFd: Int?): GitCommandResult {
         val stdout = Capture(stdoutFd, invocation.limits.maxStdoutBytes)
         val stderr = Capture(stderrFd, invocation.limits.maxStderrBytes)
+        val input = invocation.input
+        var inputWriter = inputWriterFd
+        var inputOffset = 0
+        if (input == null || input.isEmpty()) inputWriter?.let { close(it); inputWriter = null }
         var groupStopped = false
         Memory(8192).use { chunk ->
-            Memory(16).use { poll ->
+            Memory(24).use { poll ->
                 while (true) {
                     checkBound()
                     // One chunk per stream per turn prevents stdout starving stderr/deadline checks.
                     stdout.read(chunk); stderr.read(chunk)
+                    val writer = inputWriter
+                    if (writer != null && input != null) {
+                        val nextOffset = writeInput(writer, input, inputOffset, chunk)
+                        if (nextOffset == null) {
+                            close(writer); inputWriter = null
+                        } else {
+                            inputOffset = nextOffset
+                            if (inputOffset == input.size) { close(writer); inputWriter = null }
+                        }
+                    }
                     if (stderr.overflowed || (stdout.overflowed && !invocation.truncateStdout)) {
                         throw GitCommandException(GitCommandException.Kind.OUTPUT_LIMIT, "Git output exceeded its bound.")
                     }
@@ -139,10 +157,14 @@ internal class GitSessionProcess(
                         val exit = if (truncated) -1 else if (status and 0x7f == 0) status ushr 8 and 0xff else 128 + (status and 0x7f)
                         return GitCommandResult(exit, stdout.bytes(), stderr.bytes(), truncated)
                     }
-                    val active = listOf(stdout, stderr).filter { !it.eof }
-                    active.forEachIndexed { index, stream ->
+                    val active = buildList {
+                        if (!stdout.eof) add(stdout.fd to POLLIN)
+                        if (!stderr.eof) add(stderr.fd to POLLIN)
+                        inputWriter?.let { add(it to POLLOUT) }
+                    }
+                    active.forEachIndexed { index, (fd, events) ->
                         val offset = index * 8L
-                        poll.setInt(offset, stream.fd); poll.setShort(offset + 4, 1); poll.setShort(offset + 6, 0)
+                        poll.setInt(offset, fd); poll.setShort(offset + 4, events); poll.setShort(offset + 6, 0)
                     }
                     val remaining = deadline - System.nanoTime()
                     checkBound()
@@ -150,6 +172,21 @@ internal class GitSessionProcess(
                     if (result < 0 && Native.getLastError() != EINTR) throw IOException("Git session poll failed")
                 }
             }
+        }
+    }
+
+    private fun writeInput(fd: Int, input: ByteArray, offset: Int, buffer: Memory): Int? {
+        checkBound()
+        val size = minOf(8192, input.size - offset)
+        buffer.write(0, input, offset, size)
+        val written = libc.write(fd, buffer, NativeLong(size.toLong())).toLong()
+        val error = if (written < 0) Native.getLastError() else 0
+        checkBound()
+        return when {
+            written > 0 -> offset + written.toInt()
+            written == 0L || error == EINTR || error == EAGAIN -> offset
+            error == EPIPE -> null
+            else -> throw IOException("Git session stdin write failed")
         }
     }
 
@@ -241,7 +278,10 @@ internal class GitSessionProcess(
         const val WNOHANG = 1
         const val EINTR = 4
         const val EAGAIN = 11
+        const val EPIPE = 32
         const val ESRCH = 3
+        const val POLLIN: Short = 1
+        const val POLLOUT: Short = 4
     }
 }
 
@@ -250,6 +290,7 @@ private interface GitSessionLibC : Library {
     fun close(fd: Int): Int
     fun pipe2(descriptors: Pointer, flags: Int): Int
     fun read(fd: Int, buffer: Pointer, count: NativeLong): NativeLong
+    fun write(fd: Int, buffer: Pointer, count: NativeLong): NativeLong
     fun fcntl(fd: Int, command: Int, argument: Int): Int
     fun poll(descriptors: Pointer, count: NativeLong, timeoutMilliseconds: Int): Int
     fun kill(pid: Int, signal: Int): Int

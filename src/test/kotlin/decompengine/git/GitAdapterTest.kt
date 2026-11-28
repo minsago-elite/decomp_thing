@@ -80,6 +80,17 @@ class GitAdapterTest {
         assertFailsWith<IllegalArgumentException> { GitInvocation("status", workTree = f.root) }
     }
 
+    @Test fun `native session forwards bounded stdin and invocation environment`(): Unit = GitTestRepositories().use { f ->
+        val echo = fakeGit(f.root.resolve("stdin"), "printf '%s\\n' \"\$GIT_AUTHOR_NAME\"; cat")
+        val payload = ByteArray(256 * 1024) { it.toByte() }
+        val result = GitCommandRunner(echo, f.environment).run(
+            GitInvocation("status", input = payload, variables = mapOf("GIT_AUTHOR_NAME" to "test-identity")),
+        )
+        assertContentEquals("test-identity\n".toByteArray() + payload, result.stdout)
+        val earlyExit = GitCommandRunner(fakeGit(f.root.resolve("early-exit"), "exit 0"), f.environment)
+        assertEquals(0, earlyExit.run(GitInvocation("status", input = payload)).exitCode)
+    }
+
     @Test fun `time and output bounds terminate the child`(): Unit = GitTestRepositories().use { f ->
         val slow = GitCommandRunner(fakeGit(f.root.resolve("slow"), "sleep 30"), f.environment)
         val started = System.nanoTime()
@@ -379,7 +390,14 @@ class GitAdapterTest {
         val editedUntracked = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
         assertFalse(firstBytes.contentEquals(Files.readAllBytes(source)))
         assertTrue(untracked.dirty && editedUntracked.dirty)
-        assertEquals(untracked.statusDigest, editedUntracked.statusDigest)
+        assertNotEquals(untracked.statusDigest, editedUntracked.statusDigest)
+        // Read cursors observe size/mtime changes, but the fingerprint remains no content identity:
+        // changing bytes while preserving both metadata fields must not be mistaken for proof.
+        val untrackedTime = Files.getLastModifiedTime(source)
+        Files.writeString(source, "int TWO_different;\n")
+        Files.setLastModifiedTime(source, untrackedTime)
+        assertEquals(editedUntracked.statusDigest, GitRepositoryInspector.inspect(f.runner, gitDir, workTree).statusDigest)
+        assertFalse(Files.readAllBytes(source).contentEquals("int two_different;\n".toByteArray()))
         f.commitAll(gitDir, workTree, "fixture")
         Files.writeString(source, "int tracked_dirty;\n")
         val modified = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
@@ -388,7 +406,12 @@ class GitAdapterTest {
         val editedModified = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
         assertFalse(modifiedBytes.contentEquals(Files.readAllBytes(source)))
         assertTrue(modified.dirty && editedModified.dirty)
-        assertEquals(modified.statusDigest, editedModified.statusDigest)
+        assertNotEquals(modified.statusDigest, editedModified.statusDigest)
+        val modifiedTime = Files.getLastModifiedTime(source)
+        Files.writeString(source, "int TRACKED_dirty_again;\n")
+        Files.setLastModifiedTime(source, modifiedTime)
+        assertEquals(editedModified.statusDigest, GitRepositoryInspector.inspect(f.runner, gitDir, workTree).statusDigest)
+        assertFalse(Files.readAllBytes(source).contentEquals("int tracked_dirty_again;\n".toByteArray()))
     }
 
     @Test fun `linked roots ancestors worktrees and nested repository metadata are refused`(): Unit = GitTestRepositories().use { f ->

@@ -1,0 +1,52 @@
+{
+  "apiVersion": 1,
+  "kind": "gitDiff",
+  "requestId": "request_example_1",
+  "data": {
+    "repositoryId": "repository_example_2",
+    "worktreeId": "worktree_example_2",
+    "scope": "commit",
+    "commitObjectId": "0123456789abcdef0123456789abcdef01234567",
+    "parentObjectId": "1123456789abcdef0123456789abcdef01234567",
+    "files": [
+      {
+        "fileId": "file_0123456789abcdef0123456789abcdef",
+        "path": "src/main.c",
+        "pathEscaped": false,
+        "originalPath": null,
+        "change": "modified",
+        "oldObjectId": "3123456789abcdef0123456789abcdef01234567",
+        "newObjectId": "4123456789abcdef0123456789abcdef01234567",
+        "oldMode": "100644",
+        "newMode": "100644",
+        "binary": false,
+        "additions": "1",
+        "deletions": "1",
+        "newSizeBytes": "31"
+      },
+      {
+        "fileId": "file_1123456789abcdef0123456789abcdef",
+        "path": "assets/table.bin",
+        "pathEscaped": false,
+        "originalPath": null,
+        "change": "added",
+        "oldObjectId": null,
+        "newObjectId": "5123456789abcdef0123456789abcdef01234567",
+        "oldMode": "000000",
+        "newMode": "100644",
+        "binary": true,
+        "additions": null,
+        "deletions": null,
+        "newSizeBytes": "4096"
+      }
+    ],
+    "complete": true,
+    "nextCursor": null,
+    "patch": {
+      "fileId": "file_0123456789abcdef0123456789abcdef",
+      "text": "diff --git a/src/main.c b/src/main.c\n--- a/src/main.c\n+++ b/src/main.c\n@@ -1 +1 @@\n-int main(void) { return 0; }\n+int main(void) { return 2; }\n",
+      "truncated": false,
+      "binary": false
+    }
+  }
+}
