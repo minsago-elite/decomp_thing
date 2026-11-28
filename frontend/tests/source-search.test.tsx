@@ -91,14 +91,14 @@ it('renders complete matches as escaped context with links and no continuation',
 it('distinguishes no matches, skipped coverage and an incomplete empty page', async () => {
   vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(response(fixture('source-search-no-matches'))));
   const view = mount('?q=absent');
-  const empty = await screen.findByText(/No matches in the 1 files that could be searched\./u);
+  const empty = await screen.findByText(/No matches in the one file that could be searched\./u);
   expect(empty.closest('[data-search-state]')?.getAttribute('data-search-state')).toBe('no-matches');
   expect(screen.getByText(/Coverage is incomplete: 4 files in scope were not searched\./u)).toBeTruthy();
   expect(screen.getByText(/1 not declared viewable/u)).toBeTruthy();
   view.unmount();
   vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(response(fixture('source-search-incomplete-empty'))));
   mount('?q=absent');
-  const partial = await screen.findByText(/No matches yet, but the search is incomplete\. It reached the byte limit for this page\. 1 searchable files/u);
+  const partial = await screen.findByText(/No matches yet, but the search is incomplete\. It reached the byte limit for this page\. 1 searchable file has not been fully checked/u);
   expect(partial.closest('[data-search-state]')?.getAttribute('data-search-state')).toBe('partial-empty');
   expect(screen.queryByText(/No matches in the/u)).toBeNull();
   expect(screen.getByText(/1 unavailable for reading/u)).toBeTruthy();
@@ -194,6 +194,37 @@ it.each(['root', directory])('refuses oversized bookmarked searches in %s and le
   fireEvent.click(screen.getByRole('button', { name: 'Search' }));
   expect(new URLSearchParams(window.location.search).get('q')).toBe('needle');
   expect(new URLSearchParams(window.location.search).get('path')).toBe('src');
+});
+
+it.each([
+  { files: 1, matches: 0, summary: 'No matches in the one searchable file in scope.' },
+  { files: 1, matches: 1, summary: 'Showing 1 match on this page.' },
+  { files: 1, matches: 2, summary: 'Showing 2 matches on this page.' },
+  { files: 2, matches: 1, summary: 'Showing 1 match on this page.' },
+])('reports independent counts for a completed search (files=$files, matches=$matches)', async ({ files, matches, summary }) => {
+  const result = fixture('source-search-complete');
+  result.data.scope = { ...result.data.scope, filesInScope: files, searchableFiles: files };
+  result.data.progress.scannedFiles = files;
+  // These matches all belong to the same fixture file.
+  result.data.items = result.data.items.slice(1, 1 + matches);
+  vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(response(result)));
+  mount('?q=needle');
+  await waitFor(() => expect(document.querySelector('.source-search-status-complete')).toBeTruthy());
+  const status = document.querySelector('.source-search-status-complete')!;
+  expect(status.querySelector('strong')?.textContent).toBe(summary);
+  expect(status.textContent).toContain(files === 1 ? 'The only searchable file in scope was checked.' : 'All 2 searchable files in scope were checked.');
+});
+
+it.each([1, 5])('describes one unreadable file among %i searchable files', async total => {
+  const result = fixture('source-search-no-matches');
+  result.data.scope = { filesInScope: total, searchableFiles: total, notViewable: 0, declaredBinary: 0, tooLarge: 0 };
+  result.data.progress.scannedFiles = total;
+  vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(response(result)));
+  mount('?q=absent');
+  expect(await screen.findByText('Coverage is incomplete because 1 file in scope was not searched.')).toBeTruthy();
+  expect(screen.getByText(total === 1
+    ? /The only searchable file could not be read as text/u
+    : /1 of the 5 searchable files could not be read as text/u)).toBeTruthy();
 });
 
 it('keeps coverage gaps from earlier pages on a final continued page', async () => {

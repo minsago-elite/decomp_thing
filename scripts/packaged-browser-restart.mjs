@@ -4,14 +4,16 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
 const RUN = 'run_fixture_3';
-const MAX_REPORT_BYTES = 512 * 1024;
+export const MAX_REPORT_BYTES = 512 * 1024;
+const DOCUMENT_POLICIES_ENCODING = 'csp-document-policies-from-document-requests/v1';
+const DOCUMENT_POLICIES_MARKER = '__cspDocumentPoliciesEncoding';
 
 /** Replace-by-rename publication, so a reader never observes a partial progress journal. */
-export async function publishAtomically(path, text) {
+export async function publishAtomically(path, text, fsApi = fs) {
   const publication = path + '.browser-publication';
-  await fs.rm(publication, { force: true });
-  await fs.writeFile(publication, text, { flag: 'wx', mode: 0o600 });
-  await fs.rename(publication, path);
+  await fsApi.rm(publication, { force: true });
+  await fsApi.writeFile(publication, text, { flag: 'wx', mode: 0o600 });
+  await fsApi.rename(publication, path);
 }
 
 /** Finds one local-bootstrap handoff in captured JVM output; returns null if absent. */
@@ -51,10 +53,327 @@ export function scrubTokens(value, tokens) {
 export function boundReport(report, maxBytes = MAX_REPORT_BYTES) {
   if (Buffer.byteLength(JSON.stringify(report), 'utf8') <= maxBytes) return report;
   const bounded = structuredClone(report);
+  // Each target records the same response-policy entries twice. On oversized reports only,
+  // encode the duplicate as a versioned reconstruction marker; request records themselves
+  // (including headers, failures, and odd shapes) remain untouched.
+  const inspectedTargets = bounded.mode === 'audit' && Array.isArray(bounded.contentSecurityPolicy?.inspectedTargets)
+    ? bounded.contentSecurityPolicy.inspectedTargets : [];
+  for (const target of inspectedTargets) {
+    if (!target || typeof target !== 'object' || Array.isArray(target) ||
+        Object.hasOwn(target, DOCUMENT_POLICIES_MARKER) ||
+        !Array.isArray(target.documentRequests) || !Array.isArray(target.documentPolicies) ||
+        !target.documentRequests.every(request => request && typeof request === 'object' && !Array.isArray(request) && !Object.hasOwn(request, DOCUMENT_POLICIES_MARKER))) continue;
+    const policies = target.documentRequests.filter(request => request.source !== null);
+    if (JSON.stringify(target.documentPolicies) === JSON.stringify(policies)) {
+      const marker = { [DOCUMENT_POLICIES_MARKER]: DOCUMENT_POLICIES_ENCODING, count: policies.length };
+      if (Buffer.byteLength(JSON.stringify(target.documentPolicies), 'utf8') > Buffer.byteLength(JSON.stringify(marker), 'utf8')) {
+        target.documentPolicies = marker;
+      }
+    }
+  }
   if (bounded.requests) bounded.requests = Object.fromEntries(Object.entries(bounded.requests)
     .map(([name, list]) => [name, Array.isArray(list) ? { count: list.length, truncated: true } : list]));
-  assert.ok(Buffer.byteLength(JSON.stringify(bounded), 'utf8') <= maxBytes, 'Report exceeds its byte bound after truncation');
+  const boundedBytes = Buffer.byteLength(JSON.stringify(bounded), 'utf8');
+  const largestFields = Object.entries(bounded).map(([name, value]) => [name, Buffer.byteLength(JSON.stringify(value), 'utf8')])
+    .sort((left, right) => right[1] - left[1]).slice(0, 5);
+  if (boundedBytes > maxBytes) {
+    const measure = () => Buffer.byteLength(JSON.stringify(bounded), 'utf8');
+    const diagnostics = largeDiagnostics(bounded);
+    if (diagnostics.length && excerptDiagnostics(bounded, diagnostics, maxBytes, measure)) return bounded;
+  }
+  assert.ok(boundedBytes <= maxBytes, `Report exceeds its byte bound after truncation (${boundedBytes}/${maxBytes} bytes; largest fields ${JSON.stringify(largestFields)})`);
   return bounded;
+}
+
+const DIAGNOSTIC_KEYS = ['error', 'applicationError', 'browserError', 'viteError', 'workCleanupError'];
+
+/** Scrubbed diagnostic strings over 4 KiB (top-level and cleanupErrors entries), indexed for UTF-8-safe excerpts. */
+function largeDiagnostics(target) {
+  const diagnostics = [];
+  const addDiagnostic = (name, key, value, set) => {
+    if (typeof value !== 'string' || !value) return;
+    const serializedBytes = Buffer.byteLength(JSON.stringify(value), 'utf8') - 2;
+    // Short diagnostics are more useful intact; the excerpt metadata itself would cost more.
+    if (serializedBytes <= 4096) return;
+    const byteOffsets = [0];
+    const codeUnitOffsets = [0];
+    let codeUnits = 0;
+    let codePoints = 0;
+    let originalBytes = 0;
+    for (const character of value) {
+      const point = character.codePointAt(0);
+      const bytes = point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+      codeUnits += character.length;
+      originalBytes += bytes;
+      codePoints++;
+      if (codePoints % 256 === 0) {
+        byteOffsets.push(originalBytes);
+        codeUnitOffsets.push(codeUnits);
+      }
+    }
+    if (byteOffsets.at(-1) !== originalBytes) {
+      byteOffsets.push(originalBytes);
+      codeUnitOffsets.push(codeUnits);
+    }
+    diagnostics.push({ name, key, value, set, byteOffsets, codeUnitOffsets, originalBytes,
+      serializedBytes, sha256: createHash('sha256').update(value, 'utf8').digest('hex') });
+  };
+  for (const name of DIAGNOSTIC_KEYS) {
+    addDiagnostic(name, name, target[name], value => { target[name] = value; });
+  }
+  if (Array.isArray(target.cleanupErrors)) target.cleanupErrors.forEach((value, index) => {
+    addDiagnostic(`cleanupErrors[${index}]`, 'cleanupErrors', value, next => { target.cleanupErrors[index] = next; });
+  });
+  return diagnostics;
+}
+
+/** Head and tail of one diagnostic within budget UTF-8 bytes, never splitting a character. */
+function diagnosticExcerpt(diagnostic, budget) {
+  const { value, byteOffsets, codeUnitOffsets, originalBytes, sha256 } = diagnostic;
+  const checkpointBefore = target => {
+    let low = 0;
+    let high = byteOffsets.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (byteOffsets[middle] <= target) low = middle + 1;
+      else high = middle;
+    }
+    return Math.max(0, low - 1);
+  };
+  const advance = (unitOffset, byteOffset, target, before) => {
+    let units = unitOffset;
+    let bytes = byteOffset;
+    while (units < value.length) {
+      const point = value.codePointAt(units);
+      const pointBytes = point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+      if (before ? bytes + pointBytes > target : bytes >= target) break;
+      units += point > 0xffff ? 2 : 1;
+      bytes += pointBytes;
+    }
+    return { units, bytes };
+  };
+  const leftTarget = Math.floor(budget / 2);
+  const leftCheckpoint = checkpointBefore(leftTarget);
+  const left = advance(codeUnitOffsets[leftCheckpoint], byteOffsets[leftCheckpoint], leftTarget, true);
+  const remaining = Math.max(0, budget - left.bytes);
+  const rightTarget = originalBytes - remaining;
+  const rightCheckpoint = checkpointBefore(rightTarget);
+  const right = advance(codeUnitOffsets[rightCheckpoint], byteOffsets[rightCheckpoint], rightTarget, false);
+  const suffixStart = Math.max(left.units, right.units);
+  const prefix = value.slice(0, left.units);
+  const suffix = value.slice(suffixStart);
+  const retained = prefix + suffix;
+  const retainedBytes = Buffer.byteLength(retained, 'utf8');
+  const marker = `\n...[diagnostic excerpt; omitted ${originalBytes - retainedBytes} of ${originalBytes} UTF-8 bytes; sha256=${sha256}]...\n`;
+  return { text: prefix + marker + suffix,
+    metadata: { originalBytes, retainedBytes, omittedBytes: originalBytes - retainedBytes, sha256 } };
+}
+
+/**
+ * Replaces each large diagnostic with an excerpt, recorded in target.diagnosticTruncation, sized to the room
+ * measure() leaves under maxBytes. beforeExpand runs with zero-byte excerpts in place (for other compaction).
+ * Returns false when even zero-byte excerpts cannot fit.
+ */
+function excerptDiagnostics(target, diagnostics, maxBytes, measure, beforeExpand = () => {}) {
+  const truncation = {};
+  let diagnosticBytes = 0;
+  for (const diagnostic of diagnostics) {
+    const zero = diagnosticExcerpt(diagnostic, 0);
+    diagnostic.set(zero.text);
+    truncation[diagnostic.name] = zero.metadata;
+    diagnosticBytes += diagnostic.serializedBytes;
+  }
+  target.diagnosticTruncation = truncation;
+  beforeExpand();
+  const zeroBytes = measure();
+  if (zeroBytes > maxBytes) return false;
+  const available = maxBytes - zeroBytes;
+  const setBudgets = factor => {
+    for (const diagnostic of diagnostics) {
+      const budget = Math.floor(available * 0.8 * diagnostic.serializedBytes / diagnosticBytes * factor);
+      const result = diagnosticExcerpt(diagnostic, budget);
+      diagnostic.set(result.text);
+      truncation[diagnostic.name] = result.metadata;
+    }
+  };
+  setBudgets(1);
+  let currentBytes = measure();
+  for (let attempt = 0; currentBytes > maxBytes && attempt < 8; attempt++) {
+    const used = currentBytes - zeroBytes;
+    const room = maxBytes - zeroBytes;
+    setBudgets(used > 0 ? Math.max(0, Math.min(0.8, (room / used) * 0.8)) : 0);
+    currentBytes = measure();
+  }
+  if (currentBytes > maxBytes) {
+    setBudgets(0);
+    currentBytes = measure();
+  }
+  assert.ok(currentBytes <= maxBytes, `Report exceeds its byte bound after diagnostic compaction (${currentBytes}/${maxBytes} bytes)`);
+  return true;
+}
+
+// Lossless report publication (#1882). The retained primary report.json keeps its 512 KiB bound;
+// a larger scrubbed report is published byte-exact as at most 16 x 4 MiB parts (64 MiB of parts).
+// Including the bounded primary, retained output is at most 64 MiB + 512 KiB in 17 files.
+export const REPORT_PART_BYTES = 4 * 1024 * 1024;
+export const MAX_REPORT_PARTS = 16;
+const FAILURE_PREVIEW_BYTES = 16 * 1024;
+const FAILURE_RECORD_BYTES = 64 * 1024;
+const prettyJSON = value => JSON.stringify(value, null, 2) + '\n';
+const REQUIRED_REPORT_FACTS = new Set(['mode', 'exitCode', 'auditVerdict', 'gates', 'failures', 'budgetFailures', 'requestFailures']);
+
+/** Longest UTF-8 prefix of text within maxBytes, never splitting a character. */
+function utf8Prefix(text, maxBytes) {
+  const bytes = Buffer.from(text, 'utf8');
+  if (bytes.length <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+  return bytes.subarray(0, end).toString('utf8');
+}
+
+/** A bounded, already-scrubbed view of a string fact with the size and digest of the whole fact. */
+function factPreview(text, maxBytes = FAILURE_PREVIEW_BYTES) {
+  const bytes = Buffer.from(text, 'utf8');
+  const preview = utf8Prefix(text, maxBytes);
+  return { bytes: bytes.length, sha256: sha256(bytes), preview, complete: preview.length === text.length };
+}
+
+/**
+ * Primary report: every top-level fact inline until the bound is met. Large diagnostics become bounded
+ * head/tail excerpts (#1992) given at least a quarter of the bound: the largest other facts are replaced by
+ * digest references first; a diagnostic is itself referenced only if zero-byte excerpts still cannot fit.
+ */
+function primaryReport(full, evidence, maxBytes) {
+  let primary = { ...full, reportEvidence: evidence };
+  const measure = () => Buffer.byteLength(prettyJSON(primary), 'utf8');
+  if (measure() <= maxBytes) return prettyJSON(primary);
+  const sizes = Object.entries(full).filter(([key, value]) => key !== 'status' && value !== undefined)
+    .map(([key, value]) => [key, Buffer.from(JSON.stringify(value) ?? 'null', 'utf8')])
+    .sort((a, b) => b[1].length - a[1].length);
+  // A reference is kept only when it shrinks the measured report, referencedKeys entry included (#1992).
+  const reference = (keys, limit = maxBytes) => {
+    for (const [key, bytes] of sizes) {
+      const before = measure();
+      if (before <= limit) break;
+      if (!keys(key)) continue;
+      const value = primary[key];
+      primary[key] = { reportEvidence: key, bytes: bytes.length, sha256: sha256(bytes) };
+      evidence.referencedKeys.push(key);
+      if (measure() < before) continue;
+      primary[key] = value;
+      evidence.referencedKeys.pop();
+    }
+  };
+  // Verdict, exit and cleanup facts stay inline; they are referenced only if nothing else can meet the bound.
+  const optional = key => typeof full[key] !== 'boolean' && !REQUIRED_REPORT_FACTS.has(key);
+  if (Array.isArray(primary.cleanupErrors)) primary.cleanupErrors = [...primary.cleanupErrors];
+  const diagnostics = largeDiagnostics(primary);
+  const excerpted = new Set(diagnostics.map(diagnostic => diagnostic.key));
+  // Reserve a quarter of the bound for excerpts before other evidence may stay inline, so a report whose
+  // markers barely fit still keeps a useful head and tail of each diagnostic (#1992).
+  const reserve = Math.min(Math.floor(maxBytes / 4), diagnostics.reduce((sum, diagnostic) => sum + diagnostic.serializedBytes, 0));
+  if (!diagnostics.length || !excerptDiagnostics(primary, diagnostics, maxBytes, measure,
+    () => {
+      reference(key => optional(key) && !excerpted.has(key), maxBytes - reserve);
+      // Required facts are referenced beside the markers before any diagnostic is referenced (#1992).
+      reference(key => !excerpted.has(key));
+    })) {
+    // No large diagnostics, or even marker-only excerpts cannot fit: reference the largest facts
+    // of the unmodified report, as before excerpts existed. The parts remain lossless either way.
+    primary = { ...full, reportEvidence: evidence };
+    evidence.referencedKeys.length = 0;
+    reference(optional);
+    reference(() => true);
+  }
+  const text = prettyJSON(primary);
+  assert.ok(Buffer.byteLength(text, 'utf8') <= maxBytes, 'Primary report exceeds its byte bound after evidence references');
+  return text;
+}
+
+/** A failed publication never claims a report or cleanup it did not retain; it repeats the facts it can bound. */
+function failureRecord(full, fullBytes, reason, written, partAttempted, limits) {
+  const record = { status: 'failed', mode: typeof full.mode === 'string' ? utf8Prefix(full.mode, 256) : null,
+    statusBeforePublication: typeof full.status === 'string' ? utf8Prefix(full.status, 256) : null,
+    reportPublication: { status: 'failed', reason: factPreview(reason), primaryReportRetained: false,
+      fullBytes: fullBytes.length, fullSha256: sha256(fullBytes), ...limits, partsWritten: written,
+      // A rejected write may have left this file partially present; it is not verified evidence.
+      partAttempted, partAttemptedUnverified: partAttempted !== null } };
+  for (const key of ['shutdownConfirmed', 'forcedShutdown', 'workRetained', 'workCleanupConfirmed', 'installationUnchanged']) {
+    if (typeof full[key] === 'boolean') record[key] = full[key];
+  }
+  for (const key of ['error', 'workCleanupError', 'applicationError', 'browserError', 'viteError']) {
+    if (typeof full[key] === 'string') record[key] = factPreview(full[key], 4096);
+  }
+  if (Array.isArray(full.cleanupErrors)) record.cleanupErrors = { count: full.cleanupErrors.length,
+    first: full.cleanupErrors.slice(0, 8).map(item => factPreview(String(item), 2048)) };
+  let text = prettyJSON(record);
+  // JSON escaping can expand a bounded UTF-8 preview (for example a NUL) sixfold.
+  // Preserve exact scrubbed lengths/digests and cleanup facts even when previews
+  // cannot fit. This is one in-memory encoding choice, not another write attempt.
+  if (Buffer.byteLength(text, 'utf8') > FAILURE_RECORD_BYTES) {
+    const omitPreview = fact => { fact.preview = ''; fact.complete = fact.bytes === 0; };
+    omitPreview(record.reportPublication.reason);
+    for (const key of ['error', 'workCleanupError', 'applicationError', 'browserError', 'viteError']) {
+      if (record[key]) omitPreview(record[key]);
+    }
+    for (const fact of record.cleanupErrors?.first ?? []) omitPreview(fact);
+    record.reportPublication.previewsOmittedForByteBound = true;
+    text = prettyJSON(record);
+  }
+  assert.ok(Buffer.byteLength(text, 'utf8') <= FAILURE_RECORD_BYTES, 'Report publication failure record exceeds its bound');
+  return text;
+}
+
+/**
+ * Scrubs once, then publishes report.json (and, only when needed, byte-exact parts of the full report).
+ * Every emitted byte and digest is computed from the scrubbed text. Throws after a bounded failure record
+ * on any cap or I/O failure; never retries, overwrites a part, or reports success it did not achieve.
+ */
+export async function publishReport(directory, report, tokens, { fsApi = fs, maxBytes = MAX_REPORT_BYTES,
+  partBytes = REPORT_PART_BYTES, maxParts = MAX_REPORT_PARTS } = {}) {
+  // Injected I/O may override only writeFile; removal and rename default to the real filesystem.
+  const io = { rm: fs.rm, rename: fs.rename, ...fsApi };
+  const full = scrubTokens(report, tokens);
+  const text = prettyJSON(full);
+  const fullBytes = Buffer.from(text, 'utf8');
+  const primaryPath = join(directory, 'report.json');
+  const limits = { primaryMaxBytes: maxBytes, partBytes, maxParts };
+  const written = [];
+  let partAttempted = null;
+  let primaryText = text;
+  let evidence = null;
+  try {
+    if (fullBytes.length > maxBytes) {
+      assert.ok(fullBytes.length <= partBytes * maxParts,
+        `Scrubbed report has ${fullBytes.length} bytes, over its ${partBytes * maxParts}-byte evidence bound`);
+      const parts = [];
+      for (let offset = 0; offset < fullBytes.length; offset += partBytes) {
+        const data = fullBytes.subarray(offset, offset + partBytes);
+        parts.push({ file: `report.full.part-${String(parts.length).padStart(3, '0')}`, bytes: data.length, sha256: sha256(data), data });
+      }
+      evidence = { format: 'Concatenate parts in order: UTF-8 JSON.stringify(report, null, 2) plus newline', ...limits,
+        bytes: fullBytes.length, sha256: sha256(fullBytes), parts: parts.map(({ file, bytes, sha256 }) => ({ file, bytes, sha256 })),
+        referencedKeys: [] };
+      primaryText = primaryReport(full, evidence, maxBytes);
+      for (const { file, bytes, sha256, data } of parts) {
+        partAttempted = file;
+        await io.writeFile(join(directory, file), data, { flag: 'wx' });
+        written.push({ file, bytes, sha256 });
+        partAttempted = null;
+      }
+    }
+    await publishAtomically(primaryPath, primaryText, io);
+  } catch (error) {
+    const reason = scrubTokens(String(error?.stack ?? error), tokens);
+    let recorded = false;
+    try {
+      await publishAtomically(primaryPath, failureRecord(full, fullBytes, reason, written, partAttempted, limits), io);
+      recorded = true;
+    } catch {}
+    throw new Error(`Report publication failed (${recorded ? 'bounded failure record written' : 'no failure record written'}; ` +
+      `${written.length} evidence part(s) written): ${utf8Prefix(reason, 4096)}`);
+  }
+  return { primaryText, evidence };
 }
 
 export function summarizeRequests(requests) {
@@ -97,7 +416,7 @@ export function assertOnlyPinWrites(requests, pinUrl, expectedPuts, sessionUrl =
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 
 export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluate, ready, waitFor, delay, readOutput, restartApplication,
-  captureSafe, sensitiveValues }) {
+  captureSafe, sensitiveValues, sessionSemantics }) {
   const basePath = '/nested';
   const runPath = `${basePath}/jobs/${fixture.jobId}/runs/${RUN}`;
   const pinUrl = `${origin}${basePath}/api/v1/jobs/${fixture.jobId}/runs/${RUN}/progress-pin`;
@@ -152,6 +471,7 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   const stateBefore = await fs.readFile(statePath);
   assert.equal(await fs.readFile(statePath, 'utf8'), fixture.retained['workflow-state.json']);
   const old = track(await makeTarget());
+  if (sessionSemantics) await sessionSemantics.observeDocumentStart(old);
   await cdp.call('Page.navigate', { url: first.url }, old.sessionId);
   await ready(old, `document.body.innerText.includes('Local session connected.')`, 'first-process session');
   const instanceBefore = await serverInstance(old);
@@ -172,6 +492,8 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   const mutationsBeforeRestart = old.requests.filter(r => !['GET', 'HEAD'].includes(r.method)).length;
   assert.equal(mutationsBeforeRestart, automaticMutationsBaseline,
     'Unexpected mutation occurred before the restart');
+  // Both live paragraphs must already exist empty in this retained document before instance mutation.
+  if (sessionSemantics) await sessionSemantics.prepareAnnouncement(old);
   const restarted = await restartApplication();
   assert.equal(restarted.origin, origin, 'Restart did not preserve the origin');
   evidence.shutdown = restarted.exit;
@@ -229,6 +551,13 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   assert.ok(instanceAfter && instanceAfter !== instanceBefore, 'serverInstanceId did not change across the restart');
   evidence.serverInstanceChanged = true;
   evidence.serverRestartNoticeShown = true;
+  // #1895: the real restart is the only packaged path to the application-instance-changed status.
+  if (sessionSemantics) {
+    await sessionSemantics.verifyAnnouncement(old, { place: 'header', text: 'Application instance changed.' });
+    await sessionSemantics.checkpoint(old, 'connected-instance-changed', { container: 'connected',
+      statusText: 'Application instance changed.', buttons: ['Sign out'] });
+    evidence.sessionSemantics = sessionSemantics.results;
+  }
 
   // Reconciliation: durable bytes, pin policy and activity match the pre-restart view.
   assert.deepEqual(await fs.readFile(statePath), stateBefore, 'Restart changed workflow-state bytes');

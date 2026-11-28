@@ -10,15 +10,262 @@ import { join } from 'node:path';
 // response is a schema fixture the SPA validates exactly as it would a server response.
 
 export const auditPageNames = ['workspace', 'upload', 'runtime', 'job detail', 'attempt history',
-  'attempt overview', 'attempt activity', 'attempt evidence', 'source directory', 'source search form', 'source search results', 'source file'];
+  'attempt overview', 'attempt activity', 'attempt evidence', 'source directory', 'source search form', 'source search results', 'source file', 'structure functions'];
 export const auditTokenKinds = ['plain', 'keyword', 'string', 'comment', 'number'];
+export const focusInteractionContexts = Object.freeze(['focus light', 'focus dark']);
+export const supplementalInteractionContextNames = Object.freeze([...focusInteractionContexts,
+  'keyboard commands', 'keyboard download', 'worker/CSP qualification']);
+/**
+ * Every fixture page whose trusted contract declares preparation is re-prepared once per focus
+ * scheme (both the DevTools and Playwright runners open each page with preparation before the
+ * Tab walk), so focus contexts derive from the fixture contract rather than a hand-kept list.
+ */
+export function preparedFocusInteractionContexts(pages) {
+  if (!Array.isArray(pages)) throw new TypeError('preparedFocusInteractionContexts: pages must be the fixture page contract');
+  return pages.filter(page => {
+    if (!page || typeof page.name !== 'string' || !auditPageNames.includes(page.name)) {
+      throw new TypeError(`preparedFocusInteractionContexts: undeclared fixture page ${JSON.stringify(page?.name)}`);
+    }
+    if (page.preparation !== undefined && !Array.isArray(page.preparation)) {
+      throw new TypeError(`preparedFocusInteractionContexts: invalid preparation for ${page.name}`);
+    }
+    return (page.preparation ?? []).length > 0;
+  }).flatMap(({ name }) => focusInteractionContexts.map(context => ({ page: name, context })));
+}
+/** Firefox/WebKit: per-scheme focus preparation plus the engine runner's keyboard and worker passes. */
+export function engineSupplementalInteractionContexts(pages) {
+  return [
+    ...preparedFocusInteractionContexts(pages),
+    { page: 'attempt overview', context: 'keyboard commands' },
+    { page: 'source file', context: 'keyboard download' },
+    { page: 'source file', context: 'worker/CSP qualification' },
+  ];
+}
+export const auditProfileEvidence = (profile) => {
+  if (profile === 'reference') return { name: 'reference', cpuThrottlingRate: 1, network: 'browser-default' };
+  // docs/web-delivery.md constrained profile: 4x CPU, 10 Mbit/s down, 2 Mbit/s up, 100 ms
+  // round trip. CDP throughput is bytes per second; latency is the added request-to-headers delay.
+  if (profile === 'constrained') return { name: 'constrained', cpuThrottlingRate: 4,
+    network: { offline: false, latency: 100, downloadThroughput: 1_250_000, uploadThroughput: 250_000 } };
+  throw new Error(`Unknown packaged audit profile: ${profile}`);
+};
+export async function applyAuditProfile(cdp, sessionId, profile) {
+  const evidence = auditProfileEvidence(profile);
+  if (profile === 'constrained') {
+    await cdp.call('Emulation.setCPUThrottlingRate', { rate: evidence.cpuThrottlingRate }, sessionId);
+    await cdp.call('Network.emulateNetworkConditions', evidence.network, sessionId);
+  }
+  return evidence;
+}
+export function chromiumSupplementalInteractionContexts(pages) {
+  return [
+    ...preparedFocusInteractionContexts(pages),
+    { page: 'source file', context: 'worker/CSP qualification' },
+  ];
+}
 
 const fixtureRoot = (repo) => join(repo, 'contracts/web/v1/fixtures');
 const longFilename = `${'reconstructed-firmware-image-with-an-unbroken-very-long-name-'.repeat(4)}0123456789abcdef.elf`.slice(0, 255);
+export const jobFilterContract = Object.freeze({ label: 'Filename or label search', value: 'audit-filter-match',
+  filteredQuery: 'search=audit-filter-match&limit=50', unfilteredQuery: 'limit=50',
+  filteredRendered: 'audit-filter-match.elf', unfilteredRendered: longFilename,
+  filteredJobId: 'fedcba9876543210fedcba9876543210', unfilteredJobId: '1234567890abcdef1234567890abcdef' });
+
+/** Require an in-viewport layout box plus non-hidden styles through the ancestor chain. */
+export function filterElementVisible(element, computedStyle) {
+  if (!element || typeof element.getClientRects !== 'function') return false;
+  const view = element.ownerDocument?.defaultView;
+  if (!view) return false;
+  const getStyle = typeof computedStyle === 'function' ? computedStyle : node => view.getComputedStyle(node);
+  const rectangles = Array.from(element.getClientRects());
+  if (!rectangles.some(rectangle => rectangle.width > 0 && rectangle.height > 0 && rectangle.right > 0
+    && rectangle.bottom > 0 && rectangle.left < view.innerWidth && rectangle.top < view.innerHeight)) return false;
+  for (let current = element; current; current = current.parentElement) {
+    const style = getStyle(current);
+    if (!style || style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+    const opacity = Number.parseFloat(style.opacity);
+    if (Number.isFinite(opacity) && opacity <= 0) return false;
+  }
+  return true;
+}
+export function focusFilterSubmitForTiming(document, button) {
+  if (!document || !button || typeof button.focus !== 'function') return false;
+  button.focus();
+  return document.activeElement === button;
+}
 const longLine = `static const unsigned char embedded_table_with_a_long_identifier[] = { ${Array.from({ length: 160 }, (_, index) => `0x${(index * 37 % 256).toString(16).padStart(2, '0')}`).join(', ')} };`;
 const sourceText = ['/* Synthetic audit source: long unbroken lines must stay inside the scroll region. */',
   '#include <stdint.h>', longLine, `const char *path = "${'/very/deep/source/tree'.repeat(24)}";`,
   ...Array.from({ length: 40 }, (_, index) => `int f${index}(int value) { return value * ${index} + 0x${(index * 4099).toString(16)}; }`), ''].join('\n');
+const secondSourceText = ['/* Second audit source: rotates the opened file identity between samples. */',
+  'int audit_second_source(int value) { return value ^ 0x5a; }', ''].join('\n');
+const sourceFileContract = (fileId, displayName, text) => {
+  const bytes = Buffer.from(text, 'utf8');
+  const lines = text.endsWith('\n') ? text.slice(0, -1).split('\n') : text.split('\n');
+  return Object.freeze({ fileId, displayName, sizeBytes: String(bytes.length), sha256: createHash('sha256').update(bytes).digest('hex'),
+    rows: lines.length, firstRow: lines[0], lastRow: lines.at(-1) });
+};
+/**
+ * Source-file open timing (#623): directory click into file metadata, then the explicit preview
+ * action into the first bounded chunk. Identity comes from this contract, not from the report.
+ */
+export const fileOpenContract = Object.freeze({
+  samples: 50, jobId: '1234567890abcdef1234567890abcdef', runId: 'run_example_1', revisionId: 'revision_1', directoryId: 'root',
+  sourceSha256: 'e'.repeat(64), metadataVersion: 'f'.repeat(64), offset: '0', maxBytes: '65536',
+  returnDirectory: 'Return to source directory', loadingMetadata: 'Loading recorded file metadata…', openPreview: 'Open source preview', loadingRange: 'Loading source range…',
+  deadlineMs: 10000,
+  files: Object.freeze([
+    sourceFileContract(`file_0_${'a'.repeat(64)}`, 'embedded_tables_with_long_lines.c', sourceText),
+    sourceFileContract(`file_2_${'b'.repeat(64)}`, 'audit_second_source.c', secondSourceText),
+  ]),
+});
+const fileOpenIdentityKeys = ['samples', 'jobId', 'runId', 'revisionId', 'directoryId', 'sourceSha256', 'metadataVersion', 'offset', 'maxBytes'];
+export const fileOpenPin = `?sourceSha256=${fileOpenContract.sourceSha256}&metadataVersion=${fileOpenContract.metadataVersion}`;
+const fileOpenApi = fileId => `/jobs/${fileOpenContract.jobId}/runs/${fileOpenContract.runId}/revisions/${fileOpenContract.revisionId}/source-files/${fileId}`;
+export const fileOpenChunkQuery = new URLSearchParams({ offset: fileOpenContract.offset, maxBytes: fileOpenContract.maxBytes,
+  metadataVersion: fileOpenContract.metadataVersion }).toString();
+/** Identity of a fulfilled file-metadata or chunk response, without the chunk text. */
+export function sourceResponseIdentity(data) {
+  if (!data || typeof data !== 'object') return null;
+  const chunk = typeof data.text === 'string';
+  return { kind: chunk ? 'chunk' : 'file', binding: data.binding ?? null, fileId: chunk ? data.fileId : data.item?.fileId ?? null,
+    sourceSha256: data.sourceSha256 ?? null, metadataVersion: data.metadataVersion ?? null,
+    sha256: chunk ? data.sha256 : data.item?.sha256 ?? null, sizeBytes: chunk ? data.sizeBytes : data.item?.sizeBytes ?? null,
+    ...(chunk ? { offsetBytes: data.offsetBytes, lengthBytes: data.lengthBytes, completeFile: data.completeFile,
+      textSha256: createHash('sha256').update(data.text).digest('hex') } : {}) };
+}
+
+/** Identity the contract expects for one file's metadata or chunk response. */
+export function expectedSourceResponseIdentity(kind, file) {
+  const c = fileOpenContract;
+  return { kind, binding: { jobId: c.jobId, runId: c.runId, revisionId: c.revisionId }, fileId: file.fileId,
+    sourceSha256: c.sourceSha256, metadataVersion: c.metadataVersion, sha256: file.sha256, sizeBytes: file.sizeBytes,
+    ...(kind === 'chunk' ? { offsetBytes: c.offset, lengthBytes: file.sizeBytes, completeFile: true, textSha256: file.sha256 } : {}) };
+}
+/** Compact report form of a response identity: a digest of its canonical JSON. */
+export const sourceResponseDigest = identity => `sha256:${createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
+const sha256Json = value => `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
+const sourceReadCommitment = entry => sha256Json(canonicalSourceRead(entry)).slice('sha256:'.length, 'sha256:'.length + 32);
+const canonicalSourceRead = entry => ({ method: entry?.method, path: entry?.path, status: entry?.status, query: entry?.query,
+  fulfillmentSucceeded: entry?.fulfillmentSucceeded, response: entry?.response });
+const renderedOpenKeys = ['renderedFileId', 'pageSearch', 'renderedName', 'renderedSha256', 'focus', 'previewOpen'];
+const renderedPreviewKeys = ['ariaBusy', 'focus', 'renderedRows', 'renderedBytes', 'renderedTextSha256'];
+const renderedFileOpenDetails = sample => ({ fileId: sample?.fileId,
+  open: Object.fromEntries(renderedOpenKeys.map(key => [key, sample?.open?.[key]])),
+  preview: Object.fromEntries(renderedPreviewKeys.map(key => [key, sample?.preview?.[key]])) });
+/** The rendered details and source requests a clean run must produce, from the contract alone. */
+function expectedFileOpenSample(index) {
+  const file = fileOpenContract.files[index % fileOpenContract.files.length];
+  const read = kind => ({ method: 'GET', path: kind === 'file' ? fileOpenApi(file.fileId) : `${fileOpenApi(file.fileId)}/chunk`, status: 200,
+    query: kind === 'file' ? '' : fileOpenChunkQuery, fulfillmentSucceeded: true, response: expectedSourceResponseIdentity(kind, file) });
+  return { rendered: { fileId: file.fileId,
+    open: { renderedFileId: file.fileId, pageSearch: fileOpenPin, renderedName: file.displayName, renderedSha256: file.sha256, focus: 'main-heading', previewOpen: false },
+    preview: { ariaBusy: 'false', focus: 'source-preview-title', renderedRows: file.rows, renderedBytes: Number(file.sizeBytes), renderedTextSha256: file.sha256 } },
+    requests: [read('file'), read('chunk')] };
+}
+
+/**
+ * In-page timed action. `control` locates the element to click; `observe` returns
+ * { signal: 'loading' | 'data' | null, details }. A signal counts only when the following
+ * animation frame observes the same signal and details, so transient pre-paint states are not
+ * timed. The promise rejects at the hard deadline.
+ */
+export function timedPhaseScript({ control, observe, deadlineMs = fileOpenContract.deadlineMs }) {
+  return `(async () => {
+    const visible = ${filterElementVisible.toString()};
+    const control = (${control})();
+    if (!control || typeof control.click !== 'function' || control.disabled) throw new Error('timed phase control is missing');
+    const observe = ${observe};
+    const started = performance.now();
+    let feedbackMs = null; let feedbackSignal = null; let dataMs = null; let details = null;
+    control.click();
+    return await new Promise((resolve, reject) => {
+      const deadline = started + ${Number(deadlineMs)};
+      const check = () => {
+        if (performance.now() > deadline) { reject(new Error('timed phase deadline')); return; }
+        const first = observe();
+        if (first.signal === null) { requestAnimationFrame(check); return; }
+        requestAnimationFrame(() => {
+          const presented = observe();
+          if (presented.signal === first.signal && JSON.stringify(presented.details ?? null) === JSON.stringify(first.details ?? null)) {
+            const elapsed = performance.now() - started;
+            if (feedbackMs === null) { feedbackMs = elapsed; feedbackSignal = presented.signal; }
+            if (presented.signal === 'data' && dataMs === null) { dataMs = elapsed; details = presented.details; }
+          }
+          if (feedbackMs !== null && dataMs !== null) resolve({ feedbackMs, dataMs, feedbackSignal, details });
+          else if (performance.now() > deadline) reject(new Error('timed phase deadline'));
+          else requestAnimationFrame(check);
+        });
+      };
+      requestAnimationFrame(check);
+    });
+  })()`;
+}
+
+/** Phase A: directory link to file metadata. The preview must stay closed and no chunk may load. */
+export function fileOpenMetadataPhase(file) {
+  const c = fileOpenContract;
+  return timedPhaseScript({
+    control: `() => {
+      const link = [...document.querySelectorAll('main ul.job-list a')].find(element =>
+        new URL(element.href, location.href).pathname.endsWith(${JSON.stringify(`/source-files/${file.fileId}`)}));
+      if (link) link.focus();
+      return link && document.activeElement === link ? link : null;
+    }`,
+    observe: `() => {
+      const main = document.querySelector('main');
+      if (!main || !location.pathname.endsWith(${JSON.stringify(`/source-files/${file.fileId}`)})) return { signal: null };
+      const loading = [...main.querySelectorAll('p[role="status"]')].find(element =>
+        element.textContent.trim() === ${JSON.stringify(c.loadingMetadata)} && visible(element));
+      const name = main.querySelector('h2');
+      const digest = [...main.querySelectorAll('dl.job-facts dd code')].find(element => element.textContent.trim() === ${JSON.stringify(file.sha256)});
+      const open = [...main.querySelectorAll('button')].find(element => element.textContent.trim() === ${JSON.stringify(c.openPreview)});
+      const populated = !loading && visible(name) && name.textContent.trim() === ${JSON.stringify(file.displayName)} && visible(digest)
+        && open && !open.disabled && open.getClientRects().length > 0 && !main.querySelector('[role="alert"]')
+        && !main.querySelector('section.source-preview') && document.activeElement === main.querySelector('h1');
+      if (populated) return { signal: 'data', details: { renderedFileId: location.pathname.split('/').at(-1), pageSearch: location.search,
+        renderedName: name.textContent.trim(), renderedSha256: digest.textContent.trim(), focus: 'main-heading', previewOpen: false } };
+      return { signal: loading ? 'loading' : null };
+    }`,
+  });
+}
+
+/** Phase B: the explicit preview action to the first bounded, focused, non-busy chunk. */
+export function fileOpenPreviewPhase(file) {
+  const c = fileOpenContract;
+  return timedPhaseScript({
+    control: `() => {
+      const button = [...document.querySelectorAll('main button')].find(element => element.textContent.trim() === ${JSON.stringify(c.openPreview)});
+      if (button) button.focus();
+      return button && document.activeElement === button ? button : null;
+    }`,
+    observe: `() => {
+      const section = document.querySelector('main section.source-preview');
+      if (!section) return { signal: null };
+      const busy = section.getAttribute('aria-busy');
+      const loading = [...section.querySelectorAll('p[role="status"]')].find(element =>
+        element.textContent.trim() === ${JSON.stringify(c.loadingRange)} && visible(element));
+      const heading = section.querySelector('#source-preview-title');
+      const rows = [...section.querySelectorAll('.source-rows .source-row pre')];
+      const populated = !loading && busy === 'false' && visible(heading) && document.activeElement === heading
+        && rows.length === ${file.rows} && rows[0].getClientRects().length > 0
+        && rows[0].textContent === ${JSON.stringify(file.firstRow)} && rows.at(-1).textContent === ${JSON.stringify(file.lastRow)}
+        && !section.querySelector('[role="alert"]');
+      if (populated) return { signal: 'data', details: { ariaBusy: busy, focus: 'source-preview-title', renderedRows: rows.length } };
+      return { signal: loading && busy === 'true' ? 'loading' : null };
+    }`,
+  });
+}
+
+/** Untimed digest of the rendered preview rows, so the report binds content without retaining it. */
+export const renderedPreviewDigest = `(async () => {
+  const rows = [...document.querySelectorAll('main section.source-preview .source-rows .source-row pre')];
+  const text = rows.map(row => row.textContent).join('\\n') + '\\n';
+  const bytes = new TextEncoder().encode(text);
+  if (!globalThis.crypto?.subtle) return { renderedBytes: bytes.length, renderedTextSha256: null };
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return { renderedBytes: bytes.length, renderedTextSha256: [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('') };
+})()`;
 
 /** Contract fixtures bound to one job, attempt and revision, with long names and lines. */
 export function auditFixtures(repo, buildId) {
@@ -32,21 +279,50 @@ export function auditFixtures(repo, buildId) {
   job.data.displayFilename = longFilename;
   const jobs = load('jobs-page');
   for (const item of jobs.data.items) if (item.jobId === jobId) item.displayFilename = longFilename;
+  const jobFilter = jobFilterContract;
+  const filteredJobs = structuredClone(jobs);
+  filteredJobs.data.items = [structuredClone(jobs.data.items[0])];
+  Object.assign(filteredJobs.data.items[0], { jobId: jobFilter.filteredJobId, displayFilename: jobFilter.filteredRendered,
+    version: 'job_version_filter_fixture' });
   const run = load('run-completed-unaccepted');
   const runId = run.data.runId;
   const revisionId = 'revision_1';
   const selected = { jobId, runId, revisionId };
   const bound = (name, binding) => { const document = load(name); document.data.binding = binding; return document; };
   const directory = bound('revision-directory-root', selected);
-  const file = bound('revision-file-root', selected);
-  const bytes = Buffer.from(sourceText, 'utf8');
-  const sha256 = createHash('sha256').update(bytes).digest('hex');
-  Object.assign(file.data.item, { displayName: 'embedded_tables_with_long_lines.c', sizeBytes: String(bytes.length), sha256 });
-  const chunk = load('source-chunk-mid-line');
-  Object.assign(chunk.data, { binding: selected, fileId: file.data.item.fileId, sourceSha256: file.data.sourceSha256,
-    metadataVersion: file.data.metadataVersion, sha256, sizeBytes: String(bytes.length), offsetBytes: '0',
-    lengthBytes: String(bytes.length), nextOffsetBytes: null, completeFile: true, text: sourceText,
-    firstLine: '1', startsMidLine: false, endsMidLine: false });
+  const fileTemplate = bound('revision-file-root', selected);
+  const chunkTemplate = load('source-chunk-mid-line');
+  for (const [key, actual] of [['jobId', jobId], ['runId', runId], ['sourceSha256', directory.data.sourceSha256],
+    ['metadataVersion', directory.data.metadataVersion], ['sourceSha256', fileTemplate.data.sourceSha256],
+    ['metadataVersion', fileTemplate.data.metadataVersion], ['fileId', fileTemplate.data.item.fileId]]) {
+    const expected = key === 'fileId' ? fileOpenContract.files[0].fileId : fileOpenContract[key];
+    if (actual !== expected) throw new Error(`Browser-audit fixture ${key} ${actual} differs from the file-open contract ${expected}`);
+  }
+  // Two distinct files rotate the timed file identity; each has its own metadata, chunk and bytes.
+  const sourceFiles = new Map(fileOpenContract.files.map((contract, index) => {
+    const text = index === 0 ? sourceText : secondSourceText;
+    const bytes = Buffer.from(text, 'utf8');
+    const metadata = structuredClone(fileTemplate);
+    Object.assign(metadata.data.item, { fileId: contract.fileId, displayName: contract.displayName, sizeBytes: contract.sizeBytes, sha256: contract.sha256 });
+    const chunk = structuredClone(chunkTemplate);
+    Object.assign(chunk.data, { binding: selected, fileId: contract.fileId, sourceSha256: metadata.data.sourceSha256,
+      metadataVersion: metadata.data.metadataVersion, sha256: contract.sha256, sizeBytes: contract.sizeBytes, offsetBytes: '0',
+      lengthBytes: contract.sizeBytes, nextOffsetBytes: null, completeFile: true, text,
+      firstLine: '1', startsMidLine: false, endsMidLine: false });
+    return [contract.fileId, { metadata, chunk, bytes }];
+  }));
+  const file = sourceFiles.get(fileOpenContract.files[0].fileId).metadata;
+  const bytes = sourceFiles.get(fileOpenContract.files[0].fileId).bytes;
+  const fileItem = directory.data.items.find(item => item.kind === 'file');
+  directory.data.items = [...directory.data.items.filter(item => item.kind !== 'file'), ...fileOpenContract.files.map(contract => ({
+    ...fileItem, fileId: contract.fileId, displayName: contract.displayName, sizeBytes: contract.sizeBytes, sha256: contract.sha256,
+    declaredUtf8Text: true, declaredViewable: true }))];
+  // The SPA requires directories before files, files in code-unit name order, and exact counts.
+  directory.data.items.sort((left, right) => left.kind !== right.kind ? (left.kind === 'directory' ? -1 : 1)
+    : left.displayName < right.displayName ? -1 : left.displayName > right.displayName ? 1 : 0);
+  directory.data.totalChildren = directory.data.items.length;
+  directory.data.sourceFileCount = directory.data.items.reduce((count, item) => count + (item.kind === 'file' ? 1 : item.sourceFileCount), 0);
+  const sourceFileFrom = pathname => sourceFiles.get(pathname.split('/source-files/')[1]?.split('/')[0]);
   const bootstrap = load('bootstrap');
   Object.assign(bootstrap.data, { basePath: '/nested/', uiBuildId: buildId,
     sessionExpiresAt: new Date(Date.now() + 3_600_000).toISOString() });
@@ -69,8 +345,23 @@ export function auditFixtures(repo, buildId) {
   const exploration = bound('report-exploration', selected);
   exploration.data.sourceArtifact.binding = selected;
   exploration.data.sourceArtifact.contentHref = `/nested${exploration.data.sourceArtifact.contentHref}`;
+  const chartExpected = {
+    reportId: exploration.data.reportId, jobId, runId, revisionId,
+    chartName: 'Observed output signature counts', tableName: 'Output signature counts reported by the producer',
+    counts: {
+      expanded: exploration.data.summary.expandedOutputSignatures,
+      added: exploration.data.summary.confidence.newOutputSignatureCount,
+      denominator: `Expanded observed signatures: ${exploration.data.summary.confidence.outputSignatureCount}`,
+    },
+    headers: ['Measurement', 'Reported count', 'Denominator / sample'],
+    labels: ['Expanded distinct exit/output signatures', 'New distinct exit/output signatures'],
+    sample: 'The producer’s expanded observation sample',
+    approximation: 'Bar lengths are approximate; the table preserves exact reported counts.',
+  };
   const history = bound('validation-history', { jobId, runId, revisionId: null });
   const sourceSearch = bound('source-search-complete', selected);
+  // The lazily loaded Structure route reads the recorded function inventory for this revision.
+  const functions = bound('function-inventory', selected);
   const owner = history.data.items[0];
   const validation = bound('report-normal-cases', { jobId, runId, revisionId: owner.candidateId });
   const routes = [
@@ -79,9 +370,11 @@ export function auditFixtures(repo, buildId) {
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/recover$`), () => ({ status: 201, document: retried }), 'POST'],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/cancel$`), () => ({ status: 202, document: cancelling }), 'POST'],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}/content$`),
-      () => ({ status: 200, bytes, contentType: 'application/octet-stream' })],
+      (accept, query, pathname) => sourceFileFrom(pathname) ? { status: 200, bytes: sourceFileFrom(pathname).bytes, contentType: 'application/octet-stream' }
+        : error(404, 'NOT_FOUND')],
     [/^\/recovery$/, () => ok(load('recovery-empty'))],
-    [/^\/jobs$/, () => ok(jobs)],
+    [/^\/jobs$/, (accept, query) => query === jobFilter.filteredQuery ? ok(filteredJobs)
+      : query === null || query === jobFilter.unfilteredQuery ? ok(jobs) : error(404, 'NOT_FOUND')],
     [new RegExp(`^/jobs/${jobId}$`), () => ok(job)],
     [new RegExp(`^/jobs/${jobId}/runs$`), () => ok(load('runs-page'))],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}$`), () => ok(run)],
@@ -93,9 +386,12 @@ export function auditFixtures(repo, buildId) {
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/validation-history$`), () => ok(history)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/reports/revision-validation$`), () => ok(validation)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-search$`), () => ok(sourceSearch)],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/functions$`), () => ok(functions)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-directories/${id}$`), () => ok(directory)],
-    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}/chunk$`), () => ok(chunk)],
-    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}$`), () => ok(file)],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}/chunk$`), (accept, query, pathname) => sourceFileFrom(pathname)
+      ? ok(sourceFileFrom(pathname).chunk) : error(404, 'NOT_FOUND')],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}$`), (accept, query, pathname) => sourceFileFrom(pathname)
+      ? ok(sourceFileFrom(pathname).metadata) : error(404, 'NOT_FOUND')],
   ];
   const base = `/nested/jobs/${jobId}/runs/${runId}`;
   const api = `/jobs/${jobId}/runs/${runId}`;
@@ -117,6 +413,7 @@ export function auditFixtures(repo, buildId) {
     { action: `Inspect cases: ${owner.ownerKind} ${owner.ownerId}`, reads: [`${api}/reports/revision-validation`],
       content: [{ selector: '[aria-label="Recorded validation cases"] tbody', text: validation.data.validationCases.items[0].caseId }] },
   ];
+  const inventoryRange = `Showing 1–${functions.data.items.length} of ${functions.data.matchedFunctions} matching functions (${functions.data.totalFunctions} recorded).`;
   // Unknown paths are a server 404 document, not an SPA view, so the router's not-found view
   // stays covered by the component accessibility gate.
   const pages = [
@@ -139,12 +436,19 @@ export function auditFixtures(repo, buildId) {
         { selector: '.source-token-comment', text: 'Synthetic audit source' },
         { selector: '.source-token-number', text: '0x00' },
       ] }] },
+    // The inventory loads on navigation; the explicit refresh proves a fresh bound read and a re-rendered table.
+    { name: 'structure functions', path: `${base}/revisions/${revisionId}/functions`, rendered: inventoryRange,
+      preparation: [{ action: 'Refresh from the first page', reads: [`${api}/revisions/${revisionId}/functions`], content: [
+        { selector: '.structure-view [role="status"]', text: inventoryRange },
+        { selector: '.structure-view tbody', text: functions.data.items.at(-1).address },
+      ] }] },
   ];
   return {
-    pages, controls, csrfToken: bootstrap.data.csrfToken, sourceBytes: bytes, sourceName: file.data.item.displayName, runId, runVersion: run.data.version, retriedRunId: retried.data.runId,
-    respond(method, pathname, accept) {
+    pages, controls, csrfToken: bootstrap.data.csrfToken, sourceBytes: bytes, sourceName: file.data.item.displayName, runId, runVersion: run.data.version, retriedRunId: retried.data.runId, chartExpected,
+    jobFilter, fileOpen: { ...fileOpenContract, directoryPath: `${base}/revisions/${revisionId}/sources/${fileOpenContract.directoryId}` },
+    respond(method, pathname, accept, query = null) {
       const route = routes.find(([pattern, , verb = 'GET']) => pattern.test(pathname) && (verb === method || (verb === 'GET' && method === 'HEAD')));
-      return route ? route[1](accept) : error(404, 'NOT_FOUND');
+      return route ? route[1](accept, query, pathname) : error(404, 'NOT_FOUND');
     },
   };
 }
@@ -158,6 +462,202 @@ export const auditViewports = [
   { name: 'zoom 200% of 1280x800', width: 640, height: 400, deviceScaleFactor: 2, mobile: false },
   { name: 'zoom 400% of 1280x800', width: 320, height: 200, deviceScaleFactor: 4, mobile: false },
 ];
+
+// Capture the approximate graphic and exact identity-bound table from the real packaged page.
+export const measureOutputSignatureChart = `(() => {
+  const text = element => (element?.innerText ?? element?.textContent ?? '').trim().replace(/\\s+/g, ' ');
+  const ids = value => (value ?? '').split(/\\s+/).filter(Boolean);
+  const chart = document.querySelector('.output-signature-chart [role="img"]');
+  const figure = document.querySelector('.output-signature-chart');
+  const region = document.querySelector('[aria-labelledby="output-signature-breadth-title"] .retained-case-table');
+  const table = region?.querySelector('table');
+  const rect = element => {
+    const box = element?.getBoundingClientRect();
+    return box ? { x: box.x, y: box.y, width: box.width, height: box.height, right: box.right, bottom: box.bottom } : null;
+  };
+  const visible = element => !!element && element.checkVisibility()
+    && getComputedStyle(element).visibility === 'visible' && getComputedStyle(element).display !== 'none';
+  const labelledBy = ids(chart?.getAttribute('aria-labelledby'));
+  const describedBy = ids(chart?.getAttribute('aria-describedby'));
+  return {
+    chartPresent: !!chart, chartRole: chart?.getAttribute('role') ?? null,
+    chartVisible: visible(chart), figurePresent: !!figure, figureVisible: visible(figure),
+    chartName: labelledBy.map(id => text(document.getElementById(id))).filter(Boolean).join(' '),
+    chartDescription: describedBy.map(id => text(document.getElementById(id))).filter(Boolean),
+    chartBounds: rect(figure),
+    chartSeries: [...(chart?.querySelectorAll('.output-signature-series') ?? [])].map(series => ({
+      label: text(series.querySelector('span')), bounds: rect(series), svgBounds: rect(series.querySelector('svg')),
+      barWidth: series.querySelector('rect')?.getAttribute('width') ?? null,
+    })),
+    binding: text(document.querySelector('#exploration-report-binding')),
+    region: region ? { name: region.getAttribute('aria-label'), focusable: region.tabIndex === 0, visible: visible(region),
+      bounds: rect(region), clientWidth: region.clientWidth, scrollWidth: region.scrollWidth } : null,
+    caption: text(table?.querySelector('caption')),
+    headers: [...(table?.querySelectorAll('thead th') ?? [])].map(text),
+    rows: [...(table?.querySelectorAll('tbody tr') ?? [])].map(row => [...row.querySelectorAll('th, td')].map(text)),
+  };
+})()`;
+
+// Chart evidence is captured from the actual rendered viewport only: no beyond-viewport capture,
+// no viewport widening and no stitching. A figure taller than the viewport is recorded as numbered,
+// contiguous viewport tiles. Each tile records geometry before and after the capture so a capture
+// that reflowed the page, was occluded (for example by a focused skip link) or produced a PNG of the
+// wrong size is rejected by assertAudit instead of being retained as proof.
+export const chartCaptureMaxTiles = 8;
+export const chartCaptureTolerancePx = 0.5;
+// Coverage is checked strictly: segments must abut exactly and every clip must contain its segment,
+// so a sub-pixel gap or overlap cannot hide inside the 0.5 px layout-stability tolerance.
+export const chartCoverageEpsilonPx = 1e-3;
+export const chartCaptureSets = [
+  { viewport: 'desktop 1440x900', prefix: 'attempt-evidence-output-signature-chart-desktop', deviceScaleFactor: 1 },
+  { viewport: 'zoom 400% of 1280x800', prefix: 'attempt-evidence-output-signature-chart-zoom-400', deviceScaleFactor: 4 },
+];
+const chartCaptureState = `(offset => {
+  const figure = document.querySelector('.output-signature-chart');
+  if (!figure) return null;
+  const root = document.scrollingElement;
+  const box = figure.getBoundingClientRect();
+  const viewWidth = root.clientWidth, viewHeight = root.clientHeight || innerHeight;
+  const pageLeft = visualViewport?.pageLeft ?? scrollX, pageTop = visualViewport?.pageTop ?? scrollY;
+  // Exact figure/viewport intersection for the segment starting at offset, in viewport CSS px.
+  const top = Math.max(0, box.top + offset), bottom = Math.min(viewHeight, box.bottom);
+  const left = Math.max(0, box.left), right = Math.min(viewWidth, box.right);
+  // Browsers snap fractional clips, so the capture clip is the smallest integer CSS rectangle that
+  // contains the intersection (floor left/top, ceil right/bottom), bounded to the viewport.
+  const clipLeft = Math.max(0, Math.floor(left)), clipTop = Math.max(0, Math.floor(top));
+  const clipRight = Math.min(viewWidth, Math.ceil(right)), clipBottom = Math.min(viewHeight, Math.ceil(bottom));
+  const describe = element => element ? element.tagName.toLowerCase() + (element.id ? '#' + element.id : '')
+    + (element.classList?.length ? '.' + [...element.classList].join('.') : '') : null;
+  // Probe one CSS pixel inside each corner of the figure/clip intersection, never in clip padding.
+  const hits = [[left + 1, top + 1], [right - 1, top + 1], [left + 1, bottom - 1], [right - 1, bottom - 1]].map(([x, y]) => {
+    const hit = document.elementFromPoint(x, y);
+    return { x, y, inFigure: !!hit && (hit === figure || figure.contains(hit)), hit: describe(hit) };
+  });
+  const skip = document.querySelector('.skip-link');
+  const skipBox = skip?.getBoundingClientRect();
+  const skipVisible = !!skip && skip.checkVisibility() && getComputedStyle(skip).visibility === 'visible'
+    && skipBox.width > 1 && skipBox.height > 1 && skipBox.right > 0 && skipBox.bottom > 0
+    && skipBox.left < viewWidth && skipBox.top < viewHeight;
+  return {
+    figure: { x: box.left, y: box.top, width: box.width, height: box.height },
+    rootClientWidth: viewWidth, rootClientHeight: viewHeight,
+    seriesHeights: [...figure.querySelectorAll('.output-signature-series')].map(series => series.getBoundingClientRect().height),
+    activeElement: describe(document.activeElement), skipFocused: !!skip && document.activeElement === skip, skipVisible,
+    segment: { start: top - box.top, end: bottom - box.top },
+    viewportClip: { x: clipLeft, y: clipTop, width: clipRight - clipLeft, height: clipBottom - clipTop },
+    pageClip: { x: clipLeft + pageLeft, y: clipTop + pageTop, width: clipRight - clipLeft, height: clipBottom - clipTop },
+    hits,
+  };
+})`;
+/** Blur focus, scroll so the figure segment starting at `offset` CSS px is at the viewport top, then measure. */
+export const prepareChartCaptureTile = offset => `/*chart-capture-tile*/(() => {
+  const figure = document.querySelector('.output-signature-chart');
+  if (!figure) return null;
+  const active = document.activeElement;
+  if (active && active !== document.body && typeof active.blur === 'function') active.blur();
+  const start = figure.getBoundingClientRect();
+  scrollTo({ left: scrollX, top: Math.floor(start.top + (visualViewport?.pageTop ?? scrollY) + ${Number(offset)}), behavior: 'instant' });
+  return ${chartCaptureState}(${Number(offset)});
+})()`;
+/** Re-measure without scrolling, immediately after the capture. */
+export const measureChartCaptureTile = offset => `/*chart-capture-after*/${chartCaptureState}(${Number(offset)})`;
+
+/** Width and height from a PNG IHDR chunk; pixel data is never inspected or changed. */
+export function pngDimensions(bytes) {
+  const buffer = Buffer.from(bytes ?? []);
+  const signature = '89504e470d0a1a0a';
+  if (buffer.length < 24 || buffer.subarray(0, 8).toString('hex') !== signature || buffer.subarray(12, 16).toString('latin1') !== 'IHDR')
+    return null;
+  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+}
+
+/**
+ * Captures one chart evidence set. `evaluate(expression)` runs in the page; `shoot({ file, pageClip,
+ * viewportClip })` must take a viewport-only clipped PNG and return its bytes.
+ */
+export async function captureOutputSignatureChart({ set, evaluate, shoot }) {
+  const tiles = [];
+  let offset = 0, height = Infinity;
+  while (offset < height - chartCoverageEpsilonPx && tiles.length < chartCaptureMaxTiles) {
+    const before = await evaluate(prepareChartCaptureTile(offset));
+    if (!before) break;
+    height = before.figure.height;
+    const file = `${set.prefix}-tile-${tiles.length + 1}.png`;
+    const bytes = await shoot({ file, pageClip: before.pageClip, viewportClip: before.viewportClip });
+    const after = await evaluate(measureChartCaptureTile(offset));
+    tiles.push({ file, offset, before, after, png: pngDimensions(bytes) });
+    // The next tile starts exactly where this tile's actual figure intersection ended.
+    if (!(before.segment.end > offset + chartCoverageEpsilonPx)) break;
+    offset = before.segment.end;
+  }
+  return { viewport: set.viewport, prefix: set.prefix, deviceScaleFactor: set.deviceScaleFactor,
+    figure: tiles[0]?.before?.figure ?? null, tiles };
+}
+
+/** Every reason a chart capture set does not prove the intact, unobscured rendered figure. */
+export function chartCaptureFailures(capture, set) {
+  const failures = [];
+  const where = `chart capture ${set.viewport}`;
+  const near = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= chartCaptureTolerancePx;
+  const exact = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= chartCoverageEpsilonPx;
+  const eps = chartCoverageEpsilonPx;
+  if (!capture || capture.viewport !== set.viewport || capture.prefix !== set.prefix || capture.deviceScaleFactor !== set.deviceScaleFactor)
+    return [`${where}: missing or mislabelled capture manifest`];
+  const tiles = Array.isArray(capture.tiles) ? capture.tiles : [];
+  if (tiles.length < 1 || tiles.length > chartCaptureMaxTiles) failures.push(`${where}: ${tiles.length} tiles outside 1..${chartCaptureMaxTiles}`);
+  const first = tiles[0]?.before?.figure;
+  let covered = 0;
+  tiles.forEach((tile, index) => {
+    const at = `${where} tile ${index + 1}`;
+    const { before, after, png } = tile ?? {};
+    if (tile?.file !== `${set.prefix}-tile-${index + 1}.png`) failures.push(`${at}: unexpected file ${tile?.file}`);
+    if (!before || !after || !first) { failures.push(`${at}: missing before/after geometry`); return; }
+    for (const key of ['x', 'y', 'width', 'height'])
+      if (!near(before.figure?.[key], after.figure?.[key])) failures.push(`${at}: figure ${key} changed during capture`);
+    if (!near(before.figure.width, first.width) || !near(before.figure.height, first.height))
+      failures.push(`${at}: figure size differs from the first tile`);
+    if (!near(before.rootClientWidth, after.rootClientWidth) || !near(before.rootClientHeight, after.rootClientHeight))
+      failures.push(`${at}: viewport client size changed during capture`);
+    if (!Array.isArray(before.seriesHeights) || before.seriesHeights.length !== 2 || !Array.isArray(after.seriesHeights)
+      || after.seriesHeights.length !== before.seriesHeights.length
+      || before.seriesHeights.some((value, series) => !near(value, after.seriesHeights[series])))
+      failures.push(`${at}: chart series rows reflowed during capture`);
+    const clip = before.viewportClip;
+    const integral = clip && ['x', 'y', 'width', 'height'].every(key => Number.isInteger(clip[key]));
+    if (!integral || !(clip.width > 0) || !(clip.height > 0) || clip.x < 0 || clip.y < 0
+      || clip.x + clip.width > before.rootClientWidth || clip.y + clip.height > before.rootClientHeight)
+      failures.push(`${at}: clip is not an integer rectangle inside the rendered viewport`);
+    else {
+      const { figure, segment } = before;
+      const figureRight = figure.x + figure.width, clipRight = clip.x + clip.width, clipBottom = clip.y + clip.height;
+      // Outward cover with less than one CSS px of padding: floor(left), ceil(right).
+      if (!(clip.x <= figure.x + eps && clip.x > figure.x - 1 - eps && clipRight >= figureRight - eps && clipRight < figureRight + 1 + eps))
+        failures.push(`${at}: clip does not span the figure width`);
+      if (!exact(segment?.start, covered)) failures.push(`${at}: segment starts at ${segment?.start}, expected ${covered} (gap or overlap)`);
+      const segTop = figure.y + segment?.start, segBottom = figure.y + segment?.end;
+      // The segment must be the actual figure/viewport intersection from its start.
+      if (!(segment?.end > segment?.start) || segTop < -eps || !exact(segment.end, Math.min(figure.height, before.rootClientHeight - figure.y)))
+        failures.push(`${at}: segment is not the figure/viewport intersection`);
+      if (!(clip.y <= segTop + eps && clip.y > segTop - 1 - eps && clipBottom >= segBottom - eps
+        && (clipBottom < segBottom + 1 + eps)))
+        failures.push(`${at}: clip does not match its figure segment`);
+      if (!before.pageClip || !exact(before.pageClip.width, clip.width) || !exact(before.pageClip.height, clip.height))
+        failures.push(`${at}: page and viewport clips differ`);
+      // Integer CSS clip at an integer DPR: the PNG must be exactly clip*DPR device pixels.
+      const expected = { width: clip.width * set.deviceScaleFactor, height: clip.height * set.deviceScaleFactor };
+      if (!png || png.width !== expected.width || png.height !== expected.height)
+        failures.push(`${at}: PNG ${JSON.stringify(png)} does not match clip*DPR ${JSON.stringify(expected)}`);
+    }
+    covered = before.segment?.end;
+    for (const state of [before, after]) {
+      if (state.skipFocused || state.skipVisible) failures.push(`${at}: skip link is focused or visible over the capture`);
+      if (!Array.isArray(state.hits) || state.hits.length !== 4 || state.hits.some(hit => !hit.inFigure))
+        failures.push(`${at}: figure is occluded at a clip corner ${JSON.stringify(state.hits?.filter(hit => !hit.inFigure))}`);
+    }
+  });
+  if (first && !exact(covered, first.height)) failures.push(`${where}: tiles cover ${covered} of ${first.height} CSS px`);
+  return failures;
+}
 
 // Runs in the page. Regions that require two-dimensional reading may scroll; nothing else may
 // push the page wider than its viewport or hide an action off-screen.
@@ -293,6 +793,9 @@ export const measureContrast = `(() => {
   return { measured: results.length, minimum: results.length ? Number(Math.min(...results).toFixed(3)) : null, failures: failures.slice(0, 12), failureCount: failures.length, unsupported: unsupported.slice(0, 12), tokens };
 })()`;
 
+/** Failure-only focus trajectory bounds, independent of every assertion deadline. */
+export const focusTrajectoryFrames = 30;
+export const focusTrajectoryMs = 1000;
 export const measureFocus = `(async () => {
   await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   const element = document.activeElement;
@@ -310,8 +813,12 @@ export const measureFocus = `(async () => {
   const box = element.getBoundingClientRect();
   const hit = document.elementFromPoint(Math.min(Math.max(box.left + box.width / 2, 0), innerWidth - 1), Math.min(Math.max(box.top + box.height / 2, 0), innerHeight - 1));
   const [low, high] = outline && adjacent ? [luminance(outline), luminance(adjacent)].sort((a, b) => a - b) : [0, 0];
-  return {
+  const result = {
     key: ids.get(element), heading: element.matches('main h1'),
+    // Numeric layout facts only; keep the original sample and verdict, without scrolling or extra waits.
+    geometry: { left: box.left, top: box.top, right: box.right, bottom: box.bottom,
+      width: box.width, height: box.height, viewportWidth: innerWidth, viewportHeight: innerHeight,
+      scrollX, scrollY },
     target: element.tagName.toLowerCase() + (element.id ? '#' + element.id : '') + ' ' + JSON.stringify((element.getAttribute('aria-label') || element.textContent || '').trim().slice(0, 40)),
     focusVisible: element.matches(':focus-visible'), outlineStyle: style.outlineStyle, outlineWidth: parseFloat(style.outlineWidth),
     contrast: outline && adjacent ? Number(((high + 0.05) / (low + 0.05)).toFixed(3)) : null,
@@ -319,6 +826,25 @@ export const measureFocus = `(async () => {
     inViewport: box.bottom > 0 && box.top < innerHeight && box.right > 0 && box.left < innerWidth,
     unobscured: hit !== null && (element.contains(hit) || hit.contains(element)),
   };
+  // Failure-only diagnostic: after an off-screen sample, record later frames without scrolling or
+  // refocusing, so a delayed engine focus scroll is distinguishable from a persistent one. Numbers
+  // and a fixed same-target flag only. Bounded by ${focusTrajectoryFrames} frames and ${focusTrajectoryMs} ms.
+  if (!result.inViewport) {
+    const started = performance.now(); const trajectory = [];
+    for (let frame = 1; frame <= ${focusTrajectoryFrames}; frame += 1) {
+      const elapsed = performance.now() - started;
+      if (elapsed >= ${focusTrajectoryMs}) break;
+      const ticked = await new Promise(resolve => { const timer = setTimeout(() => resolve(false), ${focusTrajectoryMs} - elapsed);
+        requestAnimationFrame(() => { clearTimeout(timer); resolve(true); }); });
+      if (!ticked) break;
+      const later = element.getBoundingClientRect();
+      trajectory.push({ frame, ms: Number((performance.now() - started).toFixed(1)), top: later.top, bottom: later.bottom,
+        left: later.left, right: later.right, viewportWidth: innerWidth, viewportHeight: innerHeight, scrollX, scrollY,
+        sameTarget: document.activeElement === element });
+    }
+    result.trajectory = trajectory;
+  }
+  return result;
 })()`;
 
 function percentile(values, fraction) {
@@ -340,7 +866,7 @@ export const auditContentReady = (checks) => `(${JSON.stringify(checks)}).every(
 /** Runs after every fresh navigation, before any layout/contrast/focus measurement. */
 export async function prepareAuditPage({ tab, page, evaluate, ready, fulfilled }) {
   const interactions = [];
-  for (const step of page.preparation ?? []) {
+  for (const [stepIndex, step] of (page.preparation ?? []).entries()) {
     const before = fulfilled.length;
     const started = Date.now();
     const clicked = await evaluate(tab, `(() => {
@@ -353,7 +879,7 @@ export async function prepareAuditPage({ tab, page, evaluate, ready, fulfilled }
     await ready(tab, auditContentReady(step.content), `${page.name}: ${step.action} content`);
     for (const path of step.reads) assert.ok(fulfilled.slice(before).some(entry =>
       entry.method === 'GET' && entry.path === path && entry.status === 200), `${page.name}: ${step.action} did not read ${path}`);
-    interactions.push({ page: page.name, action: step.action, elapsedMs: Date.now() - started, reads: step.reads });
+    interactions.push({ page: page.name, action: step.action, stepIndex, elapsedMs: Date.now() - started, reads: step.reads });
   }
   await ready(tab, auditPageReady(page, true), `${page.name}: populated content`);
   return interactions;
@@ -379,7 +905,7 @@ export const measureConnectionState = `(() => {
   const focused = document.activeElement;
   const sections = [...document.querySelectorAll('section.connection-notice')];
   const statuses = [...document.querySelectorAll('[role="status"]')].filter(element => element.getAttribute('aria-label') === ${JSON.stringify(connectionNoticeNames.status)});
-  const session = document.querySelector('aside.session-notice.is-connected');
+  const session = document.querySelector('.session-notice.is-connected');
   return {
     token: window.__auditConnection?.token ?? null, events: [...(window.__auditConnection?.events ?? [])],
     onLine: navigator.onLine, href: location.href, historyLength: history.length,
@@ -505,7 +1031,8 @@ export function connectionNoticeFailures(evidence) {
   return failures;
 }
 
-export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, cdp, makeTarget, evaluate, ready, capture, delay }) {
+export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, cdp, makeTarget, evaluate, ready, capture, delay,
+  profile = 'reference' }) {
   const waitForValue = async (check, label, timeout = 20000) => {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) { const value = check(); if (value) return value; await delay(75); }
@@ -524,9 +1051,14 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
       }
       const pathname = url.pathname.slice('/nested/api/v1'.length);
       const headers = Object.fromEntries(Object.entries(event.request.headers).map(([name, value]) => [name.toLowerCase(), value]));
-      const response = fixtures.respond(event.request.method, pathname, headers.accept ?? '');
+      const query = url.search.slice(1);
+      const response = fixtures.respond(event.request.method, pathname, headers.accept ?? '', pathname === '/jobs' ? query : null);
       if (response.status === 404) unmapped.push(`${event.request.method} ${pathname}`);
       const evidence = { method: event.request.method, path: pathname, status: response.status };
+      if (pathname === '/jobs') Object.assign(evidence, { query,
+        responseJobIds: response.document?.data?.items?.map(item => item.jobId) ?? [], fulfillmentSucceeded: false });
+      const sourceRead = pathname.includes('/source-files/');
+      if (sourceRead) Object.assign(evidence, { query, response: sourceResponseIdentity(response.document?.data), fulfillmentSucceeded: false });
       if (event.request.method === 'POST') Object.assign(evidence, {
         idempotencyKey: headers['idempotency-key'] ?? null, ifMatch: headers['if-match'] ?? null,
         csrf: headers['x-csrf-token'] === fixtures.csrfToken, body: event.request.postData ?? null,
@@ -536,7 +1068,9 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
       const requestId = response.document?.requestId ?? 'request_audit_download';
       void cdp.call('Fetch.fulfillRequest', { requestId: event.requestId, responseCode: response.status, body: body.toString('base64'),
         responseHeaders: [{ name: 'Content-Type', value: response.contentType ?? 'application/json; charset=utf-8' }, { name: 'X-Request-ID', value: requestId },
-          { name: 'Cache-Control', value: 'no-store' }] }, tab.sessionId).catch(() => undefined);
+          { name: 'Cache-Control', value: 'no-store' }] }, tab.sessionId).then(() => {
+        if (pathname === '/jobs' || sourceRead) evidence.fulfillmentSucceeded = true;
+      }).catch(() => undefined);
     }, tab.sessionId);
     await cdp.call('Fetch.enable', { patterns: [{ urlPattern: `${origin}/nested/api/v1/*`, requestStage: 'Request' }] }, tab.sessionId);
   }
@@ -549,8 +1083,9 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
   const theme = async (tab, scheme) => cdp.call('Emulation.setEmulatedMedia', { features: [
     { name: 'prefers-color-scheme', value: scheme }, { name: 'prefers-reduced-motion', value: 'reduce' }] }, tab.sessionId);
   const tab = await makeTarget();
+  const profileEvidence = await applyAuditProfile(cdp, tab.sessionId, profile);
   await intercept(tab);
-  const layout = []; const contrast = []; const focus = [];
+  const layout = []; const contrast = []; const focus = []; const chart = []; const chartScreenshots = []; const chartCaptures = [];
   for (const viewport of auditViewports) {
     await cdp.call('Emulation.setDeviceMetricsOverride', { width: viewport.width, height: viewport.height,
       deviceScaleFactor: viewport.deviceScaleFactor, mobile: viewport.mobile }, tab.sessionId);
@@ -565,14 +1100,29 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
         await delay(50);
         const measured = await evaluate(tab, measurePage);
         layout.push({ page: page.name, viewport: viewport.name, scheme, ...measured });
+        if (page.name === 'attempt evidence') chart.push({ page: page.name, viewport: viewport.name, scheme,
+          viewportWidth: viewport.width, ...await evaluate(tab, measureOutputSignatureChart) });
         // Colour does not depend on width; measure it at the two layouts that restyle text.
         if (viewport.width === 1440 || viewport.width === 320 && viewport.deviceScaleFactor === 1) {
           contrast.push({ page: page.name, viewport: viewport.name, scheme, ...await evaluate(tab, measureContrast) });
         }
       }
+      if (page.name === 'attempt evidence' && (viewport.name === 'desktop 1440x900' || viewport.name === 'zoom 400% of 1280x800')) {
+        await theme(tab, 'light');
+        await delay(50);
+        const set = chartCaptureSets.find(candidate => candidate.viewport === viewport.name);
+        const captured = await captureOutputSignatureChart({ set, evaluate: expression => evaluate(tab, expression),
+          shoot: ({ file, pageClip }) => capture(tab, file, { ...pageClip, scale: 1 }) });
+        chartCaptures.push(captured);
+        chartScreenshots.push(...captured.tiles.map(tile => tile.file));
+      }
       // Visual evidence: every route at 400% zoom, and the #619 views at every supported size.
       if ((viewport.width === 320 && viewport.deviceScaleFactor === 4) || ['workspace', 'job detail', 'source directory', 'source file'].includes(page.name)) {
-        await capture(tab, `audit-${viewport.name.split(' ')[0]}-${viewport.width}-${page.name.replaceAll(' ', '-')}.png`);
+        await capture(tab, `audit-${viewport.name.split(' ')[0]}-${viewport.width}-${page.name.replaceAll(' ', '-')}.png`,
+          `audit:${viewport.name}:${page.name}`, {
+            width: viewport.width * viewport.deviceScaleFactor,
+            height: viewport.height * viewport.deviceScaleFactor,
+          });
       }
     }
   }
@@ -681,6 +1231,7 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
 
   // Connectivity alone must announce once and leave requests, storage, URL and focus untouched.
   const workspace = fixtures.pages[0];
+  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false }, tab.sessionId);
   await cdp.call('Page.navigate', { url: origin + workspace.path }, tab.sessionId);
   await ready(tab, populated(workspace), 'workspace for connection notice');
   const connectionNotice = await qualifyConnectionNotice({ tab, cdp, evaluate, capture, delay, fulfilled, waitForValue: async (check, label, timeout) => {
@@ -688,13 +1239,17 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
     while (Date.now() < deadline) { const value = await check(); if (value) return value; await delay(75); }
     throw new Error(`Timed out waiting for ${label}`);
   } });
+  // Connection qualification restores browser-default network conditions; reapply the requested
+  // measurement profile before taking the cold and route timing samples.
+  await applyAuditProfile(cdp, tab.sessionId, profile);
 
-  // Timing on the reference profile: cold loads use a new target with an empty cache; route
+  // Timing on the selected profile: cold loads use a new target with an empty cache; route
   // changes are in-app link activations measured to heading focus and initial-route metadata.
-  // Explicit activity/evidence reads are recorded separately in interactions above.
+  // Other explicit activity/evidence reads are recorded separately in interactions above.
   const cold = [];
   for (let sample = 0; sample < 20; sample += 1) {
     const probe = await makeTarget();
+    await applyAuditProfile(cdp, probe.sessionId, profile);
     await intercept(probe);
     const started = Date.now();
     await cdp.call('Page.navigate', { url: `${origin}/nested/` }, probe.sessionId);
@@ -725,14 +1280,258 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
     })`);
     feedback.push(timing.focused); data.push(timing.populated);
   }
-  return { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped, interactions,
+  await cdp.call('Page.navigate', { url: `${origin}/nested/` }, tab.sessionId);
+  await ready(tab, populated(fixtures.pages[0]), 'dashboard for job filter timing');
+  // Exercise the documented job-library filter action independently from route changes.
+  // The fixture returns one distinctive row for either query so first visible feedback and
+  // completed rendering can be measured separately without server or data-volume variance.
+  const filterFeedback = []; const filterData = []; const filterSamples = [];
+  for (let sample = 0; sample < 50; sample += 1) {
+    const filtered = sample % 2 === 0;
+    const query = filtered ? fixtures.jobFilter.filteredQuery : fixtures.jobFilter.unfilteredQuery;
+    const expectedJobId = filtered ? fixtures.jobFilter.filteredJobId : fixtures.jobFilter.unfilteredJobId;
+    const pageSearch = filtered ? `?search=${fixtures.jobFilter.value}` : '';
+    const value = filtered ? fixtures.jobFilter.value : '';
+    const rendered = filtered ? fixtures.jobFilter.filteredRendered : fixtures.jobFilter.unfilteredRendered;
+    await evaluate(tab, `(() => {
+      const label = [...document.querySelectorAll('main label')].find(element => element.textContent.trim().startsWith(${JSON.stringify(fixtures.jobFilter.label)}));
+      const input = label?.querySelector('input');
+      if (!input) throw new Error('job filter input is missing');
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(input, ${JSON.stringify(value)});
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    await evaluate(tab, 'new Promise(resolve => requestAnimationFrame(() => resolve(true)))');
+    const before = fulfilled.length;
+    const measured = await evaluate(tab, `(async () => {
+      const expectedPageSearch = ${JSON.stringify(pageSearch)};
+      const expectedRow = ${JSON.stringify(rendered)};
+      const expectedJobId = ${JSON.stringify(expectedJobId)};
+      const section = document.querySelector('main section[aria-labelledby="job-library-title"]');
+      const input = [...(section?.querySelectorAll('label') ?? [])].find(element => element.textContent.trim().startsWith(${JSON.stringify(fixtures.jobFilter.label)}))?.querySelector('input');
+      const button = [...(section?.querySelectorAll('button') ?? [])].find(element => element.textContent.trim() === 'Apply filters');
+      const heading = section?.querySelector('h3');
+      if (!input || !button || !heading) throw new Error('job filter controls are missing');
+      const focusSubmit = ${focusFilterSubmitForTiming.toString()};
+      if (!focusSubmit(document, button)) throw new Error('job filter submit control did not receive focus before timing');
+      const started = performance.now();
+      let feedbackMs = null; let feedbackSignal = null;
+      button.click();
+      return await new Promise((resolve, reject) => {
+        const deadline = started + 10000;
+        const visible = ${filterElementVisible.toString()};
+        let presentationPending = false; let pendingSignal = null; let dataMs = null; let renderedJobId = null;
+        const observe = () => {
+          const status = heading.nextElementSibling?.matches('p[role="status"]') ? heading.nextElementSibling : null;
+          const statusVisible = visible(status);
+          const row = section.querySelector('ul.job-list h4 a');
+          const rowJobId = row ? new URL(row.href, location.href).pathname.split('/').at(-1) : null;
+          const populated = visible(row) && row.textContent.trim() === expectedRow && rowJobId === expectedJobId && document.activeElement === heading
+            && !section.querySelector('[role="alert"]') && statusVisible && status.textContent.includes('1 jobs on this page');
+          const loading = statusVisible && status.textContent.trim() === 'Loading jobs…';
+          return { populated, loading, rowJobId };
+        };
+        const check = () => {
+          if (performance.now() > deadline) { reject(new Error('job filter timing deadline')); return; }
+          const state = observe();
+          const signal = location.search !== expectedPageSearch ? null : state.loading ? 'loading' : state.populated ? 'data' : null;
+          if (!presentationPending && signal !== null) {
+            presentationPending = true;
+            pendingSignal = signal;
+            // requestAnimationFrame runs before paint. Require the same state in the following
+            // frame, proving it survived the intervening presentation before timing it.
+            requestAnimationFrame(() => {
+              const presented = observe();
+              const presentedSignal = location.search !== expectedPageSearch ? null
+                : presented.loading ? 'loading' : presented.populated ? 'data' : null;
+              if (presentedSignal === pendingSignal) {
+                const elapsed = performance.now() - started;
+                if (feedbackMs === null) {
+                  feedbackMs = elapsed;
+                  feedbackSignal = presentedSignal;
+                }
+                if (presentedSignal === 'data' && dataMs === null) {
+                  dataMs = elapsed;
+                  renderedJobId = presented.rowJobId;
+                }
+              }
+              presentationPending = false;
+              pendingSignal = null;
+              if (dataMs !== null && feedbackMs !== null) resolve({ feedbackMs, dataMs, feedbackSignal, renderedJobId });
+              else if (performance.now() > deadline) reject(new Error('job filter timing deadline'));
+              else requestAnimationFrame(check);
+            });
+            return;
+          }
+          if (dataMs !== null && feedbackMs !== null) resolve({ feedbackMs, dataMs, feedbackSignal, renderedJobId });
+          else requestAnimationFrame(check);
+        };
+        requestAnimationFrame(check);
+      });
+    })()`);
+    const requests = fulfilled.map((entry, index) => ({ entry, index })).slice(before)
+      .filter(({ entry }) => entry.method === 'GET' && entry.path === '/jobs');
+    const expectedQuery = query;
+    filterFeedback.push(measured.feedbackMs); filterData.push(measured.dataMs);
+    filterSamples.push({ sample, direction: filtered ? 'filtered' : 'cleared', query: expectedQuery, expectedJobId,
+      pageSearch, feedbackMs: measured.feedbackMs, dataMs: measured.dataMs, feedbackSignal: measured.feedbackSignal,
+      renderedJobId: measured.renderedJobId,
+      requestStartIndex: before, requestEndIndex: fulfilled.length,
+      requestIndex: requests.length === 1 ? requests[0].index : null });
+  }
+  // Source-file open (#623): each sample re-enters the pinned directory untimed, then times the
+  // directory link into metadata and the explicit preview action into the first bounded chunk.
+  const directoryPage = fixtures.pages.find((page) => page.name === 'source directory');
+  const fileOpenSamples = [];
+  const fileOpenRaw = { openFeedback: [], openData: [], previewFeedback: [], previewData: [] };
+  const phaseRecord = (start, measured, extra = {}) => ({ feedbackMs: measured.feedbackMs, dataMs: measured.dataMs,
+    feedbackSignal: measured.feedbackSignal, ...measured.details, ...extra, requestStartIndex: start, requestEndIndex: fulfilled.length });
+  const requestIn = (start, path, query) => {
+    const matches = fulfilled.map((entry, index) => ({ entry, index })).slice(start)
+      .filter(({ entry }) => entry.method === 'GET' && entry.path === path && (query === undefined || entry.query === query));
+    return matches.length === 1 ? matches[0].index : null;
+  };
+  for (let sample = 0; sample < fixtures.fileOpen.samples; sample += 1) {
+    const file = fixtures.fileOpen.files[sample % fixtures.fileOpen.files.length];
+    // Re-enter in-app after the first sample, so no extra document loads or CSP reports accrue.
+    if (sample === 0) await cdp.call('Page.navigate', { url: origin + fixtures.fileOpen.directoryPath }, tab.sessionId);
+    else assert.ok(await evaluate(tab, `(() => {
+      const link = [...document.querySelectorAll('main a')].find(element => element.textContent.trim() === ${JSON.stringify(fileOpenContract.returnDirectory)});
+      if (!link) return false; link.click(); return true;
+    })()`), `file open ${sample}: missing directory return link`);
+    await ready(tab, `${populated(directoryPage)} && location.search === ${JSON.stringify(fileOpenPin)}
+      && [...document.querySelectorAll('main ul.job-list a')].some(link => link.href.includes(${JSON.stringify(`/source-files/${file.fileId}`)}))`,
+    `source directory for file open ${sample}`);
+    await evaluate(tab, 'new Promise(resolve => requestAnimationFrame(() => resolve(true)))');
+    const openStart = fulfilled.length;
+    const open = await evaluate(tab, fileOpenMetadataPhase(file));
+    const openWindow = phaseRecord(openStart, open, { requestIndex: requestIn(openStart, fileOpenApi(file.fileId)) });
+    await evaluate(tab, 'new Promise(resolve => requestAnimationFrame(() => resolve(true)))');
+    const previewStart = fulfilled.length;
+    const preview = await evaluate(tab, fileOpenPreviewPhase(file));
+    const content = await evaluate(tab, renderedPreviewDigest);
+    const previewWindow = phaseRecord(previewStart, preview, { ...content,
+      requestIndex: requestIn(previewStart, `${fileOpenApi(file.fileId)}/chunk`) });
+    fileOpenSamples.push({ sample, fileId: file.fileId, open: openWindow, preview: previewWindow });
+    fileOpenRaw.openFeedback.push(open.feedbackMs); fileOpenRaw.openData.push(open.dataMs);
+    fileOpenRaw.previewFeedback.push(preview.feedbackMs); fileOpenRaw.previewData.push(preview.dataMs);
+  }
+  const interactionTimes = interactions.map(({ elapsedMs }) => elapsedMs);
+  return { profile: profileEvidence, fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), chartExpected: fixtures.chartExpected,
+    layout, contrast, focus, chart, chartScreenshots, chartCaptures, fulfilled, unmapped, interactions,
     workers: { highlightedTokens: highlighted, targets: workers }, keyboard, connectionNotice,
-    timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data), raw: { cold, feedback, data } } };
+    jobFilter: { ...fixtures.jobFilter, samples: filterSamples },
+    fileOpen: { contract: fileOpenEvidenceContract(), samples: fileOpenSamples },
+    timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data),
+      interactions: summary(interactionTimes), filterFeedback: summary(filterFeedback), filterData: summary(filterData),
+      fileOpenFeedback: summary(fileOpenRaw.openFeedback), fileOpenData: summary(fileOpenRaw.openData),
+      filePreviewFeedback: summary(fileOpenRaw.previewFeedback), filePreviewData: summary(fileOpenRaw.previewData),
+      raw: { cold, feedback, data, interactions: interactionTimes, filterFeedback, filterData, fileOpenFeedback: fileOpenRaw.openFeedback,
+        fileOpenData: fileOpenRaw.openData, filePreviewFeedback: fileOpenRaw.previewFeedback, filePreviewData: fileOpenRaw.previewData } } };
+}
+
+/** Validate explicit-read records against the trusted fixture preparation contract. */
+export function interactionEvidenceFailures(audit, pages, extraContexts = []) {
+  const failures = [];
+  if (!Array.isArray(pages)) return ['interactions: missing expected fixture contract'];
+  const contextsByPage = new Map(pages.map(page => [page.name, auditViewports.map(viewport => viewport.name)]));
+  const preparedPages = new Set(pages.filter(page => Array.isArray(page?.preparation) && page.preparation.length > 0).map(page => page.name));
+  if (!Array.isArray(extraContexts)) {
+    failures.push('interactions: invalid extra context contract');
+    extraContexts = [];
+  }
+  for (const extra of extraContexts) {
+    if (!extra || typeof extra.page !== 'string' || typeof extra.context !== 'string' || !contextsByPage.has(extra.page) ||
+        !auditPageNames.includes(extra.page)) {
+      failures.push('interactions: invalid extra context contract');
+      continue;
+    }
+    const where = JSON.stringify([extra.page, extra.context]);
+    if (!supplementalInteractionContextNames.includes(extra.context)) {
+      failures.push(`interactions: undeclared extra context ${where}`);
+      continue;
+    }
+    if (!preparedPages.has(extra.page)) {
+      failures.push(`interactions: extra context for unprepared page ${where}`);
+      continue;
+    }
+    if (contextsByPage.get(extra.page).includes(extra.context)) {
+      failures.push(`interactions: duplicate extra context ${where}`);
+      continue;
+    }
+    contextsByPage.get(extra.page).push(extra.context);
+  }
+  const expected = new Map();
+  for (const page of pages) {
+    for (const [stepIndex, step] of (page.preparation ?? []).entries()) {
+      for (const context of contextsByPage.get(page.name) ?? []) {
+        const identity = JSON.stringify([page.name, stepIndex, step.action, context]);
+        if (expected.has(identity)) failures.push(`interactions: duplicate fixture contract ${identity}`);
+        else expected.set(identity, step.reads);
+      }
+    }
+  }
+
+  const records = Array.isArray(audit?.interactions) ? audit.interactions : [];
+  if (!Array.isArray(audit?.interactions)) failures.push('interactions: missing records');
+  const seen = new Set();
+  for (const record of records) {
+    if (!record || typeof record !== 'object' || Array.isArray(record)) {
+      failures.push('interactions: invalid record');
+      continue;
+    }
+    const identity = JSON.stringify([record.page, record.stepIndex, record.action, record.context]);
+    if (!expected.has(identity)) failures.push(`interactions: unexpected action ${identity}`);
+    else if (seen.has(identity)) failures.push(`interactions: duplicate action ${identity}`);
+    else {
+      seen.add(identity);
+      const expectedReads = expected.get(identity);
+      if (!Array.isArray(record.reads) || record.reads.some(path => typeof path !== 'string') ||
+          JSON.stringify(record.reads) !== JSON.stringify(expectedReads)) {
+        failures.push(`interactions: ${record.page} / ${record.action} (${record.context}) reads do not match fixture`);
+      }
+    }
+    if (!Number.isFinite(record.elapsedMs) || record.elapsedMs < 0) {
+      failures.push(`interactions: ${record.page} / ${record.action} (${record.context}) has invalid elapsed time`);
+    }
+  }
+  for (const identity of expected.keys()) if (!seen.has(identity)) failures.push(`interactions: missing action ${identity}`);
+
+  const timing = audit?.timing?.interactions;
+  const raw = audit?.timing?.raw?.interactions;
+  const validMs = value => Number.isFinite(value) && value >= 0;
+  const elapsed = records.map(record => record?.elapsedMs);
+  const expectedSamples = expected.size;
+  if (!timing || timing.samples !== expectedSamples || !validMs(timing.median) || !validMs(timing.p95) ||
+      !Array.isArray(raw) || raw.length !== expectedSamples || !Array.from(raw).every(validMs)) {
+    failures.push(`interaction timing: invalid evidence (requires ${expectedSamples} finite nonnegative samples, median and p95)`);
+  } else {
+    if (raw.length !== elapsed.length || raw.some((value, index) => value !== elapsed[index])) {
+      failures.push('interaction timing: raw samples do not match interaction records');
+    }
+    const calculated = summary(raw);
+    if (timing.median !== calculated.median || timing.p95 !== calculated.p95) {
+      failures.push('interaction timing: summary does not match raw samples');
+    }
+  }
+  return failures;
 }
 
 /** Assertions are separate from measurement so the full report is retained when one fails. */
-export function assertAudit(audit, manifest, responses, origin, budgets = { coldLoadP95: 1500, routeFeedbackP95: 100, routeDataP95: 500 }, { connectionNotice = true } = {}) {
+export function assertAudit(audit, manifest, responses, origin, budgets = {}, {
+  connectionNotice = true, jobFilter = true, fileOpen = true, interactionPages = null, extraInteractionContexts = [], profile = 'reference',
+} = {}) {
+  const budgetLimits = { coldLoadP95: 1500, routeFeedbackP95: 100, routeDataP95: 500,
+    filterFeedbackP95: 100, filterDataP95: 500, fileOpenFeedbackP95: 100, fileOpenDataP95: 500,
+    filePreviewFeedbackP95: 100, filePreviewDataP95: 500, ...budgets };
   const failures = [];
+  let expectedProfile;
+  try { expectedProfile = auditProfileEvidence(profile); }
+  catch { failures.push(`audit profile: unknown requested profile ${profile}`); }
+  if (expectedProfile && JSON.stringify(audit?.profile) !== JSON.stringify(expectedProfile)) {
+    failures.push(`audit profile: report does not match requested ${profile} profile`);
+  }
   // Expectations come from the qualification contract, not the report's claimed coverage.
   const schemes = ['light', 'dark'];
   const expected = (viewports) => auditPageNames.flatMap(page => viewports.flatMap(viewport => {
@@ -758,9 +1557,56 @@ export function assertAudit(audit, manifest, responses, origin, budgets = { cold
     return records.filter(entry => entry && typeof entry === 'object');
   };
   const layout = coverage('layout', expected(auditViewports));
+  const chart = coverage('chart', expected(auditViewports).filter(entry => entry.page === 'attempt evidence'));
   const contrast = coverage('contrast', expected(auditViewports.filter(viewport =>
     viewport.width === 1440 || viewport.width === 320 && viewport.deviceScaleFactor === 1)));
   const focus = coverage('focus', expected([null]));
+  const chartExpected = audit.chartExpected;
+  const same = (actual, expected) => JSON.stringify(actual) === JSON.stringify(expected);
+  const captures = Array.isArray(audit.chartCaptures) ? audit.chartCaptures : [];
+  if (captures.length !== chartCaptureSets.length) failures.push('chart: missing desktop or 400% packaged screenshot evidence');
+  chartCaptureSets.forEach((set, index) => failures.push(...chartCaptureFailures(captures[index], set)));
+  if (!same(audit.chartScreenshots, captures.flatMap(capture => (capture?.tiles ?? []).map(tile => tile?.file))) || !audit.chartScreenshots?.length)
+    failures.push('chart: screenshot list does not match the capture manifests');
+  for (const entry of chart) {
+    const where = `${entry.page} @ ${entry.viewport} (${entry.scheme})`;
+    const validRect = box => box && [box.x, box.y, box.width, box.height, box.right, box.bottom].every(Number.isFinite)
+      && box.width > 0 && box.height > 0;
+    if (!chartExpected || !entry.chartPresent || entry.chartRole !== 'img' || !entry.chartVisible || !entry.figurePresent
+      || !entry.figureVisible || entry.chartName !== chartExpected.chartName)
+      failures.push(`${where}: missing or misnamed accessible signature chart`);
+    if (!validRect(entry.chartBounds) || entry.chartBounds.x < -1 || entry.chartBounds.right > entry.viewportWidth + 1)
+      failures.push(`${where}: signature chart has invalid or off-viewport bounds`);
+    const expectedCounts = `Expanded distinct exit/output signatures: ${chartExpected?.counts.expanded}. New distinct exit/output signatures: ${chartExpected?.counts.added}.`;
+    if (!chartExpected || !entry.chartDescription?.includes(entry.binding)
+      || !entry.chartDescription.includes(expectedCounts)
+      || !entry.chartDescription.includes(chartExpected.tableName)
+      || !entry.chartDescription.includes(chartExpected.approximation))
+      failures.push(`${where}: chart description lost its report identity, exact counters, table or approximation note`);
+    if (!chartExpected || !entry.binding.includes(chartExpected.reportId) || !entry.binding.includes(chartExpected.jobId)
+      || !entry.binding.includes(chartExpected.runId) || !entry.binding.includes(chartExpected.revisionId))
+      failures.push(`${where}: chart is not bound to the expected report, job, attempt and revision`);
+    if (!chartExpected || entry.region?.name !== chartExpected.tableName || entry.region?.focusable !== true || entry.region?.visible !== true
+      || !validRect(entry.region?.bounds) || !Number.isFinite(entry.region?.clientWidth) || entry.region.clientWidth <= 0
+      || !Number.isFinite(entry.region?.scrollWidth) || entry.region.scrollWidth < entry.region.clientWidth)
+      failures.push(`${where}: exact table is not in a visible, named, keyboard-scrollable region`);
+    if (!chartExpected || entry.caption !== chartExpected.tableName || !same(entry.headers, chartExpected.headers)
+      || !same(entry.rows, [
+        [chartExpected.labels[0], chartExpected.counts.expanded, chartExpected.sample],
+        [chartExpected.labels[1], chartExpected.counts.added, chartExpected.counts.denominator],
+      ])) failures.push(`${where}: accessible table does not preserve exact producer counters and denominator`);
+    if (entry.chartSeries?.length !== 2 || entry.chartSeries.some(series => !series.label || !validRect(series.bounds)
+      || !validRect(series.svgBounds) || series.barWidth === null))
+      failures.push(`${where}: visual chart series are missing or not rendered`);
+    const expandedCount = Number(chartExpected?.counts.expanded);
+    const addedCount = Number(chartExpected?.counts.added);
+    const expectedBarWidths = [100, expandedCount > 0 ? addedCount / expandedCount * 100 : NaN];
+    const actualBarWidths = entry.chartSeries?.map(series => Number(series.barWidth)) ?? [];
+    if (!Number.isFinite(expandedCount) || !Number.isFinite(addedCount) || expandedCount <= 0
+      || actualBarWidths.length !== expectedBarWidths.length
+      || actualBarWidths.some((width, index) => !Number.isFinite(width) || Math.abs(width - expectedBarWidths[index]) > 0.1))
+      failures.push(`${where}: visual bar widths do not represent the reported counts`);
+  }
   for (const entry of layout) {
     const where = `${entry.page} @ ${entry.viewport} (${entry.scheme})`;
     if (entry.pageOverflowPx > 1) failures.push(`${where}: page scrolls horizontally by ${entry.pageOverflowPx}px: ${entry.overflow.join('; ')}`);
@@ -793,6 +1639,7 @@ export function assertAudit(audit, manifest, responses, origin, budgets = { cold
   }
   // Chrome-DevTools-only evidence; the Playwright cross-engine runner opts out explicitly.
   if (connectionNotice !== false) failures.push(...connectionNoticeFailures(audit.connectionNotice));
+  failures.push(...interactionEvidenceFailures(audit, interactionPages, extraInteractionContexts));
   if (audit.unmapped.length) failures.push(`unmapped API reads: ${[...new Set(audit.unmapped)].join(', ')}`);
   // Every packaged script, style, worker and font must resolve under the deployment base.
   const assetBase = `${origin}/nested/assets/ui/`;
@@ -811,9 +1658,19 @@ export function assertAudit(audit, manifest, responses, origin, budgets = { cold
   const failed = responses.filter((response) => response.url.startsWith(assetBase) && response.status !== 200);
   if (failed.length) failures.push(`asset responses failed: ${JSON.stringify(failed)}`);
   for (const [name, rawName, count, label, budget] of [
-    ['coldLoad', 'cold', 20, 'cold dashboard', budgets.coldLoadP95],
-    ['routeFeedback', 'feedback', 50, 'route feedback', budgets.routeFeedbackP95],
-    ['routeData', 'data', 50, 'route data', budgets.routeDataP95],
+    ['coldLoad', 'cold', 20, 'cold dashboard', budgetLimits.coldLoadP95],
+    ['routeFeedback', 'feedback', 50, 'route feedback', budgetLimits.routeFeedbackP95],
+    ['routeData', 'data', 50, 'route data', budgetLimits.routeDataP95],
+    ...(jobFilter === false ? [] : [
+      ['filterFeedback', 'filterFeedback', 50, 'job filter feedback', budgetLimits.filterFeedbackP95],
+      ['filterData', 'filterData', 50, 'job filter first data', budgetLimits.filterDataP95],
+    ]),
+    ...(fileOpen === false ? [] : [
+      ['fileOpenFeedback', 'fileOpenFeedback', 50, 'source file open feedback', budgetLimits.fileOpenFeedbackP95],
+      ['fileOpenData', 'fileOpenData', 50, 'source file open first data', budgetLimits.fileOpenDataP95],
+      ['filePreviewFeedback', 'filePreviewFeedback', 50, 'source preview feedback', budgetLimits.filePreviewFeedbackP95],
+      ['filePreviewData', 'filePreviewData', 50, 'source preview first chunk', budgetLimits.filePreviewDataP95],
+    ]),
   ]) {
     const timing = audit.timing?.[name];
     const raw = audit.timing?.raw?.[rawName];
@@ -826,7 +1683,270 @@ export function assertAudit(audit, manifest, responses, origin, budgets = { cold
     const calculated = summary(raw);
     if (timing.median !== calculated.median || timing.p95 !== calculated.p95)
       failures.push(`${label}: timing summary does not match raw samples`);
-    if (timing.p95 > budget) failures.push(`${label} p95 ${timing.p95}ms exceeds ${budget}ms`);
+    if (!Number.isFinite(budget) || budget < 0) failures.push(`${label}: invalid timing budget ${JSON.stringify(budget)}`);
+    else if (profile === 'reference') {
+      // The opt-in constrained profile records and validates timing evidence without budgets.
+      const exactP95 = percentile(raw, 0.95);
+      if (exactP95 > budget) failures.push(`${label} p95 ${exactP95}ms exceeds ${budget}ms`);
+    }
   }
-  return { failures, declaredAssets: declared, loadedAssets: [...loaded.keys()], fonts: declared.filter((path) => /\.(?:woff2?|ttf|otf)$/.test(path)), budgets };
+  if (jobFilter !== false) failures.push(...jobFilterFailures(audit.jobFilter, audit.timing?.raw, audit.fulfilled));
+  if (fileOpen !== false) failures.push(...fileOpenFailures(audit.fileOpen, audit.timing?.raw, audit.fulfilled));
+  return { failures, declaredAssets: declared, loadedAssets: [...loaded.keys()], fonts: declared.filter((path) => /\.(?:woff2?|ttf|otf)$/.test(path)),
+    profile, timingBudgetsEnforced: profile === 'reference', budgets: budgetLimits };
 }
+
+/** Validate filter sample completeness, workload identity, summaries and request-to-render binding. */
+export function jobFilterFailures(evidence, raw, fulfilled) {
+  const failures = []; const fail = message => failures.push(`job filter: ${message}`);
+  if (!evidence || typeof evidence !== 'object') { fail('missing workload evidence'); return failures; }
+  for (const key of ['label', 'value', 'filteredQuery', 'unfilteredQuery', 'filteredRendered', 'unfilteredRendered',
+    'filteredJobId', 'unfilteredJobId'])
+    if (evidence[key] !== jobFilterContract[key]) fail(`unexpected ${key} ${JSON.stringify(evidence[key])}`);
+  const samples = Array.isArray(evidence.samples) ? evidence.samples : [];
+  if (samples.length !== 50) fail(`requires 50 samples, found ${samples.length}`);
+  const validMs = value => Number.isFinite(value) && value >= 0;
+  const seenRequests = new Set(); let previousEnd = 0;
+  samples.forEach((sample, index) => {
+    const filtered = index % 2 === 0;
+    const direction = filtered ? 'filtered' : 'cleared';
+    const query = filtered ? jobFilterContract.filteredQuery : jobFilterContract.unfilteredQuery;
+    const expectedJobId = filtered ? jobFilterContract.filteredJobId : jobFilterContract.unfilteredJobId;
+    if (!sample || sample.sample !== index || sample.direction !== direction || sample.query !== query)
+      fail(`sample ${index}: unexpected direction/query binding`);
+    if (sample?.expectedJobId !== expectedJobId || sample?.renderedJobId !== expectedJobId)
+      fail(`sample ${index}: rendered row does not match the expected job identity`);
+    if (!validMs(sample?.feedbackMs) || !validMs(sample?.dataMs) || sample.feedbackMs > sample.dataMs)
+      fail(`sample ${index}: invalid feedback/data timing`);
+    if (sample?.feedbackSignal !== 'loading' && sample?.feedbackSignal !== 'data') fail(`sample ${index}: invalid feedback signal`);
+    if (sample?.feedbackSignal === 'data' && validMs(sample?.feedbackMs) && validMs(sample?.dataMs)
+      && sample.dataMs - sample.feedbackMs > 20) fail(`sample ${index}: data feedback is not coincident with first data`);
+    if (!Number.isInteger(sample?.requestStartIndex) || !Number.isInteger(sample?.requestEndIndex)
+      || sample.requestStartIndex < previousEnd || sample.requestEndIndex < sample.requestStartIndex
+      || !Number.isInteger(sample?.requestIndex) || sample.requestIndex < sample.requestStartIndex
+      || sample.requestIndex >= sample.requestEndIndex || seenRequests.has(sample.requestIndex)) {
+      fail(`sample ${index}: missing or duplicate fulfilled request index`);
+      return;
+    }
+    previousEnd = sample.requestEndIndex;
+    seenRequests.add(sample.requestIndex);
+    const request = fulfilled?.[sample.requestIndex];
+    const expectedRequest = { method: 'GET', path: '/jobs', status: 200, query, fulfillmentSucceeded: true };
+    const pageSearch = filtered ? `?search=${jobFilterContract.value}` : '';
+    if (sample?.pageSearch !== pageSearch) fail(`sample ${index}: unexpected page-search binding`);
+    const requestsInWindow = Array.isArray(fulfilled) ? fulfilled.slice(sample.requestStartIndex, sample.requestEndIndex)
+      .filter(entry => entry?.method === 'GET' && entry?.path === '/jobs') : [];
+    if (!request || Object.keys(expectedRequest).some(key => request[key] !== expectedRequest[key])
+      || !Array.isArray(request.responseJobIds) || request.responseJobIds.length !== 1 || request.responseJobIds[0] !== expectedJobId
+      || requestsInWindow.length !== 1 || requestsInWindow[0] !== request)
+      fail(`sample ${index}: not bound to its fulfilled ${query} request`);
+  });
+  for (const [name, values, label] of [['filterFeedback', raw?.filterFeedback, 'feedback'], ['filterData', raw?.filterData, 'first data']]) {
+    if (!Array.isArray(values) || values.length !== 50 || !values.every(validMs)) {
+      fail(`${label}: requires 50 finite nonnegative raw samples`);
+      continue;
+    }
+    const measured = values;
+    const recorded = samples;
+    const field = name === 'filterFeedback' ? 'feedbackMs' : 'dataMs';
+    if (recorded.length !== 50 || measured.some((value, index) => value !== recorded[index]?.[field]))
+      fail(`${label}: raw samples do not match workload records`);
+  }
+  return failures;
+}
+
+
+/** The workload identity a file-open report must carry; row text stays out of the report. */
+export function fileOpenEvidenceContract() {
+  return { ...Object.fromEntries(fileOpenIdentityKeys.map(key => [key, fileOpenContract[key]])),
+    files: fileOpenContract.files.map(({ fileId, displayName, sizeBytes, sha256, rows }) => ({ fileId, displayName, sizeBytes, sha256, rows })) };
+}
+
+/** Validate both file-open phases against the contract, their exact request windows and rendered content. */
+export function fileOpenFailures(evidence, raw, fulfilled) {
+  const failures = []; const fail = message => failures.push(`source file open: ${message}`);
+  if (!evidence || typeof evidence !== 'object') { fail('missing workload evidence'); return failures; }
+  const c = fileOpenContract;
+  if (JSON.stringify(evidence.contract) !== JSON.stringify(fileOpenEvidenceContract())) fail('unexpected workload contract');
+  if (evidence.form === 'compact-v1') return [...failures, ...compactFileOpenFailures(evidence, raw, fulfilled).map(message => `source file open: ${message}`)];
+  const samples = Array.isArray(evidence.samples) ? evidence.samples : [];
+  if (samples.length !== c.samples) fail(`requires ${c.samples} samples, found ${samples.length}`);
+  const table = Array.isArray(fulfilled) ? fulfilled : [];
+  const validMs = value => Number.isFinite(value) && value >= 0;
+  const seen = new Set(); let previousEnd = 0;
+  samples.forEach((sample, index) => {
+    const file = c.files[index % c.files.length];
+    const where = `sample ${index}`;
+    if (!sample || typeof sample !== 'object' || sample.sample !== index || sample.fileId !== file.fileId) {
+      fail(`${where}: unexpected file rotation binding`); return;
+    }
+    for (const name of ['open', 'preview']) {
+      const phase = sample[name]; const at = `${where} ${name}`;
+      if (!phase || typeof phase !== 'object') { fail(`${at}: missing phase record`); continue; }
+      if (!validMs(phase.feedbackMs) || !validMs(phase.dataMs) || phase.feedbackMs > phase.dataMs
+        || phase.dataMs > c.deadlineMs) fail(`${at}: invalid feedback/data timing`);
+      if (phase.feedbackSignal !== 'loading' && phase.feedbackSignal !== 'data') fail(`${at}: invalid feedback signal`);
+      if (phase.feedbackSignal === 'data' && validMs(phase.feedbackMs) && validMs(phase.dataMs) && phase.dataMs - phase.feedbackMs > 20)
+        fail(`${at}: data feedback is not coincident with first data`);
+      const { requestStartIndex: start, requestEndIndex: end, requestIndex } = phase;
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start < previousEnd || end < start || end > table.length
+        || !Number.isInteger(requestIndex) || requestIndex < start || requestIndex >= end || seen.has(requestIndex)) {
+        fail(`${at}: missing or duplicate fulfilled request index`); continue;
+      }
+      previousEnd = end; seen.add(requestIndex);
+      const path = name === 'open' ? fileOpenApi(file.fileId) : `${fileOpenApi(file.fileId)}/chunk`;
+      const request = table[requestIndex];
+      const response = request?.response;
+      const expected = expectedSourceResponseIdentity(name === 'open' ? 'file' : 'chunk', file);
+      // Live reports carry the identity object; compacted reports carry its canonical digest.
+      const mismatched = typeof response === 'string' ? (response === sourceResponseDigest(expected) ? [] : ['response'])
+        : response && typeof response === 'object' ? [...new Set([...Object.keys(expected), ...Object.keys(response)])]
+          .filter(key => JSON.stringify(response[key]) !== JSON.stringify(expected[key])).map(key => `response.${key}`) : ['response'];
+      const expectedRequest = { method: 'GET', path, status: 200, fulfillmentSucceeded: true, query: name === 'open' ? '' : fileOpenChunkQuery };
+      if (request) mismatched.unshift(...Object.keys(expectedRequest).filter(key => request[key] !== expectedRequest[key]));
+      if (!request || mismatched.length)
+        fail(`${at}: not bound to its fulfilled ${name === 'open' ? 'metadata' : 'chunk'} request (${request ? mismatched.join(', ') : 'missing'})`);
+      const windowEntries = table.slice(start, end);
+      if (name === 'open' && windowEntries.some(entry => typeof entry?.path === 'string' && entry.path.endsWith('/chunk')))
+        fail(`${at}: metadata open requested a source chunk`);
+      if (windowEntries.length !== 1 || windowEntries[0] !== request) fail(`${at}: unexpected requests in the measured window`);
+    }
+    const open = sample.open ?? {};
+    if (open.renderedFileId !== file.fileId || open.renderedName !== file.displayName || open.renderedSha256 !== file.sha256)
+      fail(`${where} open: rendered metadata does not match the file identity`);
+    if (open.pageSearch !== fileOpenPin) fail(`${where} open: snapshot pin is not bound to the source revision`);
+    if (open.focus !== 'main-heading' || open.previewOpen !== false) fail(`${where} open: unexpected focus or preview state`);
+    const preview = sample.preview ?? {};
+    if (preview.renderedRows !== file.rows || preview.renderedBytes !== Number(file.sizeBytes) || preview.renderedTextSha256 !== file.sha256)
+      fail(`${where} preview: rendered chunk content does not match the file digest`);
+    if (preview.ariaBusy !== 'false' || preview.focus !== 'source-preview-title') fail(`${where} preview: unexpected busy state or focus`);
+  });
+  for (const [name, phase, field, label] of [['fileOpenFeedback', 'open', 'feedbackMs', 'open feedback'], ['fileOpenData', 'open', 'dataMs', 'open first data'],
+    ['filePreviewFeedback', 'preview', 'feedbackMs', 'preview feedback'], ['filePreviewData', 'preview', 'dataMs', 'preview first chunk']]) {
+    const values = raw?.[name];
+    if (!Array.isArray(values) || values.length !== c.samples || !values.every(validMs)) {
+      fail(`${label}: requires ${c.samples} finite nonnegative raw samples`); continue;
+    }
+    if (samples.length !== c.samples || values.some((value, index) => value !== samples[index]?.[phase]?.[field]))
+      fail(`${label}: raw samples do not match workload records`);
+  }
+  return failures;
+}
+
+/** Validate the retained compact file-open form against the contract-derived expectation. */
+function compactFileOpenFailures(evidence, raw, fulfilled) {
+  const failures = []; const c = fileOpenContract;
+  const samples = Array.isArray(evidence.samples) ? evidence.samples : [];
+  if (samples.length !== c.samples) failures.push(`requires ${c.samples} samples, found ${samples.length}`);
+  const table = Array.isArray(fulfilled) ? fulfilled : [];
+  const validMs = value => Number.isFinite(value) && value >= 0;
+  const seen = new Set(); let previousEnd = 0;
+  const expected = Array.from({ length: c.samples }, (_, index) => expectedFileOpenSample(index));
+  const sourceWindows = [];
+  samples.forEach((tuple, index) => {
+    if (!Array.isArray(tuple) || tuple.length !== 8) { failures.push(`sample ${index}: invalid compact record`); return; }
+    if (index >= expected.length) return;
+    for (const [offset, name, kind] of [[0, 'open', 'file'], [4, 'preview', 'chunk']]) {
+      const [start, end, requestIndex, signal] = tuple.slice(offset, offset + 4); const at = `sample ${index} ${name}`;
+      if (signal !== 'loading' && signal !== 'data') failures.push(`${at}: invalid feedback signal`);
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start < previousEnd || end < start || end > table.length
+        || !Number.isInteger(requestIndex) || requestIndex < start || requestIndex >= end || seen.has(requestIndex)) {
+        failures.push(`${at}: missing or duplicate fulfilled request index`); continue;
+      }
+      previousEnd = end; seen.add(requestIndex);
+      const window = table.slice(start, end);
+      const expectedRead = expected[index].requests[name === 'open' ? 0 : 1];
+      const readCommitment = sourceReadCommitment(expectedRead);
+      if (table[requestIndex]?.source !== kind || table[requestIndex]?.readCommitment !== readCommitment)
+        failures.push(`${at}: not bound to its fulfilled ${kind === 'file' ? 'metadata' : 'chunk'} request identity`);
+      if (name === 'open' && window.some(entry => entry?.source === 'chunk' || (typeof entry?.path === 'string' && entry.path.endsWith('/chunk'))))
+        failures.push(`${at}: metadata open requested a source chunk`);
+      if (window.length !== 1) failures.push(`${at}: unexpected requests in the measured window`);
+      sourceWindows.push({ sample: index, phase: name, start, end, requestIndex, source: kind, readCommitment });
+    }
+  });
+  if (evidence.renderedSha256 !== sha256Json(expected.map(sample => sample.rendered)))
+    failures.push('rendered metadata, chunk content, focus or pin do not match the contract');
+  if (evidence.sourceRequestsSha256 !== sha256Json(sourceWindows))
+    failures.push('source request windows are not bound to their sample and phase identities');
+  const names = [['fileOpenFeedback', 'fileOpenData', 'open'], ['filePreviewFeedback', 'filePreviewData', 'preview']];
+  for (const [feedback, data, label] of names) {
+    const feedbackValues = raw?.[feedback]; const dataValues = raw?.[data];
+    if (![feedbackValues, dataValues].every(values => Array.isArray(values) && values.length === c.samples && values.every(validMs))) {
+      failures.push(`${label}: requires ${c.samples} finite nonnegative raw samples`); continue;
+    }
+    feedbackValues.forEach((value, index) => {
+      const signal = samples[index]?.[label === 'open' ? 3 : 7];
+      if (value > dataValues[index] || dataValues[index] > c.deadlineMs) failures.push(`sample ${index} ${label}: invalid feedback/data timing`);
+      else if (signal === 'data' && dataValues[index] - value > 20) failures.push(`sample ${index} ${label}: data feedback is not coincident with first data`);
+    });
+  }
+  return failures;
+}
+
+/**
+ * Keep every fulfilled request inside the measured job-filter and file-open windows, so an
+ * unexpected request there still reaches the validator, and drop unrelated route reads.
+ * Indexes are remapped; any malformed window leaves the report untouched for the validator.
+ */
+export function compactTimedAuditEvidence(audit) {
+  const fulfilled = Array.isArray(audit?.fulfilled) ? audit.fulfilled : null;
+  const filterSamples = Array.isArray(audit?.jobFilter?.samples) ? audit.jobFilter.samples : null;
+  const fileSamples = Array.isArray(audit?.fileOpen?.samples) ? audit.fileOpen.samples : null;
+  if (!fulfilled || (!filterSamples && !fileSamples)) return audit;
+  const windows = [...(filterSamples ?? []), ...(fileSamples ?? []).flatMap(sample => [sample?.open, sample?.preview])];
+  const retainedSources = new Set();
+  for (const record of windows) {
+    const start = record?.requestStartIndex; const end = record?.requestEndIndex;
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end > fulfilled.length) return audit;
+    for (let index = start; index < end; index += 1) retainedSources.add(index);
+  }
+  const ordered = [...retainedSources].sort((a, b) => a - b);
+  const indexes = new Map(ordered.map((source, retained) => [source, retained]));
+  const position = source => { let low = 0; let high = ordered.length;
+    while (low < high) { const middle = (low + high) >> 1; if (ordered[middle] < source) low = middle + 1; else high = middle; }
+    return low; };
+  const remap = record => record && typeof record === 'object' ? { ...record, requestStartIndex: position(record.requestStartIndex),
+    requestEndIndex: position(record.requestEndIndex), requestIndex: indexes.get(record.requestIndex) ?? null } : record;
+  const compact = { ...audit, fulfilled: ordered.map(index => fulfilled[index]),
+    fulfilledRequestSummary: { observed: fulfilled.length, retained: ordered.length, scope: 'timed-request-windows' } };
+  if (filterSamples) compact.jobFilter = { ...audit.jobFilter, samples: filterSamples.map(remap) };
+  if (fileSamples) {
+    // The report bound leaves little room: file-open samples become index/signal tuples, each
+    // source read in a window becomes a one-letter marker, and the per-sample rendered details
+    // and source requests are bound by digests the validator recomputes from the contract.
+    // Requests in a window that are not source reads are kept verbatim.
+    const sourceEntries = [];
+    const marked = new Set();
+    const sourceMarkers = new Map();
+    for (let sampleIndex = 0; sampleIndex < fileSamples.length; sampleIndex += 1) {
+      const sample = fileSamples[sampleIndex];
+      for (const [name, phase] of [['open', sample?.open], ['preview', sample?.preview]]) {
+      for (let index = phase.requestStartIndex; index < phase.requestEndIndex; index += 1) {
+        const entry = fulfilled[index];
+        if (typeof entry?.path === 'string' && entry.path.includes('/source-files/') && !marked.has(index)) {
+          marked.add(index);
+          const readCommitment = sourceReadCommitment(entry);
+          sourceMarkers.set(index, { source: entry.path.endsWith('/chunk') ? 'chunk' : 'file', readCommitment });
+        }
+      }
+      const retainedStart = position(phase.requestStartIndex);
+      const retainedEnd = position(phase.requestEndIndex);
+      const retainedRequest = indexes.get(phase.requestIndex) ?? null;
+      const readIndex = phase.requestIndex;
+      sourceEntries.push({ sample: sampleIndex, phase: name, start: retainedStart, end: retainedEnd,
+        requestIndex: retainedRequest, source: name === 'open' ? 'file' : 'chunk',
+        readCommitment: sourceReadCommitment(fulfilled[readIndex]) });
+      }
+    }
+    compact.fulfilled = ordered.map(index => marked.has(index)
+      ? sourceMarkers.get(index) : fulfilled[index]);
+    const tuple = phase => { const record = remap(phase); return [record.requestStartIndex, record.requestEndIndex, record.requestIndex, record.feedbackSignal]; };
+    compact.fileOpen = { contract: audit.fileOpen.contract, form: 'compact-v1',
+      samples: fileSamples.map(sample => [...tuple(sample.open), ...tuple(sample.preview)]),
+      renderedSha256: sha256Json(fileSamples.map(renderedFileOpenDetails)), sourceRequestsSha256: sha256Json(sourceEntries) };
+  }
+  return compact;
+}
+/** @deprecated Kept for existing callers; compacts every timed request window. */
+export const compactJobFilterAuditEvidence = compactTimedAuditEvidence;

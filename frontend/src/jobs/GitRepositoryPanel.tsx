@@ -4,6 +4,7 @@ import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { Capability, GitRepositories, GitWorkspace, Job, Operation } from '../api/generated';
+import { isDeletedJob } from '../shared/retainMetadata';
 import type { BrowserSession } from '../session/session';
 
 const terminal = new Set<Operation['state']>(['completed', 'failed', 'cancelled', 'interrupted', 'recovery-required']);
@@ -33,8 +34,9 @@ function sleep(milliseconds: number, signal: AbortSignal) {
  * and one explicit initialization from the latest attempt's recorded candidate. Nothing here
  * commits, fetches or reports validation.
  */
-export function GitRepositoryPanel({ job, capabilities, basePath, session, pollIntervalMs = defaultPollIntervalMs }: {
+export function GitRepositoryPanel({ job, capabilities, basePath, session, onDeleted, pollIntervalMs = defaultPollIntervalMs }: {
   job: Job; capabilities: readonly Capability[]; basePath: string; session: Pick<BrowserSession, 'csrf'>; pollIntervalMs?: number;
+  onDeleted?: (failure: unknown) => void;
 }) {
   const { client } = usePrivateTransport(basePath);
   const capability = capabilities.find(item => item.id === 'git');
@@ -92,6 +94,7 @@ export function GitRepositoryPanel({ job, capabilities, basePath, session, pollI
         : copy.noRepository);
     } catch (failure: unknown) {
       if (controller.signal.aborted) return;
+      if (onDeleted && isDeletedJob(failure)) { onDeleted(failure); return; }
       setObserved(null);
       const status = failure instanceof ApiClientError ? failure.status ?? 0 : 0;
       setStatus(withApiFailureReference(

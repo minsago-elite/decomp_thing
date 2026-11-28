@@ -57,7 +57,6 @@ import decompengine.agent.AgentExecutionResult
 import decompengine.agent.AgentExecutionOutcome
 import decompengine.agent.AgentFailure
 import decompengine.agent.AgentFailureKind
-import decompengine.agent.AgentFileChange
 import decompengine.agent.AgentFileChangeEvent
 import decompengine.agent.AgentFileChangeKind
 import decompengine.agent.AgentHarness
@@ -737,11 +736,11 @@ class AcpAgentHarness(
         }
 
         val finished = requireNotNull(outcome)
-        val changes = if (preflightWorkflow != null) {
-            emptyList()
+        val changeSet = if (preflightWorkflow != null) {
+            WorkspaceChangeSet(emptyList(), emptyList())
         } else if (capturedFilesystem != null) {
             evidenceState.reach(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT)
-            capturedFilesystem.changes()
+            WorkspaceChangeSet(capturedFilesystem.changes(), emptyList())
         } else {
             evidenceState.reach(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT)
             try {
@@ -770,6 +769,7 @@ class AcpAgentHarness(
                 throw workspaceSnapshotEntry("final", translator.sessionReference(), entry)
             }
         }
+        val changes = changeSet.changes
         changes.forEach { change -> emitter.emit { sequence -> AgentFileChangeEvent(sequence, change) } }
         translator.completeMessages()
         translator.callbackFailure.get()?.let { throw it }
@@ -808,6 +808,7 @@ class AcpAgentHarness(
             changes = changes,
             session = translator.sessionReference(),
             usage = usage,
+            moveCandidates = changeSet.moveCandidates,
         )
         return result
     }
@@ -3194,7 +3195,7 @@ private class PolicyClientOperations(
 }
 
 private data class FileMetadata(val mode: Int, val uid: Int, val gid: Int, val linkCount: Int)
-private data class FileState(val sha256: String, val size: Long, val metadata: FileMetadata)
+private data class FileState(val sha256: String, val size: Long, val metadata: FileMetadata, val validUtf8: Boolean)
 
 internal data class WorkspaceSnapshotLimits(
     val entries: Int = 8192,
@@ -3266,7 +3267,7 @@ internal class WorkspaceSnapshot private constructor(
         request: AgentExecutionRequest,
         budget: WorkspaceSnapshotBudget,
         session: AgentSessionReference? = null,
-    ): List<AgentFileChange> {
+    ): WorkspaceChangeSet {
         return (files.keys + after.files.keys)
             .distinct()
             .sortedWith(compareBy(AgentWorkspacePath::rootId, AgentWorkspacePath::relativePath))
@@ -3293,7 +3294,12 @@ internal class WorkspaceSnapshot private constructor(
                     AgentFileChangeKind.MODIFIED -> AgentOperation.WRITE_FILE
                     AgentFileChangeKind.DELETED -> AgentOperation.DELETE_FILE
                 }
-                if (!request.accessPolicy.allows(path, operation)) {
+                if (!request.accessPolicy.allowsMutation(
+                        path,
+                        operation,
+                        (afterState ?: beforeState)?.size,
+                        (afterState ?: beforeState)?.validUtf8,
+                    )) {
                     throw AgentExecutionException(
                         AgentFailure(
                             AgentFailureKind.WORKSPACE_VIOLATION,
@@ -3303,14 +3309,16 @@ internal class WorkspaceSnapshot private constructor(
                         ),
                     )
                 }
-                AgentFileChange(
-                    path = path,
+                WorkspaceSnapshotChange(
+                    source = path,
                     kind = kind,
                     beforeSha256 = beforeState?.sha256,
                     afterSha256 = afterState?.sha256,
-                    sizeBytes = afterState?.size,
+                    beforeSizeBytes = beforeState?.size,
+                    afterSizeBytes = afterState?.size,
                 )
             }
+            .let { WorkspaceChangeSetClassifier.classify(it, budget::checkpoint) }
     }
 
     companion object {
@@ -3410,7 +3418,7 @@ internal class WorkspaceSnapshot private constructor(
             }
             if (result.identity != expected) throw WorkspaceSnapshotInvalidEntry("file-binding-changed")
             return FileState(result.sha256, result.size, FileMetadata(
-                result.identity.mode, result.identity.uid, result.identity.gid, result.identity.linkCount))
+                result.identity.mode, result.identity.uid, result.identity.gid, result.identity.linkCount), result.validUtf8)
         }
     }
 }

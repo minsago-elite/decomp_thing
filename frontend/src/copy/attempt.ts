@@ -151,7 +151,16 @@ export const activityRowCopy = {
   "permissionDigest": "Permission request digest",
   "messageChunkDigest": "Message chunk SHA-256",
   "changedFileDigest": "Reported changed-file SHA-256",
-  "toolCallDigest": "Tool call digest"
+  "toolCallDigest": "Tool call digest",
+  permissionRecorded: 'Recorded permission decision',
+  permissionDecisions: {
+    allow_once: 'allowed once',
+    allow_session: 'allowed for the agent session',
+    deny: 'denied',
+    cancelled: 'cancelled',
+  },
+  permissionNotRecorded: 'not recorded',
+  permissionReadOnly: 'Operator decisions are unavailable in this view.',
 } as const;
 
 export const observedUsageCopy = {
@@ -241,6 +250,8 @@ export const explorationEvidenceCopy = {
   "noNumericSummaryIsAvailableFromTheseReportBytesMissing": "No numeric summary is available from these report bytes. Missing or malformed values are not zero-valued results.",
   "theDigestIdentifiesTheObservedBytesItDoesNotValidate": "The digest identifies the observed bytes; it does not validate the producer's claims. Changed bytes require a refreshed report.",
   "downloadObservedExplorationJSON": "Download observed exploration JSON",
+  "explorationDownloadRedacted": "The download is a redacted copy of this report: credentials, configured secrets and private host paths are replaced, so its bytes can differ from the observed size and SHA-256 above.",
+  "explorationDownloadUnavailable": "Download and retained case details withheld: this report cannot be projected within the 64 MiB redacted-report limit. The numeric summary remains available when recorded.",
   "explorationObservationsDoNotEstablishAcceptedReconstruction": "Exploration observations do not establish accepted reconstruction.",
   "theReportDoesNotBelongToTheRequestedAttempt": "The report does not belong to the requested attempt.",
   "explorationEvidenceCouldNotBeReadCheckTheSessionAnd": "Exploration evidence could not be read. Check the session and refresh this attempt.",
@@ -315,9 +326,9 @@ export const explorationCasesCopy = {
 } as const;
 
 export const runCopy = {
-  thisJobWasDeleted: "This attempt’s job was deleted. Its files were removed and cannot be recovered.",
-  attemptViews: 'Attempt views', overviewView: 'Overview', activityView: 'Activity', evidenceView: 'Evidence',
-  activityTitle: 'Attempt activity', evidenceTitle: 'Attempt evidence',
+  thisJobWasDeleted: "This attempt’s job was deleted from the library and cannot be recovered. This page has not observed whether file cleanup finished.",
+  attemptViews: 'Attempt views', overviewView: 'Overview', activityView: 'Activity', evidenceView: 'Evidence', logsView: 'Build log',
+  activityTitle: 'Attempt activity', evidenceTitle: 'Attempt evidence', logsTitle: 'Attempt build log',
   "wallClockLimit": "{value} milliseconds",
   "idleLimit": "{value} milliseconds",
   "outputLimit": "{value} bytes",

@@ -115,12 +115,17 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         manifest: SourceTreeManifest,
         profile: ReconstructionProfile,
         repairLineage: ArchivedRepairReleaseLineage = ArchivedRepairReleaseLineage.NONE,
+        readBudget: ArchiveAuditReadBudget? = null,
     ): List<VerifiedCandidateAcpContribution> {
+        fun readEvidence(relative: String, limit: Int): ByteArray =
+            readBudget?.read(projectDir, relative, minOf(limit.toLong(), requirePayloadSize(relative, payloadSizes)))?.bytes
+                ?: readBoundedRegularFile(projectDir, relative, limit)
         val adapter = ReconstructionAdapters.resolve(profile)
+        if (readBudget != null) adapter.requireImplementationPurpose(profile, "repair evidence audit")
         adapter.verifyArchivePurpose(projectDir, profile, manifest, payloadSha256.keys)
         var sourceBytes = 0L
         for (file in manifest.files.filter { ProjectFileRole.BUILD_INPUT in it.roles }) {
-            val bytes = readBoundedRegularFile(projectDir, file.path,
+            val bytes = readEvidence(file.path,
                 minOf(profile.budgets.archiveMaximumFileBytes, Int.MAX_VALUE.toLong() - 1L).toInt())
             sourceBytes = Math.addExact(sourceBytes, bytes.size.toLong())
             require(sourceBytes <= profile.budgets.archiveMaximumTotalBytes) { "archive source inspection exceeds its byte bound" }
@@ -133,20 +138,23 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             .singleOrNull { it.id == "module-agent-execution-evidence" }
         val manifestByPath = manifest.files.associateBy(GeneratedFileEvidence::path)
         val modelPath = profile.layout.declaration("program-model-evidence").materialize()
-        val modelBytes = readBoundedRegularFile(
-            projectDir, modelPath,
+        val modelBytes = readEvidence(
+            modelPath,
             minOf(profile.budgets.archiveMaximumFileBytes, Int.MAX_VALUE.toLong() - 1L).toInt(),
         )
         requirePayloadIdentity(modelPath, modelBytes, payloadSha256, payloadSizes)
         require(sha256(modelBytes) == manifestByPath.getValue(modelPath).sha256) {
             "program model differs from its source manifest"
         }
-        val model = ProgramModelJson.read(modelBytes.decodeToString(throwOnInvalidSequence = true)) { cancellationCheck() }
+        val model = ProgramModelJson.read(modelBytes.decodeToString(throwOnInvalidSequence = true)) {
+            cancellationCheck()
+            readBudget?.checkpoint()
+        }
         require(model.inputSha256 == manifest.inputSha256) { "program model input differs from its source manifest" }
         val promptInputs by lazy {
             val planPath = profile.layout.declaration("module-plan-evidence").materialize()
             val planBound = minOf(profile.budgets.archiveMaximumFileBytes, 512L * 1024 * 1024).toInt()
-            val planBytes = readBoundedRegularFile(projectDir, planPath, planBound)
+            val planBytes = readEvidence(planPath, planBound)
             requirePayloadIdentity(planPath, planBytes, payloadSha256, payloadSizes)
             require(sha256(planBytes) == manifestByPath.getValue(planPath).sha256) {
                 "module plan differs from its source manifest"
@@ -167,8 +175,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 val checkpointManifest = requireNotNull(manifestByPath[checkpointPath]) {
                     "agent evidence checkpoint is absent from the source manifest: $checkpointPath"
                 }
-                val checkpointBytes = readBoundedRegularFile(
-                    projectDir,
+                val checkpointBytes = readEvidence(
                     checkpointPath,
                     MAXIMUM_RECONSTRUCTION_CHECKPOINT_BYTES,
                 )
@@ -220,7 +227,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                     val profileBudget = profile.budgets.reconstructionMaximumContextCharacters.toLong()
                     require(checkpoint.promptBudgetCharacters in minOf(4_096L, profileBudget)..profileBudget &&
                         checkpoint.reconstructorIdentity.matches(Regex(
-                            "agent:.*:context-${checkpoint.promptBudgetCharacters}:factory-(?:[0-9a-f]{64}|unbound):v[34]",
+                            "agent:.*:context-${checkpoint.promptBudgetCharacters}:factory-(?:[0-9a-f]{64}|unbound):v[345]",
                             RegexOption.DOT_MATCHES_ALL,
                         ))
                     ) {
@@ -298,8 +305,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 ) {
                     "ACP execution evidence manifest provenance is invalid: $evidencePath"
                 }
-                val evidenceBytes = readBoundedRegularFile(
-                    projectDir,
+                val evidenceBytes = readEvidence(
                     evidencePath,
                     MAXIMUM_RECONSTRUCTION_ACP_EVIDENCE_BYTES,
                 )
@@ -317,9 +323,15 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                     source = receiptSource,
                     sourceBytes = receiptSourceBytes,
                     checkpoint = checkpoint,
-                    expectedAccessPolicySha256 = if (checkpoint.reconstructorIdentity.endsWith(":v4")) {
-                        ownedModuleAccessPolicySha256(projectDir, source.path)
-                    } else null,
+                    expectedAccessPolicySha256 = when {
+                        checkpoint.reconstructorIdentity.endsWith(":v5") -> setOf(ownedModuleAccessPolicySha256(
+                            projectDir, source.path, moduleId, profile, roleBound = true,
+                        ))
+                        checkpoint.reconstructorIdentity.endsWith(":v4") -> setOf(ownedModuleAccessPolicySha256(
+                            projectDir, source.path, moduleId, profile, roleBound = false,
+                        ))
+                        else -> null
+                    },
                 )
                 val releaseFacts = requireNotNull(verifiedReceipt.releaseFacts)
                 val exactChange = releaseFacts.changes.single()
@@ -626,12 +638,15 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         )
     }
 
-    // A v4 receipt may write/create only its owned implementation. Interface snapshots
-    // are immutable prompt inputs, so a retained whole-header read grant is not equivalent.
-    // v3 receipts keep their historical acceptance scope rather than gaining this v4 claim.
+    // v4 receipts bind the owned implementation path; v5 additionally binds the trusted role
+    // declaration and ownership identity. Interface snapshots remain immutable prompt inputs.
+    // v3 receipts keep their historical acceptance scope rather than gaining these claims.
     private fun ownedModuleAccessPolicySha256(
         projectDir: Path,
         sourcePath: String,
+        moduleId: String,
+        profile: ReconstructionProfile,
+        roleBound: Boolean,
     ): String {
         val operations = setOf(AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE)
         val request = AgentExecutionRequest(
@@ -639,7 +654,18 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             workspaceRoots = listOf(AgentWorkspaceRoot("project", projectDir.toAbsolutePath().normalize())),
             accessPolicy = AgentAccessPolicy(listOf(AgentPathRule(
                 AgentWorkspacePath("project", sourcePath), operations,
-            ))),
+            )), mutationAuthority = if (roleBound) DeclaredRoleMutationPolicy.forDeclaredPaths(
+                profile = profile,
+                rootId = "project",
+                ownerId = "module-reconstruction:${profile.id}:$moduleId",
+                operationsByPath = mapOf(sourcePath to operations),
+                requiredOwnershipRoles = setOf(
+                    ProjectFileRole.MODULE_IMPLEMENTATION,
+                    ProjectFileRole.ENTRYPOINT_IMPLEMENTATION,
+                ),
+                maximumBytes = profile.budgets.archiveMaximumFileBytes,
+                policyId = "declared-role-reconstruction-v1",
+            ) else null),
         )
         return AgentExecutionRequestBinding.capture(request).accessPolicySha256
     }
@@ -650,7 +676,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         source: GeneratedFileEvidence,
         sourceBytes: Long,
         checkpoint: ReconstructionCheckpoint,
-        expectedAccessPolicySha256: String?,
+        expectedAccessPolicySha256: Set<String>?,
     ): VerifiedAcpExecutionReceiptDocument {
         val root = strictObject(bytes, EVIDENCE_JSON_LIMITS, "reconstruction ACP execution receipt")
         root.requireExactKeys(RECEIPT_FIELDS, "reconstruction ACP execution receipt")
@@ -741,7 +767,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
     private fun verifyReceiptRequest(
         root: JsonObject,
         checkpoint: ReconstructionCheckpoint,
-        expectedAccessPolicySha256: String?,
+        expectedAccessPolicySha256: Set<String>?,
     ): ReceiptBounds {
         val request = root.requiredObject("request", "ACP receipt")
         request.requireExactKeys(RECEIPT_REQUEST_FIELDS, "ACP receipt request")
@@ -753,7 +779,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             "ACP receipt request digest differs from its checkpoint assessment"
         }
         val accessPolicySha256 = request.requiredSha256("accessPolicySha256", "ACP receipt request")
-        require(expectedAccessPolicySha256 == null || accessPolicySha256 == expectedAccessPolicySha256) {
+        require(expectedAccessPolicySha256 == null || accessPolicySha256 in expectedAccessPolicySha256) {
             "module-minimal ACP receipt differs from its owned-source write policy"
         }
         verifyTextCommitment(
@@ -765,9 +791,10 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             "ACP receipt prompt digest differs from the reconstruction checkpoint"
         }
         val wirePromptSha256 = request.requiredSha256("wirePromptSha256", "ACP receipt request")
-        // v4 budgets and commits the exact shared ACP wire rendering. The v3 workflow
+        // v4+ budgets and commits the exact shared ACP wire rendering. The v3 workflow
         // digest included separate header snapshots, so historical receipts keep that scope.
-        require(!checkpoint.reconstructorIdentity.endsWith(":v4") || wirePromptSha256 == checkpoint.promptSha256) {
+        require(!(checkpoint.reconstructorIdentity.endsWith(":v4") || checkpoint.reconstructorIdentity.endsWith(":v5")) ||
+            wirePromptSha256 == checkpoint.promptSha256) {
             "module-minimal ACP wire prompt digest differs from its complete prompt commitment"
         }
         verifyTextCommitmentList(
@@ -1634,6 +1661,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             val version = when {
                 reconstructorIdentity.endsWith(":v3") -> 3
                 reconstructorIdentity.endsWith(":v4") -> 4
+                reconstructorIdentity.endsWith(":v5") -> 5
                 else -> throw IllegalArgumentException("unsupported module reconstructor identity version")
             }
             return "agent:${factory.implementationId}:context-$budget:" +
