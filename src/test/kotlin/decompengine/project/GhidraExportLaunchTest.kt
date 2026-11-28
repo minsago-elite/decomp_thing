@@ -347,32 +347,36 @@ class GhidraExportLaunchTest {
 
     @Test
     fun `retained handle whose PID is reused is never signalled and keeps cleanup unconfirmed`() {
-        val process = FixtureOwnedProcess(fixtureHandle(7101L, initialAlive = true, refusesTermination = false))
-        // Every read follows whichever process holds the PID, as a handle without a start time would.
-        val childStart = AtomicLong(7102L)
-        val childSignals = AtomicInteger()
-        val child = fixtureHandle(7102L, initialAlive = true, refusesTermination = false,
-            startMillis = childStart, signals = childSignals)
-        val clock = AtomicLong()
-        val tree = ExportProcessTree(
-            process, Duration.ZERO,
-            nanoTime = clock::get,
-            sleepNanos = { nanos -> clock.addAndGet(nanos) },
-            descendantObservation = { _, retain -> retain(child) },
-        )
-        tree.residentBytes()
-        childStart.set(9_000L) // The retained child exited and an unrelated process now holds its PID.
+        for (strangerExits in listOf(false, true)) {
+            val process = FixtureOwnedProcess(fixtureHandle(7101L, initialAlive = true, refusesTermination = false))
+            // Every read follows whichever process holds the PID, as a handle without a start time would.
+            val childAlive = AtomicBoolean(true)
+            val childStart = AtomicLong(7102L)
+            val childSignals = AtomicInteger()
+            val child = fixtureHandle(7102L, initialAlive = true, refusesTermination = false, alive = childAlive,
+                startMillis = childStart, signals = childSignals)
+            val clock = AtomicLong()
+            val tree = ExportProcessTree(
+                process, Duration.ZERO,
+                nanoTime = clock::get,
+                // The stranger may exit on its own before the cutoff; the refusal must still count.
+                sleepNanos = { nanos -> clock.addAndGet(nanos); if (strangerExits) childAlive.set(false) },
+                descendantObservation = { _, retain -> retain(child) },
+            )
+            tree.residentBytes()
+            childStart.set(9_000L) // The retained child exited and an unrelated process now holds its PID.
 
-        val result = tree.terminate()
+            val result = tree.terminate()
 
-        assertEquals("retained-handles", tree.ownership)
-        assertEquals(0, childSignals.get(), "a handle that fails its identity recheck is never signalled")
-        assertFalse(result.confirmedAbsent, "an unsignalled retained handle keeps cleanup unconfirmed")
-        assertEquals(
-            listOf(ExportProcessRefusal(7102L, java.time.Instant.ofEpochMilli(9_000L), "its PID now names 7102@9000, not the retained 7102@7102")),
-            result.refusedHandles,
-        )
-        assertTrue(result.diagnostic.orEmpty().contains("refused to signal retained handles: 7102@9000"), result.diagnostic)
+            assertEquals("retained-handles", tree.ownership)
+            assertEquals(0, childSignals.get(), "a handle that fails its identity recheck is never signalled")
+            assertFalse(result.confirmedAbsent, "an unsignalled retained handle keeps cleanup unconfirmed")
+            assertEquals(
+                listOf(ExportProcessRefusal(7102L, java.time.Instant.ofEpochMilli(9_000L), "its PID now names 7102@9000, not the retained 7102@7102")),
+                result.refusedHandles,
+            )
+            assertTrue(result.diagnostic.orEmpty().contains("refused to signal retained handles: 7102@9000"), result.diagnostic)
+        }
     }
 
     @Test
