@@ -19,6 +19,7 @@ internal class WebAuditRecorder(
         if (action == null || log == null) return handle()
         val before = try { access.auditSessionId(exchange) } catch (_: Exception) { null }
         val traced = WebDeniedResponseTrace.begin()
+        WebAuditSourceTarget.open()
         var thrown = false
         try {
             return handle()
@@ -28,6 +29,7 @@ internal class WebAuditRecorder(
         } finally {
             // Auditing never changes the response or turns a handled request into a failure.
             try { record(exchange, action, target, before, thrown) } catch (_: Exception) { }
+            WebAuditSourceTarget.close()
             WebDeniedResponseTrace.end(traced)
         }
     }
@@ -47,12 +49,18 @@ internal class WebAuditRecorder(
             // Keep server-generated identities, commit other requested IDs, and never append
             // configured-sensitive target/version bytes even when they fit opaque syntax.
             val jobId = (target.jobId ?: location?.first)?.takeUnless(policy::leaks)
-            val runId = (target.runId ?: location?.second)?.let { value ->
+            // A body-bound source (managed `git.init`) is kept only when the handler reported that the server
+            // confirmed it for this response; a refused or unconfirmed request keeps commitments instead.
+            val source = WebAuditSourceTarget.current()
+            val confirmed = source?.confirmed == true && status < 400
+            fun confirmedOr(value: String, commit: (String) -> String) = if (confirmed && !policy.leaks(value)) value else commit(value)
+            val runId = source?.runId?.let { confirmedOr(it, ::runCommitment) } ?: (target.runId ?: location?.second)?.let { value ->
                 if (SERVER_RUN.matches(value) && !policy.leaks(value)) value else runCommitment(value)
             }
             // Revision IDs have no server-generated syntax, so a route value is only an identity once the
             // server confirmed it in the operation Location it sent; refused requests keep a commitment.
-            val revisionId = location?.third?.takeIf { it == target.revisionId && !policy.leaks(it) }
+            val revisionId = source?.revisionId?.let { confirmedOr(it, ::revisionCommitment) }
+                ?: location?.third?.takeIf { it == target.revisionId && !policy.leaks(it) }
                 ?: target.revisionId?.let(::revisionCommitment)
             log.record(
                 actor = sessionId?.let(WebAuditActor::browserSession) ?: WebAuditActor.UNAUTHENTICATED,
@@ -81,6 +89,8 @@ internal class WebAuditRecorder(
     }
 
     companion object {
+        // Commitments are unkeyed, domain-separated SHA-256 hashes for correlating entries, not secrecy:
+        // anyone holding the log can confirm a guessed value offline, so low-entropy IDs stay guessable.
         /** A commitment, not validation that caller-controlled bytes identify a server version. */
         internal fun versionCommitment(value: String): String = commitment("if-match", "ifmatch_", value)
         internal fun runCommitment(value: String): String = commitment("requested-run", "requested_run_", value)
@@ -144,6 +154,23 @@ internal class WebAuditRecorder(
             }
         }
     }
+}
+
+/**
+ * Target identities a handler read from a sensitive request body (managed `git.init`'s source run and
+ * revision), reported for that request's audit entry. [confirmed] means the server resolved them for the
+ * response it sent; otherwise the recorder stores commitments. Notes outside an audited request are ignored.
+ */
+internal object WebAuditSourceTarget {
+    data class Source(val runId: String, val revisionId: String, val confirmed: Boolean)
+    private val active = ThreadLocal<Boolean>()
+    private val source = ThreadLocal<Source?>()
+    fun open() { active.set(true); source.remove() }
+    fun note(runId: String, revisionId: String, confirmed: Boolean) {
+        if (active.get() == true) source.set(Source(runId, revisionId, confirmed))
+    }
+    fun current(): Source? = source.get()
+    fun close() { source.remove(); active.remove() }
 }
 
 /** The public error code of the denial sent on this request thread, for audit outcome only. */

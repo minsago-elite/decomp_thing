@@ -407,4 +407,34 @@ class WebAuditLogTest {
             assertEquals(WebAuditEntry.parse(lines[0]), reopened[0])
         } finally { root.toFile().deleteRecursively() }
     }
+
+    @Test fun `a segment written by an older version keeps reading and appending after revision entries join it`() {
+        val root = root("mixed-segment")
+        try {
+            // Two entries exactly as the version before revision targets wrote them, with no `revisionId` key.
+            val older = (1..2).joinToString("") { sequence ->
+                "{\"schemaVersion\":1,\"entry\":{\"sequence\":\"$sequence\",\"recordedAt\":\"2026-09-30T00:00:00Z\"," +
+                    "\"requestId\":null,\"actor\":{\"kind\":\"unauthenticated\",\"sessionDigest\":null}," +
+                    "\"action\":\"run.cancel\",\"target\":{\"jobId\":\"$job\",\"runId\":\"run_$sequence\"," +
+                    "\"expectedVersion\":null,\"resultVersion\":null},\"outcome\":\"accepted\",\"status\":202,\"reasonCode\":null}}\n"
+            }
+            val segment = Files.createDirectories(root.resolve(".web-audit")).resolve("current.jsonl")
+            Files.writeString(segment, older)
+            WebAuditLog(root, clock).record(WebAuditActor.browserSession(session), WebAuditAction.ARCHIVE_VERIFY,
+                WebAuditTarget(job, "run_1", revisionId = "revision_1"), WebAuditOutcome.ACCEPTED, 202, null, null)
+            // A restarted server parses the mixed segment and keeps appending to it in sequence.
+            val reopened = WebAuditLog(root, clock)
+            assertEquals(4L, reopened.cancel()?.sequence)
+            val page = reopened.read()
+            assertTrue(page.complete)
+            assertEquals(0L, page.unrecordedEntries)
+            assertEquals(listOf(1L, 2L, 3L, 4L), page.entries.map { it.sequence })
+            assertEquals(listOf(null, null, "revision_1", null), page.entries.map { it.target.revisionId })
+            assertEquals(listOf(WebAuditAction.RUN_CANCEL, WebAuditAction.RUN_CANCEL, WebAuditAction.ARCHIVE_VERIFY, WebAuditAction.RUN_CANCEL),
+                page.entries.map { it.action })
+            val lines = Files.readAllLines(segment)
+            assertEquals(4, lines.size)
+            assertEquals(older, lines.take(2).joinToString("") { "$it\n" }, "older entries are never rewritten")
+        } finally { root.toFile().deleteRecursively() }
+    }
 }

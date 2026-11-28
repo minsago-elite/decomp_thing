@@ -2022,8 +2022,21 @@ finishes, including refused and failed requests: `session.start`, `session.end`,
 scoped to the validated job ID from `POST /api/v1/jobs/{jobId}/repositories`. Revision-bound actions also carry
 `target.revisionId`: the revision the server confirmed in the operation `Location` it sent, otherwise (refusals,
 or a configured-sensitive value) a `requested_revision_`-prefixed domain-separated SHA-256 commitment to the requested
-route value. The field is additive and present only on revision-bound entries; other entries keep their earlier shape.
-The idempotency key and request body are never recorded. An entry records a
+route value. Managed `git.init` entries carry the requested source as `target.runId` and `target.revisionId` with the
+same rule: the raw IDs once the server admitted the request (or replayed the operation it admitted), commitments for
+refusals or configured-sensitive values. Run and revision commitments, like the `If-Match` commitment, are unkeyed
+domain-separated SHA-256 hashes for correlating entries, not secrecy: anyone holding the log can confirm a guessed
+value offline, so low-entropy IDs stay guessable. The field is additive and present only on revision-bound entries;
+other entries keep their earlier shape. The idempotency key and request body are never recorded.
+
+**Audit log compatibility.** Audit log v1 entries written by this version may contain actions
+(`revision.archive-verify`) and fields (`target.revisionId`) that older versions reject. This version reads segments
+that mix older and newer entries and keeps appending to them, but no downgrade is supported: an older version that
+opens such a segment hides every entry in it from exports, reports the audit incomplete, and refuses new appends
+(counting them as unrecorded). Downgrading after the first such write requires stopping the server and moving the
+whole `<store>/.web-audit/` directory aside (preserve it, and read it with this or a later version) before starting
+the older version, which then begins a new log. Restarting this or a later version on the original directory instead
+restores the full history and appends. An entry records a
 sequence, time, the response request ID, the actor (`browser_session` with a domain-separated SHA-256 digest of the authorization-owned session
 identity, or `unauthenticated`), the action, the target job/run, an `ifmatch_`-prefixed, domain-separated SHA-256
 commitment to a bounded strong `If-Match` value (never the caller's header bytes), and the server version the
