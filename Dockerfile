@@ -4,8 +4,9 @@ FROM eclipse-temurin:21-jdk-jammy@sha256:55fb9bf738f5d9b4a6c01b39337e3070d3e2737
 
 ARG ANGR_VERSION=9.2.213
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
+RUN timeout --signal=KILL 10m sh -ec ' \
+    apt-get -oAcquire::Retries=2 -oAcquire::http::Timeout=30 -oAcquire::https::Timeout=30 update --error-on=any \
+    && apt-get -oAcquire::Retries=2 -oAcquire::http::Timeout=30 -oAcquire::https::Timeout=30 install -y --no-install-recommends \
         binutils \
         bubblewrap \
         build-essential \
@@ -17,7 +18,8 @@ RUN apt-get update \
         python3 \
         python3-pip \
         unzip \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    '
 
 # pip connection retries do not retry a failed streaming download. Keep completed
 # downloads outside the image and bound retries of the complete installation.
@@ -42,7 +44,16 @@ COPY frontend/package.json ./frontend/package.json
 RUN bash scripts/install-frontend-node.sh /opt/frontend-node
 ENV PATH="/opt/frontend-node/bin:${PATH}"
 COPY . .
-RUN --mount=type=cache,target=/root/.gradle ./gradlew --no-daemon installDist
+# Gradle's native HTTP retry is intentionally limited to transient repository
+# failures; timeout bounds the one complete archival build invocation.
+RUN --mount=type=cache,target=/root/.gradle \
+    timeout --signal=TERM --kill-after=30s 45m \
+    ./gradlew --no-daemon \
+      -Dorg.gradle.internal.repository.max.tentatives=5 \
+      -Dorg.gradle.internal.repository.initial.backoff=2000 \
+      -Dorg.gradle.internal.http.connectionTimeout=30000 \
+      -Dorg.gradle.internal.http.socketTimeout=60000 \
+      installDist
 
 FROM toolchain AS runtime
 

@@ -27,8 +27,10 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertSame
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -78,6 +80,165 @@ class WorkflowAttemptStoreTest {
                     Files.readAllBytes(root.resolve(relative))
                 }) { it })
             }
+        }
+    }
+
+    @Test fun `optimistic listing survives real recent and protected retention no-ops`() = withRoot { root ->
+        val job = upload(root)
+        WorkflowAttemptStore.open(root, CLOCK).use { owner ->
+            val queued = owner.create(job, owner.available(job).snapshot.version,
+                NewWorkflowAttempt(WorkflowKind.EXPLORE, LIMITS)).attempt
+            val running = owner.transition(job, queued.runId, queued.version, WorkflowTransition.Start).attempt
+            val finished = owner.transition(job, running.runId, running.version,
+                WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.NO_CHANGES)).attempt
+            for ((protect, pin, label) in listOf(
+                Triple(false, false, "recent unpinned"),
+                Triple(true, false, "protected"),
+                Triple(false, true, "pinned"),
+            )) {
+                if (pin) owner.setProgressRetentionPinned(job, finished.runId, finished.version, true)
+                val snapshotBefore = owner.available(job).snapshot
+                assertEquals(pin, snapshotBefore.attempts.single { it.runId == finished.runId }.progressRetentionPinned, label)
+                val metadataBefore = listOf(jobJson(root, job).readBytes(), stateJson(root, job).readBytes())
+                var reads = 0
+                var captured: WorkflowJobInspection.Available? = null
+                var refusal: WorkflowStoreException? = null
+                try {
+                    owner.inspectForListing(job, { relative, maximum ->
+                        Files.readAllBytes(root.resolve(relative)).also { bytes ->
+                            reads++
+                            assertTrue(bytes.size <= maximum)
+                        }
+                    }) { listing ->
+                        assertEquals(ProgressRetentionResult.RETAINED,
+                            owner.expireProgressJournal(job, finished.runId, protect))
+                        listing.also { captured = it }
+                    }
+                } catch (failure: WorkflowStoreException) { refusal = failure }
+                assertEquals(snapshotBefore, captured?.snapshot, label)
+                assertEquals(2, reads, "$label listing must not retry either metadata read")
+                assertEquals(metadataBefore[0].toList(), jobJson(root, job).readBytes().toList(), label)
+                assertEquals(metadataBefore[1].toList(), stateJson(root, job).readBytes().toList(), label)
+                assertEquals(null, refusal, "$label no-op retention must preserve the listing epoch")
+            }
+        }
+    }
+
+    @Test fun `retention guard failures preserve their errors and invalidate listing captures`() = withRoot { root ->
+        val job = upload(root)
+        WorkflowAttemptStore.open(root, CLOCK).use { owner ->
+            val queued = owner.create(job, owner.available(job).snapshot.version,
+                NewWorkflowAttempt(WorkflowKind.EXPLORE, LIMITS)).attempt
+            val running = owner.transition(job, queued.runId, queued.version, WorkflowTransition.Start).attempt
+            val finished = owner.transition(job, running.runId, running.version,
+                WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.NO_CHANGES)).attempt
+            for ((runId, retention, code) in listOf(
+                Triple(finished.runId, java.time.Duration.ZERO, "PROGRESS_RETENTION_FAILED"),
+                Triple(finished.runId, java.time.Duration.ofSeconds(-1), "PROGRESS_RETENTION_FAILED"),
+                Triple("run_missing", AgentProgressJournalRetention.DEFAULT_TERMINAL_RETENTION, "RUN_NOT_FOUND"),
+            )) {
+                val before = owner.available(job).snapshot
+                val metadata = listOf(jobJson(root, job).readBytes(), stateJson(root, job).readBytes())
+                var reads = 0
+                assertCode("JOB_RECORD_UNAVAILABLE") {
+                    owner.inspectForListing(job, { relative, maximum ->
+                        Files.readAllBytes(root.resolve(relative)).also { reads++; assertTrue(it.size <= maximum) }
+                    }) { captured ->
+                        val failure = assertFailsWith<WorkflowStoreException> {
+                            owner.expireProgressJournal(job, runId, false, retention)
+                        }
+                        assertEquals(code, failure.code)
+                        assertEquals(code == "PROGRESS_RETENTION_FAILED", failure.outcomeUnknown)
+                        if (code == "PROGRESS_RETENTION_FAILED") assertTrue(failure.cause is IllegalArgumentException)
+                        captured
+                    }
+                }
+                assertEquals(2, reads, "guard refusal must not retry metadata")
+                assertEquals(before, owner.available(job).snapshot)
+                assertContentEquals(metadata[0], jobJson(root, job).readBytes())
+                assertContentEquals(metadata[1], stateJson(root, job).readBytes())
+            }
+        }
+    }
+
+    @Test fun `pre-filesystem clock errors and cancellation invalidate listing captures`() {
+        for (injected in listOf(AssertionError("synthetic clock error"),
+            java.util.concurrent.CancellationException("synthetic clock cancellation"))) withRoot { root ->
+            val job = upload(root)
+            val original = WorkflowAttemptStore.open(root, CLOCK)
+            val queued = original.create(job, original.available(job).snapshot.version,
+                NewWorkflowAttempt(WorkflowKind.EXPLORE, LIMITS)).attempt
+            val running = original.transition(job, queued.runId, queued.version, WorkflowTransition.Start).attempt
+            val finished = original.transition(job, running.runId, running.version,
+                WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.NO_CHANGES)).attempt
+            original.close()
+            val clock = object : Clock() {
+                override fun instant(): Instant = throw injected
+                override fun getZone() = ZoneOffset.UTC
+                override fun withZone(zone: java.time.ZoneId): Clock = this
+            }
+            WorkflowAttemptStore.open(root, clock).use { owner ->
+                val failure = assertFailsWith<WorkflowStoreException> {
+                    owner.inspectForListing(job, { relative, maximum ->
+                        Files.readAllBytes(root.resolve(relative)).also { assertTrue(it.size <= maximum) }
+                    }) { captured ->
+                        val retentionFailure = assertFailsWith<Throwable> {
+                            owner.expireProgressJournal(job, finished.runId, false)
+                        }
+                        if (injected is java.util.concurrent.CancellationException) {
+                            val wrapped = assertIs<WorkflowStoreException>(retentionFailure)
+                            assertEquals("PROGRESS_RETENTION_FAILED", wrapped.code)
+                            assertSame(injected, wrapped.cause)
+                        } else assertSame(injected, retentionFailure)
+                        captured
+                    }
+                }
+                assertEquals("JOB_RECORD_UNAVAILABLE", failure.code)
+                val nextCapture = owner.inspectForListing(job, { relative, maximum ->
+                    Files.readAllBytes(root.resolve(relative)).also { assertTrue(it.size <= maximum) }
+                }) { it }
+                assertIs<WorkflowJobInspection.Available>(nextCapture)
+            }
+        }
+    }
+
+    @Test fun `successful early retention does not restore epoch after nested same-stripe mutation`() = withRoot { root ->
+        val job = upload(root)
+        val start = Instant.parse("2026-09-05T00:00:00Z")
+        var now = start
+        var onInstant: (() -> Unit)? = null
+        val clock = object : Clock() {
+            override fun instant(): Instant {
+                onInstant?.let { callback -> onInstant = null; callback() }
+                return now
+            }
+            override fun getZone() = ZoneOffset.UTC
+            override fun withZone(zone: java.time.ZoneId): Clock = this
+        }
+        WorkflowAttemptStore.open(root, clock).use { owner ->
+            val queued = owner.create(job, owner.available(job).snapshot.version,
+                NewWorkflowAttempt(WorkflowKind.EXPLORE, LIMITS)).attempt
+            val running = owner.transition(job, queued.runId, queued.version, WorkflowTransition.Start).attempt
+            val finished = owner.transition(job, running.runId, running.version,
+                WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.NO_CHANGES)).attempt
+            onInstant = {
+                owner.setProgressRetentionPinned(job, finished.runId, finished.version, true)
+            }
+            val refused = assertFailsWith<WorkflowStoreException> {
+                owner.inspectForListing(job, { relative, maximum ->
+                    Files.readAllBytes(root.resolve(relative)).also { assertTrue(it.size <= maximum) }
+                }) { captured ->
+                    assertEquals(ProgressRetentionResult.RETAINED, owner.expireProgressJournal(
+                        job, finished.runId, false, java.time.Duration.ofDays(365)))
+                    captured
+                }
+            }
+            assertEquals("JOB_RECORD_UNAVAILABLE", refused.code)
+            assertTrue(owner.withAttemptSnapshot(job, finished.runId) { it.progressRetentionPinned })
+            val fresh = owner.inspectForListing(job, { relative, maximum ->
+                Files.readAllBytes(root.resolve(relative)).also { assertTrue(it.size <= maximum) }
+            }) { it }
+            assertIs<WorkflowJobInspection.Available>(fresh)
         }
     }
 

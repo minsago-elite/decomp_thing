@@ -5,8 +5,9 @@ import { promises as fs, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { assertAudit, auditFixtures, auditViewports, measureContrast, measureFocus, measurePage } from './packaged-browser-audit.mjs';
+import { assertAudit, auditFixtures, auditProfileEvidence, auditViewports, captureOutputSignatureChart, chartCaptureSets, engineSupplementalInteractionContexts, measureContrast, measureFocus, measureOutputSignatureChart, measurePage } from './packaged-browser-audit.mjs';
 import { isPlaywrightScreenshotCspViolation, openEngineAuditPage, serveEngineAuditFixtures } from './packaged-browser-engine-adapter.mjs';
+import { attachExceptionContext, summarizeExceptionContexts } from './packaged-browser-exception-context.mjs';
 
 // Cross-engine packaged smoke and audit (#631). The DevTools-based check-packaged-web-browser.mjs
 // is Chromium-only; this runner drives Firefox, WebKit or Chromium through Playwright against the
@@ -46,6 +47,7 @@ function parseUrl(value, label) {
 const report = { status: 'running', engine: values.engine, playwright: readJson(join(values.playwright, 'package.json'), 'Playwright package metadata').version,
   driverNode: process.versions.node, evidenceDirectory: root };
 const secrets = [];
+const exceptionContexts = [];
 const safe = (text) => secrets.reduce((value, secret) => value.replaceAll(secret, '[redacted]'), String(text)).replaceAll(/#bootstrap=[A-Za-z0-9_-]+/g, '#bootstrap=[redacted]');
 let work; let application; let browser; let output = ''; let errors = '';
 
@@ -98,7 +100,9 @@ async function stop(child) {
 /** One context per viewport; CSP violations, responses and workers are recorded per context. */
 async function context(options = {}) {
   const created = await browser.newContext({ acceptDownloads: true, ...options });
-  const record = { responses: [], csp: [], documents: [], exceptions: [], workers: [], apiRequests: [] };
+  const exceptionContext = attachExceptionContext(created);
+  exceptionContexts.push(exceptionContext);
+  const record = { responses: [], csp: [], documents: [], exceptions: [], workers: [], apiRequests: [], exceptionContext };
   await created.exposeBinding('__decompRecordCspViolation', (_source, payload) => {
     try { record.csp.push(JSON.parse(payload)); }
     catch (cause) { throw new Error('CSP instrumentation returned invalid JSON', { cause }); }
@@ -466,6 +470,7 @@ async function probeApplicationShellCsp(origin) {
 /** Real server session: bootstrap link, cookie restore across reload, runtime identity and sign-out. */
 async function smoke(origin, manifest) {
   const { context: created, record } = await context();
+  record.exceptionContext.auditPhase = 'smoke';
   const page = await created.newPage();
   const link = await waitFor(() => output.split(/\s+/).find((part) => part.startsWith(`${origin}/nested/#bootstrap=`)), 'local bootstrap handoff');
   secrets.push(parseUrl(link, 'bootstrap handoff').hash.slice('#bootstrap='.length));
@@ -490,6 +495,7 @@ async function smoke(origin, manifest) {
   await page.getByRole('button', { name: 'Sign out' }).click();
   await page.getByText(/You signed out of this browser/).waitFor();
   const storage = await page.evaluate(() => localStorage.length + sessionStorage.length);
+  record.exceptionContext.auditPhase = 'smoke closing';
   await created.close();
   return { record, result: { authenticated: true, fragmentRemoved: true, restoredAfterReload: true, runtimeBuild: manifest.buildId, signedOut: true, storageEntries: storage } };
 }
@@ -511,6 +517,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
   const populated = (page) => `document.querySelector('main h1') !== null && document.querySelector('main [aria-busy="true"]') === null
     && document.body.innerText.includes(${JSON.stringify(page.rendered)}) && !document.querySelector('main [role="alert"]')`;
   const open = async (target, page, context, prepare = true) => {
+    records.at(-1).exceptionContext.auditPhase = `${context}: ${page.name}`;
     try {
       interactions.push(...await openEngineAuditPage(target, { origin, page, fulfilled, context, prepare }));
     } catch (failure) {
@@ -538,7 +545,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
       throw failure;
     }
   };
-  const layout = []; const contrast = []; const focus = [];
+  const layout = []; const contrast = []; const focus = []; const chart = []; const chartScreenshots = []; const chartCaptures = [];
   for (const viewport of auditViewports) {
     const { context: created, record } = await context({ viewport: { width: viewport.width, height: viewport.height },
       deviceScaleFactor: viewport.deviceScaleFactor, ...(values.engine === 'firefox' ? {} : { isMobile: viewport.mobile }) });
@@ -578,8 +585,24 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
           })
           : null;
         layout.push({ page: page.name, viewport: viewport.name, scheme, ...measured, ...(overflowDiagnostics ? { overflowDiagnostics } : {}) });
+        if (page.name === 'attempt evidence') chart.push({ page: page.name, viewport: viewport.name, scheme,
+          viewportWidth: viewport.width, ...await target.evaluate(measureOutputSignatureChart) });
         if (viewport.width === 1440 || (viewport.width === 320 && viewport.deviceScaleFactor === 1))
           contrast.push({ page: page.name, viewport: viewport.name, scheme, ...await target.evaluate(measureContrast) });
+      }
+      if (page.name === 'attempt evidence' && (viewport.name === 'desktop 1440x900' || viewport.name === 'zoom 400% of 1280x800')) {
+        await target.emulateMedia({ colorScheme: 'light', reducedMotion: 'reduce' });
+        const phase = `screenshot:${viewport.name}:attempt evidence`;
+        await target.evaluate((value) => { globalThis.__decompAuditPhase = value; }, phase);
+        try {
+          // Viewport-only tiles (no full-element capture), with geometry and occlusion re-measured around each.
+          const set = chartCaptureSets.find((candidate) => candidate.viewport === viewport.name);
+          const captured = await captureOutputSignatureChart({ set, evaluate: (expression) => target.evaluate(expression),
+            shoot: ({ file, viewportClip }) => target.screenshot({ path: join(root, file), clip: viewportClip }) });
+          chartCaptures.push(captured);
+          chartScreenshots.push(...captured.tiles.map((tile) => tile.file));
+        }
+        finally { await target.evaluate(() => { globalThis.__decompAuditPhase = null; }).catch(() => undefined); }
       }
       if (viewport.deviceScaleFactor === 4 || ['job detail', 'source file'].includes(page.name)) {
         const phase = `screenshot:${viewport.name}:${page.name}`;
@@ -648,6 +671,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
       await open(target, source, 'worker/CSP qualification');
       highlightedTokens = await target.locator('.source-token').count();
     }
+    record.exceptionContext.auditPhase = `${viewport.name} closing`;
     await created.close();
   }
   // Timing: initial-route metadata only; explicit-read population is recorded in interactions.
@@ -663,6 +687,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
       const cycle = fixtures.pages.filter((page) => page.name !== 'upload');
       for (let index = 0; index < 50; index += 1) {
         const page = cycle[(index + 1) % cycle.length];
+        record.exceptionContext.auditPhase = `route timing ${index}: ${page.name}`;
         const timing = await target.evaluate(`new Promise((resolve, reject) => {
           const target = ${JSON.stringify(page.path)};
           const link = document.createElement('a'); link.href = target; link.textContent = 'audit'; document.querySelector('main').append(link);
@@ -679,16 +704,20 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
         feedback.push(timing.focused); data.push(timing.populated);
       }
     }
+    record.exceptionContext.auditPhase = `cold sample ${sample} closing`;
     await created.close();
   }
   const summary = (list) => { const sorted = [...list].sort((a, b) => a - b); const at = (f) => Number(sorted[Math.min(sorted.length - 1, Math.ceil(f * sorted.length) - 1)].toFixed(1));
     return { samples: list.length, median: at(0.5), p95: at(0.95) }; };
   const workerTargets = records.flatMap((record) => record.workers ?? []);
   const responses = records.flatMap((record) => record.responses);
-  const result = { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped, interactions,
+  const interactionTimes = interactions.map(({ elapsedMs }) => elapsedMs);
+  const result = { profile: auditProfileEvidence('reference'), fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), chartExpected: fixtures.chartExpected,
+    layout, contrast, focus, chart, chartScreenshots, chartCaptures, fulfilled, unmapped, interactions,
     workers: { highlightedTokens,
       targets: workerTargets.map((worker) => ({ ...worker, responses: responses.filter((response) => response.url === worker.url) })) },
-    keyboard, timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data), raw: { cold, feedback, data } } };
+    keyboard, timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data),
+      interactions: summary(interactionTimes), raw: { cold, feedback, data, interactions: interactionTimes } } };
   return { result, records, responses, origin };
 }
 
@@ -705,10 +734,12 @@ try {
   const audited = await audit(origin, installation.manifest);
   report.audit = audited.result;
   report.auditOrigins = { packaged: origin, fixtures: audited.origin };
+  const interactionPages = auditFixtures(repo, installation.manifest.buildId).pages;
   report.auditVerdict = assertAudit(audited.result, installation.manifest, audited.responses, audited.origin, undefined,
-    // Chrome-only connection, explicit-filter and source-file-open timings are qualified by DevTools;
-    // this runner does not measure them, so their verdicts are omitted rather than claimed.
-    { connectionNotice: false, jobFilter: false, fileOpen: false });
+    // Chrome-only connection, explicit-filter and source-file-open timings are qualified by DevTools
+    // (#1896, #623); this runner does not measure them, so their verdicts are omitted rather than claimed.
+    { connectionNotice: false, jobFilter: false, fileOpen: false,
+      interactionPages, extraInteractionContexts: engineSupplementalInteractionContexts(interactionPages) });
   const records = [smoked.record, ...audited.records];
   const cspEvents = records.flatMap((record) => record.csp);
   const playwrightScreenshotEvents = cspEvents.filter(isPlaywrightScreenshotCspViolation);
@@ -739,6 +770,8 @@ try {
     try { execFileSync(values.python, [installHelper, 'cleanup', '--work', work, '--owner-token', ownerToken]); report.workCleanupConfirmed = true; }
     catch (error) { report.workCleanupError = String(error); process.exitCode = 1; }
   }
+  // Report observations from every created context, including probes and interrupted journeys.
+  report.pageExceptionContexts = summarizeExceptionContexts(exceptionContexts.map((exceptionContext) => exceptionContext.snapshot()));
   await fs.writeFile(join(root, 'report.json'), safe(JSON.stringify(report, null, 2)) + '\n');
   console.log(`${values.engine}: ${report.status}. Report: ${join(root, 'report.json')}`);
 }

@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { afterEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import type { Bootstrap } from '../src/api/generated';
@@ -29,13 +29,7 @@ function page(name: string, text: string) {
   return document;
 }
 
-it('moves focus to the results after an explicit search or continuation changes the route query', async () => {
-  const partial = page('source-search-incomplete-empty', 'needle');
-  const complete = page('source-search-complete', 'needle');
-  transport.get.mockImplementation((kind, path) => {
-    if (kind !== 'sourceSearch') return Promise.reject(new ApiClientError('http_error', { serverCode: 'NOT_FOUND' }));
-    return Promise.resolve(path.includes('cursor=') ? complete : partial);
-  });
+async function openSearch() {
   const session = createBrowserSession({
     bootstrap: () => Promise.resolve({ ...bootstrap, basePath: '/nested/', sessionExpiresAt: new Date(Date.now() + 60000).toISOString() }),
     exchange: vi.fn(), logout: () => Promise.resolve(),
@@ -44,6 +38,16 @@ it('moves focus to the results after an explicit search or continuation changes 
   await session.initialize({ kind: 'absent' });
   history.replaceState(null, '', base);
   render(<App basePath="/nested" session={session} />);
+}
+
+it('moves focus to the results after an explicit search or continuation changes the route query', async () => {
+  const partial = page('source-search-incomplete-empty', 'needle');
+  const complete = page('source-search-complete', 'needle');
+  transport.get.mockImplementation((kind, path) => {
+    if (kind !== 'sourceSearch') return Promise.reject(new ApiClientError('http_error', { serverCode: 'NOT_FOUND' }));
+    return Promise.resolve(path.includes('cursor=') ? complete : partial);
+  });
+  await openSearch();
   const field = await screen.findByRole('searchbox', { name: /Search text/u });
   field.focus();
   fireEvent.input(field, { target: { value: 'needle' } });
@@ -56,4 +60,33 @@ it('moves focus to the results after an explicit search or continuation changes 
   await screen.findByText(/Showing 4 matches on this page\./u);
   expect(new URLSearchParams(window.location.search).get('cursor')).not.toBeNull();
   await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Search results' })));
+});
+
+it.each(['submit', 'continue', 'blur'] as const)('preserves the reader’s focus choice during a pending %s', async choice => {
+  const partial = page('source-search-incomplete-empty', 'needle');
+  const complete = page('source-search-complete', 'needle');
+  let finish!: (value: Fixture) => void;
+  const pending = new Promise<Fixture>(resolve => { finish = resolve; });
+  transport.get.mockImplementation((_kind, path) => choice === 'continue' && !path.includes('cursor=')
+    ? Promise.resolve(partial) : pending);
+  await openSearch();
+  const field = await screen.findByRole('searchbox', { name: /Search text/u });
+  field.focus();
+  fireEvent.input(field, { target: { value: 'needle' } });
+  fireEvent.submit(field.closest('form')!);
+  if (choice === 'continue') {
+    const next = await screen.findByRole('button', { name: 'Continue search' });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Search results' })));
+    next.focus();
+    fireEvent.click(next);
+  }
+  await screen.findByText('Searching recorded inputs…');
+  const radio = screen.getAllByRole('radio')[0]!;
+  if (choice === 'blur') field.blur();
+  else radio.focus();
+  await act(async () => { finish(complete); await pending; });
+  await screen.findByText(/Showing 4 matches on this page/u);
+  // The results handoff runs in a Preact after-paint effect.
+  await new Promise<void>(done => requestAnimationFrame(() => requestAnimationFrame(() => done())));
+  expect(document.activeElement).toBe(choice === 'blur' ? document.body : radio);
 });
