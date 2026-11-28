@@ -203,11 +203,8 @@ test-specific trust path. The tests prove four cases:
 
 ## Not covered here
 
-- Wiring into a running transport, for #959:
-  - a broker that checks credential availability before the prompt;
-  - a relay that applies `route`;
-  - a connection through `AcpProviderUpstreamTls.connect` to an address from the #1510 resolver;
-  - refusing redirects through `responseStatusRefusal`.
+- The credential broker that applies these checks (#959) is described in
+  [the provider credential broker](acp-provider-credential-broker.md).
 - Request body, model and token checks, plus enforcement of the byte, time and count limits: #960.
 - Revocation and typed provider outcomes such as authentication failure or timeout: #961.
 - Provenance records: #962.

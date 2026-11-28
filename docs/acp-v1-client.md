@@ -177,7 +177,10 @@ must be qualified together. Authentication and session lifecycle remain with
 destination, operation, authentication and limit policy that the transport will
 enforce is described in
 [the provider transport policy](acp-provider-transport-policy.md). Nothing in
-this document can select it yet.
+this document can select it yet. The host broker that holds the credential and
+issues the invocation-bound channel is described in
+[the provider credential broker](acp-provider-credential-broker.md). No factory
+path opens it yet.
 
 The explicit `provenance: "secret"` environment binding above forwards the named
 value to the agent during initialize. It therefore cannot carry a provider
