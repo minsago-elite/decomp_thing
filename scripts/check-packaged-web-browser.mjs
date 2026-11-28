@@ -9,7 +9,7 @@ import { parseArgs } from 'node:util';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
 import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
 import { seedStructure, qualifyStructure, structureFailureEvidence } from './packaged-browser-structure.mjs';
-import { qualifyStructureBudgets, qualifyStructureColdSample } from './packaged-browser-structure.mjs';
+import { qualifyStructureBudgets, qualifyStructureColdSample, structureColdSampleFailure } from './packaged-browser-structure.mjs';
 import { structureProfile, verifyStructureQualificationSource, verifyStructureSourceRevision, verifyStructureBrowser } from './packaged-browser-structure-cold.mjs';
 import { resolveBrowserTempParent, createBrowserTemp } from './packaged-browser-temp-parent.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
@@ -992,7 +992,7 @@ try {
         timedBoundary: 'click browse-recovered-functions to first 100 rendered rows' };
       report.structureCold = await qualifyStructureColdSample({ fixture: structureFixture, makeTarget, cdp, evaluate, ready,
         browserOrigin, applicationPid: application.pid, profile: structureBudgetProfile });
-      if (!report.structureCold.passed) throw new Error(`Cold structure sample failed: ${JSON.stringify(report.structureCold.failures)}`);
+      if (!report.structureCold.passed) throw structureColdSampleFailure(report.structureCold);
     } else {
     if (values.mode === 'proxy') {
       await waitFor(() => hmrConnected, 'real Vite HMR connection');

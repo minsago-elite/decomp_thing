@@ -1774,6 +1774,17 @@ export function assessArchivedConsumption(measurements) {
   return valid ? { validatedConsumption: true } : { validatedConsumption: false, status: 'FAIL', reason: 'unproven: report lacks response-body and document-nonce consumption evidence' };
 }
 
+/**
+ * The driver's error for a cold sample that returned failed. It is created outside the qualifier's observer, so it
+ * takes the bounded snapshot the sample carried and structureFailureEvidence reports it like any other failure (R2).
+ */
+export function structureColdSampleFailure(result) {
+  const error = new Error(`Cold structure sample failed: ${JSON.stringify(result?.failures ?? null)}`);
+  const phase = result?.structureFailurePhase;
+  if (phase !== null && typeof phase === 'object' && Object.isFrozen(phase)) structureFailures.set(error, phase);
+  return error;
+}
+
 /** Attaches the #1879 observer's bounded snapshot to a budgeted or cold failure, as qualifyStructure does (R2). */
 async function observeStructureFailure(run) {
   const observer = moduleBodyObserver();
@@ -1985,7 +1996,9 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
         pendingEvidenceRequests: coldEvidenceSummary.pendingEvidenceRequests },
       browserHeapMemory, jvmMemory, exceptions: tab.exceptions, requestMethods: firstPageRequestMethods,
       recordedFunctions: fixture.functions, profileApplied: profile.name, failures,
-      latencyWithinBudget: Number.isFinite(firstPageMs) && firstPageMs <= profile.firstPageLimitMs, passed: failures.length === 0 };
+      latencyWithinBudget: Number.isFinite(firstPageMs) && firstPageMs <= profile.firstPageLimitMs, passed: failures.length === 0,
+      // A failed sample returns rather than throws, so it carries the #1879 snapshot for the driver's error (R2).
+      structureFailurePhase: failures.length === 0 ? null : observer.snapshot() };
     return result;
   }
   assert.ok(Number.isFinite(firstPageMs));
