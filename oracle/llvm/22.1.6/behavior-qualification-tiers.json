@@ -1,0 +1,51 @@
+{
+  "corpus": {
+    "id": "clang-22-1-6-driver-behavior",
+    "sha256": "acaa7b33c390b2c9fde15b4e21b0a899ffff62fe98ce22226866272b4efe8d5b"
+  },
+  "schemaVersion": 1,
+  "tiers": {
+    "ci-smoke": {
+      "caseIds": [
+        "compile-file",
+        "diagnostic-syntax",
+        "metadata-resource-dir",
+        "metadata-target",
+        "metadata-version",
+        "target-i386-object",
+        "target-unsupported-aarch64",
+        "target-x86-macros"
+      ],
+      "caseLimits": {
+        "artifactBytes": 16777216,
+        "cpuSeconds": 10,
+        "fileBytes": 16777216,
+        "memoryBytes": 1073741824,
+        "openFiles": 128,
+        "processes": 128,
+        "stderrBytes": 1048576,
+        "stdoutBytes": 1048576,
+        "timeoutMilliseconds": 10000,
+        "workspaceBytes": 33554432,
+        "workspaceEntries": 1024
+      },
+      "events": [
+        "pull_request",
+        "push"
+      ],
+      "maximumAggregateWallMilliseconds": 120000,
+      "productionEvidenceEligible": false,
+      "repetitions": 1
+    },
+    "full-qualification": {
+      "caseLimitSource": "corpus",
+      "caseSelection": "every-corpus-case",
+      "events": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "minimumRepetitions": 3,
+      "productionEvidenceEligible": true
+    }
+  }
+}

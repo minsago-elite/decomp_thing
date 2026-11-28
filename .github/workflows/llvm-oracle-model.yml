@@ -208,6 +208,15 @@ jobs:
             oracle/llvm/22.1.6/function-recovery-oracle.json
       - name: Authenticate checked Clang behavior reference evidence in Kotlin
         run: ./gradlew --no-daemon verifyLlvmBehaviorReferenceEvidence
+      - name: Bind this CI event to the bounded smoke tier, never full qualification
+        env:
+          QUALIFICATION_EVENT: ${{ github.event_name }}
+        run: |
+          case "$QUALIFICATION_EVENT" in
+            push|pull_request) ;;
+            *) echo "the CI smoke tier gate admits only push and pull_request, not $QUALIFICATION_EVENT" >&2; exit 1 ;;
+          esac
+          ./gradlew --no-daemon verifyLlvmBehaviorQualificationTiers --args="--event $QUALIFICATION_EVENT --tier ci-smoke"
       - name: Cross-check checked Clang behavior evidence with the legacy compatibility validator
         run: |
           python3 scripts/check-behavior-corpus-evidence.py \

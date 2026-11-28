@@ -8,7 +8,32 @@ import java.nio.file.Path
 import java.security.SecureRandom
 
 internal object GccBundledCliCommand {
-    fun run(options: GccBundledCliOptions, arguments: List<String>): Path {
+    fun run(options: GccBundledCliOptions, arguments: List<String>): Path = admit(options, arguments).use { owner ->
+        if (options.runtimeDiagnostics) {
+            owner.executeRuntimeDiagnostic()
+        } else if (options.nativeCallObservations) {
+            owner.executeNativeCallObservations()
+            owner.publishNativeCallCliResult()
+        } else if (options.fullRecoveryExport) {
+            val fullExport = owner.executeFullExport()
+            val structuralInputs = GccDriverStructuralInputsV1.load(options.profile.parent, options.engineId, parallelProfile(options))
+            owner.publishFullExportCliResult(structuralInputs.captureFullExport(fullExport))
+        } else {
+            if (options.resumeAfterCheckpoint == null) owner.execute()
+            else {
+                owner.executeUntilCheckpoint(options.resumeAfterCheckpoint)
+                owner.resume()
+            }
+            owner.plan()
+            owner.publishCliResult()
+        }
+    }
+
+    /**
+     * Runs every CLI admission check that precedes contained START and returns the coordinator's prepared owner.
+     * The caller owns the result; no worker has started, and closing it retains the scratch lease for recovery.
+     */
+    fun admit(options: GccBundledCliOptions, arguments: List<String>): GccBundledPreparedOperation {
         require(GccBundledCliOptions.parse(arguments, fullRecoveryExport = options.fullRecoveryExport,
             runtimeDiagnostics = options.runtimeDiagnostics, nativeCallObservations = options.nativeCallObservations) == options)
         listOf(options.binary, options.profile, options.archive, options.output, options.scratch).forEach { path ->
@@ -41,30 +66,13 @@ internal object GccBundledCliCommand {
             options.binary, options.profile, options.archive, options.output.resolve("inputs"), journal, options.scratch,
             options.diskPolicy, invocation, fullRecoveryExport = options.fullRecoveryExport,
             runtimeDiagnostics = options.runtimeDiagnostics, nativeCallObservations = options.nativeCallObservations)
-        val parallelProfile = options.profile.fileName.toString() == "compiler-engines-exporter17-parallel.json"
         if (options.fullRecoveryExport && !options.runtimeDiagnostics) {
-            GccDriverStructuralInputsV1.load(options.profile.parent, options.engineId, parallelProfile)
+            GccDriverStructuralInputsV1.load(options.profile.parent, options.engineId, parallelProfile(options))
                 .requireFullExportIntent(intent.canonicalBytes)
         }
-        return GccBundledOperationCoordinator.prepareNew(intent, journal, options.scratch).use { owner ->
-            if (options.runtimeDiagnostics) {
-                owner.executeRuntimeDiagnostic()
-            } else if (options.nativeCallObservations) {
-                owner.executeNativeCallObservations()
-                owner.publishNativeCallCliResult()
-            } else if (options.fullRecoveryExport) {
-                val fullExport = owner.executeFullExport()
-                val structuralInputs = GccDriverStructuralInputsV1.load(options.profile.parent, options.engineId, parallelProfile)
-                owner.publishFullExportCliResult(structuralInputs.captureFullExport(fullExport))
-            } else {
-                if (options.resumeAfterCheckpoint == null) owner.execute()
-                else {
-                    owner.executeUntilCheckpoint(options.resumeAfterCheckpoint)
-                    owner.resume()
-                }
-                owner.plan()
-                owner.publishCliResult()
-            }
-        }
+        return GccBundledOperationCoordinator.prepareNew(intent, journal, options.scratch)
     }
+
+    private fun parallelProfile(options: GccBundledCliOptions) =
+        options.profile.fileName.toString() == "compiler-engines-exporter17-parallel.json"
 }
