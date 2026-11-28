@@ -240,6 +240,28 @@ test('reserves diagnostic excerpts before near-limit request evidence at the pro
   }
 });
 
+test('references a required fact before the diagnostic excerpt markers at the production cap', async () => {
+  const buildDirectory = join(process.cwd(), 'build');
+  await mkdir(buildDirectory, { recursive: true });
+  const directory = await mkdtemp(join(buildDirectory, 'required-reference-'));
+  try {
+    const report = { status: 'failed', mode: 'audit', exitCode: 1, error: 'E'.repeat(700_000) + ' DRIVER-END',
+      requestFailures: 'q'.repeat(530_000) };
+    await publishReport(directory, report, []);
+    const bytes = await readFile(join(directory, 'report.json'));
+    assert.ok(bytes.length <= MAX_REPORT_BYTES);
+    const parsed = JSON.parse(bytes);
+    assert.deepEqual(parsed.reportEvidence.referencedKeys, ['requestFailures']);
+    assert.equal(parsed.mode, 'audit');
+    assert.equal(parsed.exitCode, 1);
+    const truncation = parsed.diagnosticTruncation.error;
+    assert.ok(truncation.retainedBytes >= 400_000, `error kept only ${truncation.retainedBytes} bytes`);
+    assert.ok(parsed.error.startsWith('E') && parsed.error.endsWith('DRIVER-END'));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('keeps a small-cap excerpt instead of referencing short facts with larger references', async () => {
   const buildDirectory = join(process.cwd(), 'build');
   await mkdir(buildDirectory, { recursive: true });

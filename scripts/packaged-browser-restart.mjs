@@ -273,7 +273,11 @@ function primaryReport(full, evidence, maxBytes) {
   // markers barely fit still keeps a useful head and tail of each diagnostic (#1992).
   const reserve = Math.min(Math.floor(maxBytes / 4), diagnostics.reduce((sum, diagnostic) => sum + diagnostic.serializedBytes, 0));
   if (!diagnostics.length || !excerptDiagnostics(primary, diagnostics, maxBytes, measure,
-    () => reference(key => optional(key) && !excerpted.has(key), maxBytes - reserve))) {
+    () => {
+      reference(key => optional(key) && !excerpted.has(key), maxBytes - reserve);
+      // Required facts are referenced beside the markers before any diagnostic is referenced (#1992).
+      reference(key => !excerpted.has(key));
+    })) {
     // No large diagnostics, or even marker-only excerpts cannot fit: reference the largest facts
     // of the unmodified report, as before excerpts existed. The parts remain lossless either way.
     primary = { ...full, reportEvidence: evidence };
