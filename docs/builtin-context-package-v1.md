@@ -11,6 +11,10 @@ bytes, including escaping, and bounds both mandatory metadata and aggregate sour
 The default evidence ceiling is 32 MiB. Inputs that do not fit are omitted only if the trusted tool
 session advertises context retrieval and registers both `list_evidence` and `read_evidence`. Every
 omission remains visible and retrievable; it does not waive a workflow acceptance requirement.
+`read_evidence` matches declared secrets against each original body, not the page slice, and masks
+every intersecting character with `*` in the returned page. A secret spanning a page boundary is
+therefore masked on both pages in tool results and later model history, while offsets, `nextOffset`
+and page byte bounds stay those of the original text.
 Without that capability the call exhausts explicitly before invoking the provider.
 
 The initial package leaves one quarter of the context ceiling for later model/tool history by

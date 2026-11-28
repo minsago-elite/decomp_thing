@@ -12,7 +12,8 @@ batches. The record binds the conversation and tool schemas, source/context hash
 identities, loop-limit fingerprint, usage, remaining wall-clock allowance and absolute expiry,
 event sequence, prior state trace, used call IDs and canonical-action repetition counts. A digest of
 the original checkpoint state detects redaction: altered text remains evidence and cannot silently
-become restored model context. Remaining turns/tools/tokens/output bytes are derived from the bound
+become restored model context. Reopening also refuses any committed prefix that does not satisfy
+the active redaction policy, so a journal written under weaker rules cannot be extended. Remaining turns/tools/tokens/output bytes are derived from the bound
 request/loop limits and restored usage; they do not reset.
 
 After forcing a checkpoint record, the loop publishes an immutable commitment in a separate private

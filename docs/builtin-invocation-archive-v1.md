@@ -8,6 +8,13 @@ It contains no journal path, runtime endpoint, environment map or exception caus
 existing redaction applies to request/response payloads; path and callback identifiers in the new
 metadata are commitments rather than plaintext.
 
+Capture requires the active declared secrets. It refuses export when any committed journal record
+does not already satisfy that policy (for example a prefix written under older, weaker rules), and
+applies START's fail-closed identity check to archive-only identifiers (workflow, task ID and prompt
+commitment) before serialization. The runtime journal is never rewritten. The verifier accepts the
+exact `[REDACTED]` string in place of a redacted integer tool argument, and skips only the length
+bound of a string argument that contains the marker; type, enum and correlation checks still apply.
+
 The loop now collects final captured changes and callback audits after cleanup and commits them in
 TERMINAL. This includes staged edits from refused, cancelled and failed turns. Failed outcomes keep
 an empty shared result-change digest while retaining their separate candidate changes. A candidate

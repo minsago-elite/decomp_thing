@@ -111,7 +111,8 @@ class BuiltinAgentHarness(
     private val checkpointConfiguration: BuiltinCheckpointConfiguration? = null,
 ) : AgentHarness {
     init { require(checkpointConfiguration == null || journalConfiguration != null) }
-    private val secrets = secrets.filter { it.isNotEmpty() }.distinct().sortedByDescending { it.length }
+    // Refuse inadmissible declared secrets before any provider, tool or journal effect.
+    private val secrets = admitBuiltinSecrets(secrets)
     override fun implementationIdentifier() = "builtin-loop-v1"
     override fun execute(request: AgentExecutionRequest, onEvent: (AgentExecutionEvent) -> Unit): AgentExecutionResult =
         executeReceipt(request, onEvent).requireResult()
@@ -569,8 +570,10 @@ class BuiltinAgentHarness(
             check(restoredAuthoritySha256 == null || restoredAuthoritySha256!!.matches(Regex("[a-f0-9]{64}")))
         }
 
+        /** Tool arguments are provider-originated: typed literals carrying a secret become the marker. */
         fun journalCall(call: ModelToolCall) = buildJsonObject {
-            put("id", call.id); put("name", call.name); put("arguments", canonical(call.arguments))
+            val arguments = canonical(call.arguments)
+            put("id", call.id); put("name", call.name); put("arguments", journal?.providerContent(arguments) ?: arguments)
         }
 
         fun journalContext(definitions: List<ModelToolDefinition>) = buildJsonObject {

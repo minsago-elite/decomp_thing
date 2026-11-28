@@ -66,7 +66,7 @@ internal class BuiltinJournal private constructor(
     private val channel: FileChannel,
     private val lock: FileLock,
     private val fileKey: Any,
-    private val secrets: List<String>,
+    private val redactor: BuiltinRedactor,
 ) : AutoCloseable {
     private var count = 0
     private var bytes = 0L
@@ -84,7 +84,7 @@ internal class BuiltinJournal private constructor(
         val nextPending = transition(pending, kind, count)
         // Bound the original representation as well as the redacted one, before persistence.
         encode(payload, configuration.maximumRecordBytes)
-        val redacted = redact(payload).jsonObject
+        val redacted = redactor.redact(payload).jsonObject
         val body = buildJsonObject {
             put("version", 1); put("sequence", count); put("previous", head)
             put("kind", kind.name); put("payload", redacted)
@@ -100,41 +100,8 @@ internal class BuiltinJournal private constructor(
         terminal = kind == BuiltinJournalKind.TERMINAL
     }
 
-    private fun redact(value: JsonElement): JsonElement = when (value) {
-        is JsonObject -> {
-            val pairs = value.entries.map { redactString(it.key) to redact(it.value) }
-            check(pairs.map { it.first }.distinct().size == pairs.size)
-            JsonObject(pairs.toMap())
-        }
-        is JsonArray -> JsonArray(value.map(::redact))
-        is JsonPrimitive -> when {
-            value.isString -> JsonPrimitive(redactString(value.content))
-            value is JsonNull -> value
-            // A numeric or boolean literal cannot hold a placeholder, so the whole value is replaced.
-            redactString(value.content) != value.content -> JsonPrimitive("[REDACTED]")
-            else -> value
-        }
-    }
-
-    private fun redactString(value: String): String {
-        // Match against the original string. Replacing iteratively can expose overlapping secrets.
-        val result = StringBuilder()
-        var index = 0
-        while (index < value.length) {
-            val secret = secrets.firstOrNull { value.startsWith(it, index) }
-            if (secret == null) result.append(value[index++])
-            else {
-                var end = index + secret.length
-                var scan = index + 1
-                while (scan < end) {
-                    secrets.forEach { if (value.startsWith(it, scan)) end = maxOf(end, scan + it.length) }
-                    scan++
-                }
-                result.append("[REDACTED]"); index = end
-            }
-        }
-        return result.toString()
-    }
+    /** Provider-originated tool arguments only; schema-owned payload fields never change type. */
+    fun providerContent(value: JsonElement): JsonElement = redactor.redactProviderLiterals(value)
 
     private inline fun <T> guarded(block: () -> T): T = try { block() } catch (_: Exception) {
         broken = true
@@ -144,27 +111,15 @@ internal class BuiltinJournal private constructor(
     override fun close(): Unit = guarded { try { lock.release() } finally { channel.close() } }
 
     companion object {
-        /** Redact secrets inside bounded nested JSON text without unboundedly expanding patterns. */
-        private const val MAX_JSON_ESCAPE_DEPTH = 3
-
-        private fun redactionPatterns(secrets: List<String>): List<String> = secrets
-            .filter { it.isNotEmpty() }
-            .flatMap { secret ->
-                buildList {
-                    var encoded = secret
-                    add(encoded)
-                    repeat(MAX_JSON_ESCAPE_DEPTH) {
-                        encoded = JsonPrimitive(encoded).toString().drop(1).dropLast(1)
-                        add(encoded)
-                    }
-                }
-            }
-            .distinct()
-            .sortedByDescending { it.length }
+        /** A committed prefix written under older or weaker rules is never exported or extended. */
+        internal fun compliantPayloads(records: List<JsonObject>, redactor: BuiltinRedactor) =
+            records.all { redactor.compliant(it.getValue("payload")) }
 
         fun open(configuration: BuiltinJournalConfiguration, request: AgentExecutionRequest, secrets: List<String>): BuiltinJournal {
             var channel: FileChannel? = null
             try {
+                // Refuse inadmissible secrets before creating any journal file.
+                val redactor = BuiltinRedactor(secrets)
                 verifyParent(configuration.path)
                 val parent = configuration.path.parent
                 request.workspaceRoots.forEach {
@@ -177,11 +132,10 @@ internal class BuiltinJournal private constructor(
                 val lock = channel.tryLock() ?: error("Locked")
                 val key = Files.readAttributes(configuration.path, BasicFileAttributes::class.java, NOFOLLOW_LINKS).fileKey()
                     ?: error("File identity unavailable")
-                val redactionPatterns = redactionPatterns(secrets)
-                val journal = BuiltinJournal(configuration, channel, lock, key, redactionPatterns)
+                val journal = BuiltinJournal(configuration, channel, lock, key, redactor)
                 val identity = identity(configuration.identity, AgentExecutionRequestBinding.capture(request))
                 // Identities must remain usable for exact trusted comparison; do not persist secret-bearing configuration.
-                check(journal.redact(identity) == identity)
+                check(redactor.redact(identity) == identity)
                 journal.append(BuiltinJournalKind.START, identity)
                 FileChannel.open(parent, READ).use { it.force(true) }
                 return journal
@@ -245,8 +199,11 @@ internal class BuiltinJournal private constructor(
             expected: BuiltinJournalCommitment, secrets: List<String>): Pair<BuiltinJournal, JsonObject> {
             var channel: FileChannel? = null
             try {
+                val redactor = BuiltinRedactor(secrets)
                 val inspection = inspect(configuration, AgentExecutionRequestBinding.capture(request), expected)
                 check(inspection.endsAtCheckpoint)
+                // Admit continuation only when every committed record already satisfies the active policy.
+                check(compliantPayloads(inspection.records, redactor))
                 channel = FileChannel.open(configuration.path, READ, WRITE, NOFOLLOW_LINKS)
                 val lock = channel.tryLock() ?: error("Active writer")
                 val key = Files.readAttributes(configuration.path, BasicFileAttributes::class.java, NOFOLLOW_LINKS).fileKey() ?: error("No identity")
@@ -264,8 +221,7 @@ internal class BuiltinJournal private constructor(
                 }
                 check(read == expected.bytes && digest.digest().joinToString("") { "%02x".format(it) } == inspection.contentSha256)
                 verifyFile(configuration.path, key)
-                val patterns = redactionPatterns(secrets)
-                val journal = BuiltinJournal(configuration, channel, lock, key, patterns)
+                val journal = BuiltinJournal(configuration, channel, lock, key, redactor)
                 journal.count = expected.records; journal.bytes = expected.bytes; journal.head = expected.headSha256
                 return journal to inspection.records.last().getValue("payload").jsonObject
             } catch (_: Exception) {

@@ -72,7 +72,7 @@ class BuiltinCapturedResumeTest {
         val req = request(AgentWorkspaceRoot("project", ACP_CAPTURED_REPAIR_WORKSPACE), initial())
         val identity = BuiltinInvocationArchiveIdentity("repair", "resumed-attempt", "d".repeat(64),
             AgentExecutionRequestBinding.capture(req), config.first.identity)
-        val archived = BuiltinInvocationArchiveDocument.capture(identity, req, continued.receipt, config.first)
+        val archived = BuiltinInvocationArchiveDocument.capture(identity, req, continued.receipt, config.first, emptyList())
         assertTrue(archived.verified.candidateEvidenceComplete)
         val records = Json.parseToJsonElement(archived.bytes.decodeToString()).jsonObject.getValue("records").jsonArray
         assertTrue(records.filter { it.jsonObject["kind"] == JsonPrimitive("CHECKPOINT") }.any {

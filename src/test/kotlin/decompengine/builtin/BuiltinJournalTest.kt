@@ -47,40 +47,47 @@ class BuiltinJournalTest {
 
     @Test fun `redaction covers nested keys escaping overlapping secrets and bounded full payloads`() {
         val configuration = configuration()
-        val journal = BuiltinJournal.open(configuration, request(), listOf("abc", "bcd", "a\"b"))
+        val journal = BuiltinJournal.open(configuration, request(), listOf("abcdefgh", "efghijkl", "quo\"ted-1"))
         journal.use {
             it.append(BuiltinJournalKind.CHECKPOINT, buildJsonObject {
-                putJsonObject("abc") { put("text", "abcd and a\"b"); put("encoded", JsonPrimitive("a\"b").toString()) }
+                putJsonObject("abcdefgh") { put("text", "abcdefghijkl and quo\"ted-1"); put("encoded", JsonPrimitive("quo\"ted-1").toString()) }
             })
         }
         val payload = inspect(configuration, journal.evidence.commitment).records.last().getValue("payload").jsonObject
         val child = payload.getValue("[REDACTED]").jsonObject
         assertEquals("[REDACTED] and [REDACTED]", child.getValue("text").jsonPrimitive.content)
         assertEquals("\"[REDACTED]\"", child.getValue("encoded").jsonPrimitive.content)
-        assertFalse(Files.readString(configuration.path).contains("abc"))
+        assertFalse(Files.readString(configuration.path).contains("abcdefgh"))
     }
 
-    @Test fun `redaction covers numeric and boolean literals and nested json escaping layers`() {
-        val configuration = configuration()
-        val secret = "9182736455"
+    @Test fun `inadmissible secrets are refused and schema-owned literals never change type`() {
+        listOf("true", "false", "null", "12345678", "short-1", "REDACTED", "").forEachIndexed { index, secret ->
+            val refused = configuration("refused-$index")
+            assertFailsWith<BuiltinJournalException> { BuiltinJournal.open(refused, request(), listOf(secret)) }
+            assertFalse(Files.exists(refused.path), "refused configuration must not create a journal")
+        }
+        val numeric = "-91827364"
         val quoted = "q\"t-secret"
-        val journal = BuiltinJournal.open(configuration, request(), listOf(secret, quoted, "true"))
+        val configuration = configuration()
+        val journal = BuiltinJournal.open(configuration, request(), listOf(numeric, quoted))
         var nested = quoted
         repeat(3) { nested = JsonPrimitive(nested).toString() }
         journal.use {
-            it.append(BuiltinJournalKind.CHECKPOINT, buildJsonObject {
-                put("pin", 9182736455L); put("prefixed", 109182736455L); put("flag", true)
-                put("safe", 42); put("absent", JsonNull); put("nested", nested)
-            })
+            it.append(BuiltinJournalKind.CHECKPOINT, buildJsonObject { put("nested", nested); put("count", 42); put("flag", true) })
+            val committed = it.evidence.commitment
+            // Provider-originated arguments are the only place a literal becomes the marker string.
+            val arguments = it.providerContent(buildJsonObject {
+                put("position", -9182736455L); put("safe", 42); put("flag", true); put("absent", JsonNull)
+            }).jsonObject
+            assertEquals(JsonPrimitive("[REDACTED]"), arguments["position"])
+            assertEquals(JsonPrimitive(42), arguments["safe"]); assertEquals(JsonPrimitive(true), arguments["flag"])
+            assertEquals(JsonNull, arguments["absent"])
+            assertFailsWith<BuiltinJournalException> { it.append(BuiltinJournalKind.STATE, buildJsonObject { put("count", -9182736455L) }) }
+            assertEquals(committed.bytes, Files.size(configuration.path))
         }
-        val payload = inspect(configuration, journal.evidence.commitment).records.last().getValue("payload").jsonObject
-        assertEquals(JsonPrimitive("[REDACTED]"), payload["pin"])
-        assertEquals(JsonPrimitive("[REDACTED]"), payload["prefixed"])
-        assertEquals(JsonPrimitive("[REDACTED]"), payload["flag"])
-        assertEquals(JsonPrimitive(42), payload["safe"])
-        assertEquals(JsonNull, payload["absent"])
-        val raw = Files.readString(configuration.path)
-        assertFalse(raw.contains(secret))
+        val payload = inspect(configuration, BuiltinJournalCommitment(2, Files.size(configuration.path),
+            inspectHead(configuration))).records.last().getValue("payload").jsonObject
+        assertEquals(JsonPrimitive(42), payload["count"]); assertEquals(JsonPrimitive(true), payload["flag"])
         val persistedNested = payload.getValue("nested").jsonPrimitive.content
         assertTrue(persistedNested.contains("[REDACTED]"))
         var spelling = quoted
@@ -89,6 +96,9 @@ class BuiltinJournalTest {
             spelling = JsonPrimitive(spelling).toString().drop(1).dropLast(1)
         }
     }
+
+    private fun inspectHead(configuration: BuiltinJournalConfiguration) =
+        Json.parseToJsonElement(Files.readAllLines(configuration.path).last()).jsonObject.getValue("sha256").jsonPrimitive.content
 
     @Test fun `tampered truncated appended and substituted request journals are rejected`() {
         val configuration = configuration()
@@ -174,12 +184,12 @@ class BuiltinJournalTest {
         var turn = 0
         val provider = ModelProvider { _, emit ->
             if (turn++ == 0) {
-                emit(ModelEvent.TextDelta("se")); emit(ModelEvent.TextDelta("cret"))
-                ModelResponse("secret", listOf(ModelToolCall("call1", "edit", buildJsonObject { put("text", "secret") })),
+                emit(ModelEvent.TextDelta("secret-")); emit(ModelEvent.TextDelta("token"))
+                ModelResponse("secret-token", listOf(ModelToolCall("call1", "edit", buildJsonObject { put("text", "secret-token") })),
                     ModelFinishReason.TOOL_CALLS, ModelUsage(100, 10, false), 1)
             } else ModelResponse("done", emptyList(), ModelFinishReason.STOP, ModelUsage(100, 10, false), 1)
         }
-        val receipt = BuiltinAgentHarness(provider, { _, _ -> session }, secrets = listOf("secret"), journalConfiguration = configuration)
+        val receipt = BuiltinAgentHarness(provider, { _, _ -> session }, secrets = listOf("secret-token"), journalConfiguration = configuration)
             .executeReceipt(request()) {}
         val evidence = assertIs<BuiltinLoopEvidence>(receipt.providerEvidence).journal!!
         assertTrue(evidence.complete); assertFalse(evidence.indeterminate)
@@ -193,7 +203,7 @@ class BuiltinJournalTest {
         }
         val response = restored.records.first { it["kind"] == JsonPrimitive("MODEL_RESPONSE") }.getValue("payload").jsonObject
         assertEquals("[REDACTED]", response.getValue("text").jsonPrimitive.content)
-        assertFalse(Files.readString(configuration.path).contains("secret"))
+        assertFalse(Files.readString(configuration.path).contains("secret-token"))
     }
 
     @Test fun `interrupted tool remains indeterminate and inspection never reexecutes it`() {

@@ -32,16 +32,29 @@ The loop records:
 - Completion-validation intent and its result with candidate change hashes and an explicit lack of
   publication authority, then the terminal stop, usage and cleanup outcome.
 
-Declared secrets are redacted in strings and object keys, including up to three nested layers of
-the JSON string-escaped spelling used inside structured text (for example provider prose that embeds
-JSON which itself embeds JSON). Numeric and boolean literals whose spelling contains a declared
-secret are replaced by the string `[REDACTED]`; `null` is never rewritten. Fresh and resumed journals
-use the same bounded pattern set. Overlapping matches are covered; colliding redacted keys fail closed. A full
+Declared secrets are admitted fail closed. Configuration is refused, before any journal file,
+provider call or tool effect, when a secret is shorter than eight characters, is a JSON literal
+(`true`, `false`, `null`), contains only digits, is a substring of the `[REDACTED]` marker, or is not
+valid Unicode text. No credential has these shapes, and redacting them would rewrite evidence
+vocabulary such as versions, booleans, counts or the marker itself.
+
+Admitted secrets are redacted in strings and object keys everywhere, including up to three nested
+layers of JSON string escaping. Each layer uses both serializer spellings the harness produces:
+kotlinx (lowercase `\u001b`) and the built-in Jackson writer used for tool pages and provider bodies
+(uppercase `\u001B`). Schema-owned literals (contract version, booleans such as `cleanupComplete`
+and `allowed`, usage counts, offsets) never change type: a declared spelling inside one fails the
+append closed. Only provider-originated tool-call arguments may carry a redacted literal; a numeric
+or boolean argument containing a declared spelling is persisted as exactly the string `[REDACTED]`.
+Fresh, resumed and exported journals use the same policy. Reopening a checkpoint for continuation
+first checks every committed record against the active policy; a prefix written under older or
+weaker rules is refused without rewriting it. Overlapping matches are covered; colliding redacted
+keys fail closed. A full
 assembled model response is redacted as one payload, so a secret split across streamed deltas cannot
 leak through separate journal records. An interrupted response leaves a pending request without raw
 partial text. Exceptions, credentials, runtime endpoints and environment maps are never recorded.
 Callers must declare their sensitive inputs; arbitrary encodings of secrets (deeper escaping, other
-JSON escape choices such as `\/` or `\uXXXX`, base64 or other transformations) are not classified.
+JSON escape choices such as `\/` or `\uXXXX` for printable characters, base64 or other
+transformations) are not classified.
 
 Receipts contain only record count, byte count, head digest, terminal-record completeness and an
 indeterminate-operation flag. Completeness means that a terminal record was persisted; it does not

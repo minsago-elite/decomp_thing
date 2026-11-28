@@ -81,9 +81,12 @@ internal class BuiltinCapturedContextTools(
     paths: Collection<String>,
     private val maximumResultBytes: Int,
     private val maximumAuditRecords: Int,
+    private val redactor: BuiltinRedactor = BuiltinRedactor(emptyList()),
 ) {
     private val paths = paths.sorted()
     private val evidence = request.contextInputs.associateBy { it.id }
+    /** Secret spans over each whole original body, so a page boundary can never split a match into fragments. */
+    private val secretSpans = mutableMapOf<String, List<IntRange>>()
     private val records = mutableListOf<BuiltinContextToolAudit>()
     val definitions = listOf(
         ModelToolDefinition("list_directory", "List readable captured directory entries; empty path means the virtual root", schema(mapOf(
@@ -214,7 +217,7 @@ internal class BuiltinCapturedContextTools(
         while (end > offset) {
             if (end < item.content.length && item.content[end - 1].isHighSurrogate()) end--
             try {
-                encoded = evidencePage(item, offset, end)
+                encoded = evidencePage(item, offset, end, control)
                 break
             } catch (failure: ModelProviderException) {
                 if (failure.kind != ModelFailureKind.RESOURCE_EXHAUSTED) throw failure
@@ -225,8 +228,13 @@ internal class BuiltinCapturedContextTools(
         return BuiltinToolResult(encoded.decodeToString())
     }
 
-    private fun evidencePage(item: AgentContextInput, offset: Int, end: Int) = boundedProviderJson(maximumResultBytes) { out ->
-        writeEvidencePage(out, item, hash(item.content), offset, item.content.substring(offset, end), end.takeIf { it < item.content.length })
+    private fun evidencePage(item: AgentContextInput, offset: Int, end: Int, control: BuiltinExecutionControl? = null): ByteArray {
+        val spans = secretSpans.getOrPut(item.id) { redactor.spans(item.content) { control?.checkpoint() } }
+        // Masking is one character per original UTF-16 unit, so offsets and page bounds are unchanged.
+        val text = redactor.maskSlice(spans, item.content, offset, end)
+        return boundedProviderJson(maximumResultBytes) { out ->
+            writeEvidencePage(out, item, hash(item.content), offset, text, end.takeIf { it < item.content.length })
+        }
     }
 
     private fun previousCodePointBoundary(value: String, end: Int, minimum: Int): Int {

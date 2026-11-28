@@ -114,7 +114,7 @@ class BuiltinCapturedRepairHarness(
     secrets: Collection<String> = emptyList(),
     private val sourceStoreConfiguration: BuiltinSourceStoreConfiguration? = null,
 ) : CapturedRepairAgentHarness {
-    private val secrets = secrets.toList()
+    private val secrets = admitBuiltinSecrets(secrets)
     init {
         require(checkpointConfiguration == null || journalConfiguration != null)
         require(resume == null || checkpointConfiguration != null)
@@ -148,7 +148,8 @@ class BuiltinCapturedRepairHarness(
             val captured = AcpCapturedRepairFilesystem(initialFiles, output)
             val fileLimits = AcpFilesystemLimits(limits.maxToolResultBytes, limits.maxToolResultBytes)
             captured.preflight(invocation, fileLimits)
-            val context = BuiltinCapturedContextTools(invocation, initialFiles.keys, limits.maxToolResultBytes, limits.maxTraceRecords)
+            val context = BuiltinCapturedContextTools(invocation, initialFiles.keys, limits.maxToolResultBytes, limits.maxTraceRecords,
+                BuiltinRedactor(secrets))
                 .also { contextTools = it }
             val session = captured.open(invocation, fileLimits, audit)
             openedCapture = captured
