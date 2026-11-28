@@ -132,6 +132,7 @@ test('source revision binding honors an ambient GitHub event path when one is pr
 });
 
 test('browser identity requires the reviewed installed lock, binary hash, and exact version', async () => {
+  await mkdir(resolve(repoRoot,'build'),{recursive:true});
   const root=await mkdtemp(resolve(repoRoot,'build/structure-browser-pin-test-'));
   try {
     const install=resolve(root,'web-test-browser'); await mkdir(install);
