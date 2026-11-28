@@ -34,6 +34,17 @@ class ExportSupervisorNativeTest {
     }
 
     @Test
+    fun `an inherited ignored SIGCHLD cannot let the kernel reap the worker`() {
+        // An ignored SIGCHLD survives exec; without SIG_DFL the kernel would reap the worker and drop its status.
+        val supervisor = ProcessBuilder("/bin/sh", "-c", "trap '' CHLD; exec \"\$0\" 0 /bin/sh -c 'exit 7'", supervisor().toString())
+            .redirectError(ProcessBuilder.Redirect.DISCARD).redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
+        supervised(supervisor) {
+            permit(it)
+            assertEquals(7, exitOnItsOwn(it))
+        }
+    }
+
+    @Test
     fun `T alone ends the tree, and a reparented grandchild is adopted and killed`() = inControlTemporaryDirectory { root ->
         val orphanFile = root.resolve("orphan")
         // The subshell exits at once, so the TERM-ignoring sleep is orphaned while the worker runs.
