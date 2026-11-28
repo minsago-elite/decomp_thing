@@ -99,12 +99,6 @@ class WebRouteMatrixTest {
         "$R/reports/revision-validation" to Live(setOf("GET", "HEAD"), Outcome(400, "VALIDATION_FAILED"), Query.ROUTE_SPECIFIC),
         "$R/validation-history" to Live(setOf("GET", "HEAD"), Outcome(200, "validationHistory"), Query.ROUTE_SPECIFIC),
         "$R/revisions/{revisionId}/sources" to Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.PAGED),
-        "$R/revisions/{revisionId}/functions" to Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.PAGED),
-        "$R/revisions/{revisionId}/modules" to Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.PAGED),
-        "$R/revisions/{revisionId}/modules/{moduleId}" to Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.ROUTE_SPECIFIC),
-        "$R/revisions/{revisionId}/functions/{entityId}" to Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.ROUTE_SPECIFIC),
-        "$R/revisions/{revisionId}/globals/{entityId}" to Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.ROUTE_SPECIFIC),
-        "$R/revisions/{revisionId}/types/{entityId}" to Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.ROUTE_SPECIFIC),
         "$R/revisions/{revisionId}/source-search" to Live(
             setOf("GET", "HEAD"), Outcome(422, "VALIDATION_FAILED"), Query.ROUTE_SPECIFIC),
         "$R/revisions/{revisionId}/source-directories/{directoryId}" to

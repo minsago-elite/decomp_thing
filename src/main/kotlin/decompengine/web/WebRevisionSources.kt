@@ -163,6 +163,18 @@ internal fun revisionSourceFileId(reference: WebRevisionSourceReference, index: 
     "file_${index}_${revisionSourceDigest(listOf("revision-source-file-v1", reference.jobId, reference.runId,
         reference.revisionId, reference.sourceSha256, path).joinToString("\u0000"))}"
 
+/** Batch form of [revisionSourceFileId] for paths already in identity order; reuses one digest prefix. */
+internal fun revisionSourceFileIds(reference: WebRevisionSourceReference, paths: List<String>): Map<String, String> {
+    val digest = MessageDigest.getInstance("SHA-256")
+    val prefix = (listOf("revision-source-file-v1", reference.jobId, reference.runId,
+        reference.revisionId, reference.sourceSha256).joinToString("\u0000") + "\u0000").toByteArray(Charsets.UTF_8)
+    return paths.withIndex().associate { (index, path) ->
+        digest.reset()
+        digest.update(prefix)
+        path to "file_${index}_${revisionSourceHex(digest.digest(path.toByteArray(Charsets.UTF_8)))}"
+    }
+}
+
 /** Explicit opt-in; older clients and servers retain the original v1 inventory. */
 internal fun sourceInventoryIncludesManifest(values: List<String>?): Boolean {
     if (values == null) return false
