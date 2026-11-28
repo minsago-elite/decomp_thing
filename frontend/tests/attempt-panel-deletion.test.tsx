@@ -8,6 +8,7 @@ import type { AttemptControls as Controls, Bootstrap, Job, QueuePosition as Queu
 import { App } from '../src/app/App';
 import { attemptControlsCopy, explorationEvidenceCopy, recordedValidationCopy, runCopy } from '../src/copy/attempt';
 import { runHistoryCopy } from '../src/copy/history';
+import { artifactCopy } from '../src/copy/artifacts';
 import { gitRepositoryCopy, jobCopy, jobOrganizationCopy } from '../src/copy/job';
 import { queuePositionCopy } from '../src/copy/attemptOutcome';
 import { createBrowserSession } from '../src/session/session';
@@ -68,13 +69,36 @@ function chromeBlurOnRemoval() {
 const slot = 'decomp.attempt-command.v1:/nested';
 const recovery = () => createAttemptCommandRecovery('/nested');
 
-type Panel = { name: string; view: '' | '/evidence'; kind: string; button: string; panelError: string };
+type Panel = { name: string; view: '' | '/evidence'; kind: string; button: string; panelError: string; otherErrors?: string[] };
 const panels: Panel[] = [
   { name: 'exploration evidence', view: '/evidence', kind: 'report', button: explorationEvidenceCopy.readExplorationEvidence,
     panelError: explorationEvidenceCopy.explorationEvidenceCouldNotBeReadCheckTheSessionAnd },
   { name: 'available actions', view: '', kind: 'attemptControls', button: attemptControlsCopy.read, panelError: attemptControlsCopy.unverified },
   { name: 'validation evidence', view: '/evidence', kind: 'validationHistory', button: recordedValidationCopy.read, panelError: recordedValidationCopy.failed },
+  // #1805's catalog: a deletion tombstone is not an expired catalog page.
+  { name: 'artifact catalog', view: '/evidence', kind: 'artifacts', button: artifactCopy.read, panelError: artifactCopy.expired, otherErrors: [artifactCopy.failed] },
 ];
+
+it('ends the Build log view when its log read confirms RESOURCE_GONE, and keeps an ordinary 410 in the panel', async () => {
+  for (const [failure, ends] of [[gone(), true], [gone('CURSOR_EXPIRED'), false]] as const) {
+    const auth = await session();
+    transport.get.mockImplementation((kind: string) => kind === 'run' ? Promise.resolve({ data: run })
+      : kind === 'logRange' ? Promise.reject(failure) : Promise.reject(unavailable()));
+    history.replaceState(null, '', `/nested/jobs/${run.jobId}/runs/${run.runId}/logs`);
+    render(<App basePath="/nested" session={auth} />);
+    try {
+      if (ends) {
+        await screen.findByText(runCopy.thisJobWasDeleted, { exact: false });
+        expect(screen.getByRole('alert').textContent).toContain(`Reference ID: ${reference}.`);
+        expect(screen.queryByRole('button', { name: runCopy.refreshAttempt })).toBeNull();
+      } else {
+        await waitFor(() => { expect(reads('logRange')).toBeGreaterThan(0); });
+        await screen.findByRole('button', { name: runCopy.refreshAttempt });
+        expect(screen.queryByText(runCopy.thisJobWasDeleted, { exact: false })).toBeNull();
+      }
+    } finally { auth.dispose(); cleanup(); transport.get.mockReset(); }
+  }
+});
 async function route(panel: Panel, answer: () => Promise<unknown>) {
   const auth = await session();
   transport.get.mockImplementation((kind: string) => kind === 'run' ? Promise.resolve({ data: run })
@@ -124,11 +148,11 @@ for (const panel of panels) {
       const auth = await route(panel, () => Promise.reject(failure));
       try {
         fireEvent.click(screen.getByRole('button', { name: panel.button }));
-        await waitFor(() => expect(document.body.textContent).toContain(panel.panelError));
+        await waitFor(() => expect([panel.panelError, ...panel.otherErrors ?? []].some(text => document.body.textContent?.includes(text))).toBe(true));
         expect(screen.queryByText(runCopy.thisJobWasDeleted, { exact: false })).toBeNull();
         expect(screen.getByRole('button', { name: runCopy.refreshAttempt })).toBeTruthy();
         const again = screen.getAllByRole('button').find(node => node.textContent && [panel.button,
-          explorationEvidenceCopy.refreshExplorationEvidence].includes(node.textContent))!;
+          explorationEvidenceCopy.refreshExplorationEvidence, artifactCopy.refresh].includes(node.textContent))!;
         await waitFor(() => expect(again.matches(':disabled')).toBe(false));
         fireEvent.click(again);
         await waitFor(() => expect(reads(panel.kind)).toBe(2));

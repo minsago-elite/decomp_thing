@@ -8,13 +8,17 @@ import { useLocation } from 'preact-iso/router';
 import type { Run as RunData } from '../api/generated';
 import { withApiFailureReference } from '../api/client';
 import { appPath, jobPath, runPath, runViewPath, sourceDirectoryPath, type RunView } from '../app/paths';
+import { structureListPath } from '../structure/paths';
+import { structureTitles as structureCopy } from '../copy/structureTitles';
 import type { BrowserSession } from '../session/session';
 import { Activity } from '../jobs/Activity';
+import { LogViewer } from '../jobs/LogViewer';
 import { ProgressPin } from '../jobs/ProgressPin';
 import { AttemptControls } from '../jobs/AttemptControls';
 import { forgetAttemptCommandForDeletedJob } from '../jobs/attemptCommandRecovery';
 import { ExplorationEvidence } from '../jobs/ExplorationEvidence';
 import { RecordedValidationEvidence } from '../jobs/RecordedValidationEvidence';
+import { ArtifactCatalog } from '../jobs/ArtifactCatalog';
 import type { ValidationNavigation } from '../jobs/validationNavigation';
 import { useSession } from '../session/useSession';
 import { receive } from '../shared/receiptTime';
@@ -24,10 +28,15 @@ import { PanelBoundary } from '../shared/PanelBoundary';
 import { panelBoundaryCopy } from '../copy/shell';
 import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
 import { onLibraryChange } from '../jobs/libraryChannel';
+import { registerContractExtension } from '../api/decode';
+import { lazyContractSchema } from '../api/generated-schema-lazy';
 import { focusSurvivingNotice, restoreSettledFocus, useDepartingFocus } from '../shared/departingFocus';
 import { attemptOutcomeCopy as outcomeCopy, stopOutcomeCopy } from '../copy/attemptOutcome';
 import { QueuePosition, useQueueObservation } from '../jobs/QueuePosition';
 import { jobCopy } from '../copy/job';
+
+// Contracts decoded only by lazily loaded routes stay out of the initial bundle.
+registerContractExtension(lazyContractSchema);
 
 function Details({ jobId, runId, basePath, session, view, navigation, onDeleted, departingFocus }: {
   jobId: string; runId: string; basePath: string; session: BrowserSession; view: RunView; navigation?: ValidationNavigation;
@@ -135,7 +144,10 @@ function Details({ jobId, runId, basePath, session, view, navigation, onDeleted,
         <dt>{copy.wallClockUsage2}</dt><dd>{run.usage.wallClockMs === null ? copy.notReported : displayMessage(copy.wallClockUsage, { value: run.usage.wallClockMs })}</dd>
       </dl> : <p>{copy.usageWasNotReportedForThisAttempt}</p>}
       </>}
-      {view !== 'evidence' && <>
+      {view === 'logs' && <PanelBoundary name={panelBoundaryCopy.names.logs}>
+        <LogViewer key={`logs/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} onDeleted={onDeleted} />
+      </PanelBoundary>}
+      {view !== 'evidence' && view !== 'logs' && <>
         <PanelBoundary name={panelBoundaryCopy.names.attemptControls}>
           <AttemptControls key={`controls/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session}
             run={run} onChanged={() => { setRefresh(value => value + 1); }} onDeleted={onDeleted} />
@@ -147,16 +159,22 @@ function Details({ jobId, runId, basePath, session, view, navigation, onDeleted,
           <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} onDeleted={onDeleted} {...(view === 'activity' && navigation !== undefined ? { navigation } : {})} />
         </PanelBoundary>
       </>}
-      {view !== 'activity' && <>
+      {view !== 'activity' && view !== 'logs' && <>
         <PanelBoundary name={panelBoundaryCopy.names.exploration}>
           <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} onDeleted={onDeleted} />
         </PanelBoundary>
         <PanelBoundary name={panelBoundaryCopy.names.validation}>
           <RecordedValidationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} onDeleted={onDeleted} {...(navigation === undefined ? {} : { navigation })} />
         </PanelBoundary>
+        <PanelBoundary name={panelBoundaryCopy.names.artifacts}>
+          <ArtifactCatalog key={`artifacts/${jobId}/${runId}`} jobId={jobId} runId={runId} revisionId={run.resultRevisionId} basePath={basePath} onDeleted={onDeleted} />
+        </PanelBoundary>
       </>}
-      {run.resultRevisionId ? <p><a href={sourceDirectoryPath(basePath, { jobId, runId, revisionId: run.resultRevisionId })}>{sourceCopy.browse}</a></p>
-        : <p>{sourceCopy.noRevision}</p>}
+      {run.resultRevisionId ? <ul class="job-actions" aria-label={structureCopy.revisionViews}>
+        <li><a href={sourceDirectoryPath(basePath, { jobId, runId, revisionId: run.resultRevisionId })}>{sourceCopy.browse}</a></li>
+        <li><a href={structureListPath(basePath, { jobId, runId, revisionId: run.resultRevisionId }, 'functions')}>{structureCopy.browseFunctions}</a></li>
+        <li><a href={structureListPath(basePath, { jobId, runId, revisionId: run.resultRevisionId }, 'modules')}>{structureCopy.browseModules}</a></li>
+      </ul> : <p>{sourceCopy.noRevision}</p>}
     </>}
   </>;
 }
@@ -196,7 +214,7 @@ export default function Run({ jobId, runId, basePath, session, view = 'overview'
     const from = departing.current; departing.current = null;
     focusSurvivingNotice(from, notice.current);
   }, [deleted]);
-  const title = <h1 id="attempt-title">{view === 'activity' ? copy.activityTitle : view === 'evidence' ? copy.evidenceTitle : copy.workflowAttempt}</h1>;
+  const title = <h1 id="attempt-title">{view === 'activity' ? copy.activityTitle : view === 'evidence' ? copy.evidenceTitle : view === 'logs' ? copy.logsTitle : copy.workflowAttempt}</h1>;
   if (deleted) return <section aria-labelledby="attempt-title" ref={routeRoot}>{title}
     <div class="notice" role="alert"><p ref={notice} tabIndex={-1}>{gone.message}</p>
       <a href={appPath(basePath, '/')}>{jobCopy.returnToJobs}</a></div>
@@ -220,6 +238,7 @@ export default function Run({ jobId, runId, basePath, session, view = 'overview'
         <a href={runViewPath(basePath, jobId, runId, 'overview')} aria-current={view === 'overview' ? 'page' : undefined}>{copy.overviewView}</a>
         <a href={runViewPath(basePath, jobId, runId, 'activity')} aria-current={view === 'activity' ? 'page' : undefined}>{copy.activityView}</a>
         <a href={runViewPath(basePath, jobId, runId, 'evidence')} aria-current={view === 'evidence' ? 'page' : undefined}>{copy.evidenceView}</a>
+        <a href={runViewPath(basePath, jobId, runId, 'logs')} aria-current={view === 'logs' ? 'page' : undefined}>{copy.logsView}</a>
       </nav>
       {session && state?.status === 'authenticated' ? <Details key={`${state.generation}/${jobId}/${runId}/${view}`} jobId={jobId} runId={runId} basePath={basePath} session={session} view={view} onDeleted={markDeleted} departingFocus={departingFocus} {...(navigation === undefined ? {} : { navigation })} />
         : <p>{copy.connectALocalSessionToViewThisAttempt}</p>}
