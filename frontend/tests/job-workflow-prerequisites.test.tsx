@@ -88,7 +88,9 @@ it('keeps retained revision facts through a transient job refresh and clears the
     expect(transport.get.mock.calls.every(call => call[0] === 'job' || call[0] === 'runs')).toBe(true);
     // Refresh job reads the job record only; the session report is still the first bootstrap.
     expect(bootstrap).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole('button', { name: /start|select|reload|check/i })).toBeNull();
+    // The availability panel adds no controls; starting belongs to the separate start form.
+    const availability = within(screen.getByRole('region', { name: 'Workflow availability for this job' }));
+    expect(availability.queryByRole('button', { name: /start|select|reload|check/i })).toBeNull();
   } finally { session.dispose(); }
 });
 

@@ -10,6 +10,8 @@ import type { BrowserSession, RuntimeSnapshot } from '../session/session';
 import { useSession } from '../session/useSession';
 import { JobSummary } from '../jobs/JobSummary';
 import { WorkflowAvailability } from '../jobs/WorkflowAvailability';
+import { WorkflowLaunch } from '../jobs/WorkflowLaunch';
+import { useLocation } from 'preact-iso/router';
 import { GitRepositoryPanel } from '../jobs/GitRepositoryPanel';
 import { AcceptedWork } from '../jobs/AcceptedWork';
 import { receive } from '../shared/receiptTime';
@@ -27,6 +29,7 @@ import { focusSurvivingNotice, useDepartingFocus } from '../shared/departingFocu
 
 function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generation, route }: { jobId: string; basePath: string; runtime: RuntimeSnapshot; runtimeReceipt: ReceiptTime | undefined; session: BrowserSession; generation: number; route: RefObject<HTMLElement> }) {
   const { client } = usePrivateTransport(basePath);
+  const location = useLocation();
   const binding = useMemo(() => ({ client, basePath, jobId }), [client, basePath, jobId]);
   // `observed` is the issue number of the applied observation, so a recurring version still reads as a new one.
   const [stored, setStored] = useState<{ binding: typeof binding; data: Received<JobData> | null; observed: number; error: string; loading: boolean }>(
@@ -232,10 +235,12 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
       </dl>
       <p>{copy.completionIsAnAttemptOutcomeOnlyTheRecordedAcceptedRevision}</p>
       <p>{copy.theAttemptPageRetainsItsExactIdentityAsNewerWork}</p>
-      <p>{copy.startingExplorationReconstructionBuildsValidationOrRepairIsUnavailableIn}</p>
       <PanelBoundary name={panelBoundaryCopy.names.workflowAvailability}>
         <WorkflowAvailability runtime={runtime} job={job} attemptHistory={`${jobPath(basePath, job.jobId)}/runs`} {...(runtimeReceipt ? { receipt: runtimeReceipt } : {})} />
       </PanelBoundary>
+      <WorkflowLaunch key={job.jobId} job={job} runtime={runtime} basePath={basePath} session={session}
+        onRefresh={() => { setRefresh(value => value + 1); }}
+        onStarted={path => { if (location.url) location.route(path); else window.location.assign(path); }} onDeleted={markDeleted} />
       <GitRepositoryPanel job={job} capabilities={runtime.capabilities} basePath={basePath} session={session} onDeleted={markDeleted} />
       <a href={appPath(basePath, '/runtime')}>{copy.viewReportedWorkflowAvailability}</a>
       <JobOrganization job={job} client={client} basePath={basePath} session={session}

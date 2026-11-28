@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpExchange
 import decompengine.jobs.NewWorkflowAttempt
 import decompengine.jobs.WorkflowExecutionLimits
 import decompengine.jobs.WorkflowKind
+import decompengine.jobs.WorkflowLaunchSelection
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import kotlinx.serialization.json.*
@@ -48,7 +49,7 @@ internal class WebWorkflowStartController(
                 "IDEMPOTENCY_CONFLICT" -> throw WebAccessDenied(409, failure.code, "The request key was used for a different workflow start.")
                 "ACTIVE_RUN" -> throw WebAccessDenied(409, failure.code, "This job already has an active workflow attempt.")
                 "CAPACITY_UNAVAILABLE", "UPLOAD_CAPACITY" -> throw WebAccessDenied(429, "QUOTA_EXCEEDED", "Workflow admission is at capacity. Inspect current work before a new request.")
-                "WORKFLOW_UNAVAILABLE", "WORKFLOW_LIMITS_UNAVAILABLE", "HARNESS_UNAVAILABLE" ->
+                "WORKFLOW_UNAVAILABLE", "WORKFLOW_LIMITS_UNAVAILABLE", "HARNESS_UNAVAILABLE", "LAUNCH_SELECTION_UNAVAILABLE" ->
                     throw WebAccessDenied(503, "CAPABILITY_UNAVAILABLE", "The requested workflow, harness or limits are unavailable.")
                 // Prerequisite messages are fixed server vocabulary, never probe or exception text.
                 "WORKFLOW_PREREQUISITE_UNAVAILABLE" -> throw WebAccessDenied(503, "CAPABILITY_UNAVAILABLE",
@@ -85,15 +86,24 @@ internal class WebWorkflowStartController(
         val value = try { OracleJson.parse(bytes, StrictJsonLimits(MAX_BODY, MAX_BODY, 4, 32, 128, 2048, 32)) }
         catch (_: Exception) { throw WebAccessDenied(400, "MALFORMED_JSON", "The workflow start must be bounded strict JSON.") }
         val body = value as? JsonObject ?: invalid()
-        if (body.keys != setOf("workflow", "inputRevisionId", "harnessCapabilityId", "limits")) invalid()
+        val required = setOf("workflow", "inputRevisionId", "harnessCapabilityId", "limits")
+        if (body.keys != required && body.keys != required + "launchSelection") invalid()
         val workflow = WorkflowKind.entries.singleOrNull { it.wireName == text(body["workflow"]) } ?: invalid()
         val limits = body["limits"] as? JsonObject ?: invalid()
         if (limits.keys != setOf("wallClockMs", "idleMs", "maxOutputBytes", "maxToolCalls")) invalid()
         return try {
             NewWorkflowAttempt(workflow, WorkflowExecutionLimits(number(limits["wallClockMs"]), number(limits["idleMs"]),
                 number(limits["maxOutputBytes"]), number(limits["maxToolCalls"])),
-                nullableId(body["inputRevisionId"]), nullableId(body["harnessCapabilityId"]))
+                nullableId(body["inputRevisionId"]), nullableId(body["harnessCapabilityId"]),
+                launchSelection = if ("launchSelection" in body) selection(body["launchSelection"]) else null)
         } catch (_: IllegalArgumentException) { invalid() }
+    }
+
+    private fun selection(value: JsonElement?): WorkflowLaunchSelection {
+        val fields = value as? JsonObject ?: invalid()
+        if (fields.keys != setOf("capabilityId", "mode")) invalid()
+        return try { WorkflowLaunchSelection(text(fields["capabilityId"]), text(fields["mode"])) }
+        catch (_: IllegalArgumentException) { invalid() }
     }
 
     private fun text(value: JsonElement?): String = (value as? JsonPrimitive)?.takeIf { it.isString }?.content ?: invalid()

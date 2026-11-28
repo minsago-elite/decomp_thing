@@ -74,7 +74,7 @@ internal class WebRecoveryController(
         "ACTIVE_RUN" -> "This job already has active work."
         "INPUT_UNVERIFIED" -> "The attempt's input revision is no longer verified project evidence."
         "RESUME_UNSUPPORTED" -> "This workflow does not support checkpoint resume. Retry creates a new attempt instead."
-        "HARNESS_CHANGED" -> "The registered harness differs from the attempt's recorded harness; resume is unsafe."
+        "HARNESS_CHANGED" -> "The registered harness differs from the attempt's recorded harness; the attempt cannot be recovered with it."
         else -> "The attempt's checkpoint could not be verified for resume."
     }
 

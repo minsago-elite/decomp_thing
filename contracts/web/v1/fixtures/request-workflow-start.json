@@ -5,6 +5,10 @@
     "workflow": "reconstruct",
     "inputRevisionId": null,
     "harnessCapabilityId": "harness_acp",
+    "launchSelection": {
+      "capabilityId": "workflow-reconstruct-agent",
+      "mode": "agent"
+    },
     "limits": {
       "wallClockMs": "60000",
       "idleMs": "15000",

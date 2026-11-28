@@ -742,6 +742,16 @@
             }
           ]
         },
+        "launchSelection": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/workflowLaunchSelection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "terminalReason": {
           "anyOf": [
             {
@@ -2417,6 +2427,9 @@
             }
           ]
         },
+        "launchSelection": {
+          "$ref": "#/definitions/workflowLaunchSelection"
+        },
         "limits": {
           "$ref": "#/definitions/executionLimits"
         }
@@ -2426,6 +2439,27 @@
         "inputRevisionId",
         "harnessCapabilityId",
         "limits"
+      ],
+      "additionalProperties": false
+    },
+    "workflowLaunchSelection": {
+      "type": "object",
+      "properties": {
+        "capabilityId": {
+          "$ref": "#/definitions/id"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "tools",
+            "agent",
+            "evidence-only"
+          ]
+        }
+      },
+      "required": [
+        "capabilityId",
+        "mode"
       ],
       "additionalProperties": false
     },
@@ -5214,6 +5248,7 @@
         "ATTEMPT_SUPERSEDED",
         "ACTIVE_RUN",
         "WORKFLOW_UNAVAILABLE",
+        "HARNESS_CHANGED",
         "INPUT_UNVERIFIED",
         "UPLOAD_CAPACITY",
         "CAPACITY_UNAVAILABLE"

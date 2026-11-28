@@ -130,6 +130,10 @@
       "valid": true
     },
     {
+      "file": "fixtures/invalid-workflow-launch-selection.json",
+      "valid": false
+    },
+    {
       "file": "fixtures/request-workflow-cancel.json",
       "valid": true
     },
@@ -763,6 +767,10 @@
       "valid": true
     },
     {
+      "file": "fixtures/attempt-controls-retry-harness-changed.json",
+      "valid": true
+    },
+    {
       "file": "fixtures/run-retry.json",
       "valid": true
     },
@@ -1321,6 +1329,10 @@
     },
     {
       "file": "fixtures/invalid-launch-agent-contact.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-launch-mode-agent-contact.json",
       "valid": false
     },
     {

@@ -35,6 +35,9 @@ import { attemptOutcomeCopy as outcomeCopy, stopOutcomeCopy } from '../copy/atte
 import { QueuePosition, useQueueObservation } from '../jobs/QueuePosition';
 import { jobCopy } from '../copy/job';
 
+const launchModeCopy = { tools: copy.launchModeTools, agent: copy.launchModeAgent, 'evidence-only': copy.launchModeEvidenceOnly,
+} satisfies Record<NonNullable<RunData['launchSelection']>['mode'], string>;
+
 // Contracts decoded only by lazily loaded routes stay out of the initial bundle.
 registerContractExtension(lazyContractSchema);
 
@@ -109,6 +112,9 @@ function Details({ jobId, runId, basePath, session, view, navigation, onDeleted,
         <dt>{copy.attemptIdentity}</dt><dd><code>{run.runId}</code></dd>
         <dt>{copy.workflow}</dt><dd>{run.workflow}</dd><dt>{copy.attemptState}</dt><dd>{run.state}</dd>
         <dt>{copy.recordedHarnessCapability}</dt><dd><code>{run.harnessCapabilityId ?? copy.harnessCapabilityNotRecorded}</code></dd>
+        <dt>{copy.recordedLaunchOption}</dt><dd>{run.launchSelection ? <code>{run.launchSelection.capabilityId}</code> : copy.launchSelectionNotRecorded}</dd>
+        <dt>{copy.recordedLaunchMode}</dt><dd>{run.launchSelection ? displayMessage(launchModeCopy[run.launchSelection.mode], {
+          mode: <code>{run.launchSelection.mode}</code> }) : copy.launchSelectionNotRecorded}</dd>
         <dt>{copy.acceptance}</dt><dd>{run.acceptance}</dd>
         <dt>{copy.created}</dt><dd><time dateTime={run.createdAt} title={run.createdAt}>{formatExactTimestamp(run.createdAt)}</time></dd>
         <dt>{copy.started}</dt><dd>{run.startedAt ? <time dateTime={run.startedAt} title={run.startedAt}>{formatExactTimestamp(run.startedAt)}</time> : copy.notRecorded}</dd>
@@ -123,6 +129,8 @@ function Details({ jobId, runId, basePath, session, view, navigation, onDeleted,
       </dl>
       <p>{copy.completionAloneDoesNotEstablishAcceptedReconstructionAcceptanceBelongsTo}</p>
       <p>{copy.recordedHarnessBoundary}</p>
+      <p>{copy.recordedLaunchSelectionBoundary}</p>
+      {run.launchSelection?.mode === 'evidence-only' && <p role="note">{copy.recordedEvidenceOnlyLimitations}</p>}
       {run.previousRunId && <a href={runPath(basePath, jobId, run.previousRunId)}>{copy.openPreviousAttempt}</a>}
       {run.state === 'queued' && <QueuePosition key={`queue/${jobId}/${runId}/${run.version}`} jobId={jobId} runId={runId} basePath={basePath} observation={queueObservation} controlRef={queueControl} />}
       <h2>{copy.recordedLimits}</h2>

@@ -1,0 +1,20 @@
+{
+  "apiVersion": 1,
+  "kind": "workflowStartRequest",
+  "data": {
+    "workflow": "reconstruct",
+    "inputRevisionId": null,
+    "harnessCapabilityId": "harness_acp",
+    "launchSelection": {
+      "capabilityId": "workflow-reconstruct-agent",
+      "mode": "agent",
+      "fallback": true
+    },
+    "limits": {
+      "wallClockMs": "60000",
+      "idleMs": "15000",
+      "maxOutputBytes": "1048576",
+      "maxToolCalls": "16"
+    }
+  }
+}

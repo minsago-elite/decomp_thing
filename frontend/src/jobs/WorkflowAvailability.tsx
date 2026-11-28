@@ -4,7 +4,7 @@ import { jobCopy as copy } from '../copy/job';
 import type { RuntimeSnapshot } from '../session/session';
 import { message } from '../shared/messages';
 import { StateMark, capabilityTone } from '../shared/StateMark';
-import { reportedCapabilityFacts } from './capabilityFacts';
+import { launchStartable, reportedCapabilityFacts } from './capabilityFacts';
 
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 import type { ReceiptTime } from '../shared/receiptTime';
@@ -59,7 +59,7 @@ function inputPrerequisite(input: NonNullable<Capability['launch']>['input'], jo
   }
 }
 
-/** Display the last authenticated report. It cannot admit work or select a harness. */
+/** Display the last authenticated report. It neither admits work nor selects a harness; the start form does. */
 export function WorkflowAvailability({ runtime, receipt, job, attemptHistory }: {
   runtime: RuntimeSnapshot; receipt?: ReceiptTime; job?: JobFacts;
   /** Existing attempt-history route. Each listed attempt's page shows its Result revision. */
@@ -83,10 +83,13 @@ export function WorkflowAvailability({ runtime, receipt, job, attemptHistory }: 
     <ul class="availability-list" aria-label={copy.workflowAvailability}>
       {workflows.map(workflow => {
         const capabilities = runtime.capabilities.filter(capability => capability.workflows.includes(workflow));
+        const launchable = capabilities.filter(capability => capability.launch != null);
         return <li key={workflow}>
           <h4>{labels[workflow]}</h4>
           <div>
-            <p><StateMark tone="blocked">{copy.startUnavailable}</StateMark></p>
+            {launchable.length === 0 ? <p><StateMark tone="blocked">{copy.startUnavailable}</StateMark></p>
+              : launchable.some(launchStartable) ? <p><StateMark tone="settled">{copy.startReady}</StateMark></p>
+              : <p><StateMark tone="blocked">{copy.startNotReady}</StateMark></p>}
             {capabilities.length === 0 ? <p>{copy.noCapabilityForThisWorkflow}</p> : <ul class="capability-reports">
               {capabilities.map(capability => <CapabilityReport key={capability.id} capability={capability} job={job} attemptHistory={attemptHistory} />)}
             </ul>}
