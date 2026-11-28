@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -175,6 +176,14 @@ class SystemTemporaryDirectoryCheckTest(unittest.TestCase):
         self.assertTrue(any(line.startswith("create hsperfdata_")
                             for line in (report / "events.txt").read_text().splitlines()), result.stdout)
 
+    def test_jdk_version_probes_with_perf_data_disabled_leave_no_events(self):
+        # The same probes scripts/ci-prepare-oracle-runtime.sh runs inside the check in CI.
+        result, report = checked("selftest-jdk-probes", ["sh", "-c",
+                                 "java -XX:-UsePerfData -version && javac -J-XX:-UsePerfData -version"])
+        self.assertEqual(0, result.returncode, result.stdout)
+        self.assertEqual("", (report / "events.txt").read_text())
+        self.assertEqual("clean", self.summary(report)["result"])
+
     def test_preserves_the_command_failure_status_and_writes_one_report_per_invocation(self):
         first = checked("selftest-status", ["sh", "-c", "exit 7"])
         second = checked("selftest-status", ["true"])
@@ -182,6 +191,26 @@ class SystemTemporaryDirectoryCheckTest(unittest.TestCase):
         self.assertEqual(0, second[0].returncode)
         self.assertNotEqual(first[1], second[1])
         self.assertEqual(7, self.summary(first[1])["commandExitStatus"])
+
+
+class CheckedWorkflowScriptTest(unittest.TestCase):
+    """Scripts that CI runs inside the check must not start a JDK tool that writes hsperfdata."""
+
+    # A command line that starts a JDK tool, directly or through exec/sudo, by name or path.
+    JDK_TOOL = re.compile(r'^\s*(?:exec\s+|sudo\s+(?:-\S+\s+)*)?"?(?:\S*/)?'
+                          r'(?:java|javac|jar|jshell|keytool|jlink|jpackage)"?(?:\s|$)')
+
+    def test_direct_jdk_tool_calls_in_checked_ci_scripts_disable_perf_data(self):
+        workflow = (REPOSITORY / ".github/workflows/ci.yml").read_text()
+        scripts = set(re.findall(r"check-system-temp-isolation\.py[^\n]*? -- (?:bash )?(scripts/[\w.-]+)", workflow))
+        self.assertTrue({"scripts/ci-prepare-oracle-runtime.sh", "scripts/ci-prepare-bundled-ghidra-runtime.sh",
+                         "scripts/ci.sh"} <= scripts, scripts)
+        for script in sorted(scripts):
+            for number, line in enumerate((REPOSITORY / script).read_text().splitlines(), 1):
+                if line.lstrip().startswith("#") or not self.JDK_TOOL.search(line):
+                    continue
+                self.assertRegex(line, r"(?:^|\s)(?:-J)?-XX:-UsePerfData\b",
+                                 f"{script}:{number} starts a JDK tool without -XX:-UsePerfData")
 
 
 class GradleBuildTemporaryDirectoryTest(unittest.TestCase):

@@ -248,7 +248,11 @@ Limits:
 In the Kotlin CI job, the first Gradle builds run through the check: the oracle runtime
 and bundled Ghidra preparation. So do the core-main and core-oracle `scripts/ci.sh` runs,
 which together form `-PciTestShard=core`. Each job uploads `build/system-temp-isolation`
-as the `system-temp-isolation-<shard>` artifact. `scripts/test-gradle-temp-isolation.py`
+as the `system-temp-isolation-<shard>` artifact. Scripts that run inside the check pass
+`-XX:-UsePerfData` (`-J-XX:-UsePerfData` for `javac`) to every JDK tool they start
+directly. The check deliberately sets no `JDK_JAVA_OPTIONS` or `JAVA_TOOL_OPTIONS`: either
+would hide the leak the check exists to report, add a "Picked up" line to the stderr of
+every JVM in the observed process tree, and is stripped by the helper builders anyway. `scripts/test-gradle-temp-isolation.py`
 covers:
 
 - the wrapper hook and its regeneration;
