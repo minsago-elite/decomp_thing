@@ -18,26 +18,23 @@ internal class AcpProviderUpstreamRefusedException(val reason: AcpProviderRouteR
 
 /**
  * The only upstream TLS client for an approved provider policy. Its [SSLContext] uses a PKIX trust
- * manager initialized from the JVM platform trust store, with no caller-supplied trust manager,
- * key manager or hostname verifier. Every socket verifies the policy hostname (HTTPS endpoint
- * identification), sends it as SNI, and negotiates only TLS 1.3 or 1.2.
+ * manager initialized from the JVM platform trust store (the standard `javax.net.ssl.trustStore`
+ * configuration), with no caller-supplied trust store, trust manager, key manager or hostname
+ * verifier. Every socket verifies the policy hostname (HTTPS endpoint identification), sends it as
+ * SNI, and negotiates only TLS 1.3 or 1.2.
  *
- * The #959 broker connects with [connect] to one numeric address that the #1510 resolver returned
- * and [AcpProviderRouting.destinationRefusal] admitted. The policy hostname, never the address,
- * remains the TLS identity.
+ * [connect] is the only entry point. The #959 broker passes one numeric address that the #1510
+ * resolver returned; [connect] re-applies [AcpProviderRouting.destinationRefusal] and connects
+ * directly. The policy hostname, never the address, remains the TLS identity.
  */
-internal class AcpProviderUpstreamTls private constructor(
-    private val policy: AcpProviderTransportPolicy.Approved,
-    trustAnchors: KeyStore?,
-) {
-    // Built here, not passed in: a JVM caller of the synthetic constructor can only choose anchors.
+internal class AcpProviderUpstreamTls private constructor(private val policy: AcpProviderTransportPolicy.Approved) {
     private val context: SSLContext
 
     init {
         check(policy.tlsVerification == AcpProviderTlsVerification.PLATFORM_TRUST_HOSTNAME_VERIFIED) {
             "unsupported provider TLS verification mode"
         }
-        val trust = TrustManagerFactory.getInstance("PKIX").apply { init(trustAnchors) }
+        val trust = TrustManagerFactory.getInstance("PKIX").apply { init(null as KeyStore?) }
         context = SSLContext.getInstance("TLS").apply { init(null, trust.trustManagers, null) }
     }
 
@@ -54,8 +51,8 @@ internal class AcpProviderUpstreamTls private constructor(
         }
     }
 
-    /** Layers verified TLS over an already connected socket. The socket is closed on failure. */
-    fun handshake(connected: Socket, timeout: Duration): SSLSocket {
+    /** Layers verified TLS over the socket [connect] opened. The socket is closed on failure. */
+    private fun handshake(connected: Socket, timeout: Duration): SSLSocket {
         try {
             require(connected.isConnected && !connected.isClosed) { "provider upstream socket is not connected" }
             connected.soTimeout = positiveMillis(timeout)
@@ -87,15 +84,8 @@ internal class AcpProviderUpstreamTls private constructor(
     }
 
     companion object {
-        /** Production trust: the JVM platform PKIX trust store, nothing else. */
-        fun platform(policy: AcpProviderTransportPolicy.Approved): AcpProviderUpstreamTls = AcpProviderUpstreamTls(policy, null)
-
-        /**
-         * Test-only trust anchors for credential-free handshake fixtures. Validation is still PKIX
-         * with HTTPS hostname verification; only the anchor set differs. Production code uses [platform].
-         */
-        internal fun withTestTrustAnchors(policy: AcpProviderTransportPolicy.Approved, anchors: KeyStore): AcpProviderUpstreamTls =
-            AcpProviderUpstreamTls(policy, anchors)
+        /** The JVM platform PKIX trust store, nothing else. */
+        fun platform(policy: AcpProviderTransportPolicy.Approved): AcpProviderUpstreamTls = AcpProviderUpstreamTls(policy)
     }
 }
 

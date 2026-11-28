@@ -76,6 +76,9 @@ internal object AcpProviderRouting {
         if (names.count { it == "host" } != 1 || names.count { it == "content-length" } > 1) {
             return refused(AcpProviderRouteRefusal.MALFORMED_REQUEST)
         }
+        // Validated, then discarded: the upstream Host always comes from the policy.
+        val host = request.fields.single { (name, _) -> name.equals("host", ignoreCase = true) }.second
+        if (!isValidHostField(host)) return refused(AcpProviderRouteRefusal.MALFORMED_REQUEST)
         // Only identity-encoded bodies delimited by one Content-Length are supported.
         if (names.any { it in UNSUPPORTED_FRAMING_FIELDS }) return refused(AcpProviderRouteRefusal.REQUEST_FRAMING_UNSUPPORTED)
         if (names.any(::isRoutingOverrideField)) return refused(AcpProviderRouteRefusal.ROUTING_OVERRIDE_REFUSED)
@@ -176,6 +179,58 @@ private fun parseRequestHead(bounds: AcpProviderTransportBounds, head: ByteArray
     return HeadParse.Parsed(method, target, fields)
 }
 
+/**
+ * RFC 9112 section 3.2 Host = uri-host [ ":" port ] with the RFC 3986 grammar. This is stricter than
+ * the grammar in three ways: the host must be nonempty (the relay is always addressed by an
+ * authority), a present port must be 1 to 5 digits no greater than 65535, and IP-literals must be
+ * IPv6address (IPvFuture and zone identifiers are refused).
+ */
+private fun isValidHostField(value: String): Boolean {
+    val port: String?
+    if (value.startsWith('[')) {
+        val close = value.indexOf(']')
+        if (close < 0 || parseIpv6Literal(value.substring(1, close)) == null) return false
+        val rest = value.substring(close + 1)
+        port = when {
+            rest.isEmpty() -> null
+            rest.startsWith(':') -> rest.substring(1)
+            else -> return false
+        }
+    } else {
+        val colon = value.indexOf(':')
+        if (colon >= 0 && value.indexOf(':', colon + 1) >= 0) return false
+        val host = if (colon >= 0) value.substring(0, colon) else value
+        if (!isRegName(host)) return false
+        port = if (colon >= 0) value.substring(colon + 1) else null
+    }
+    return port == null || port.length in 1..5 && port.all { it in '0'..'9' } && port.toInt() <= 65_535
+}
+
+/** RFC 3986 reg-name = *( unreserved / pct-encoded / sub-delims ), required nonempty here. */
+private fun isRegName(host: String): Boolean {
+    if (host.isEmpty()) return false
+    var index = 0
+    while (index < host.length) {
+        val character = host[index]
+        when {
+            character == '%' -> {
+                if (index + 2 >= host.length || !isHexDigit(host[index + 1]) || !isHexDigit(host[index + 2])) return false
+                index += 3
+                continue
+            }
+            character in 'a'..'z' || character in 'A'..'Z' || character in '0'..'9' || character in REG_NAME_SYMBOLS -> Unit
+            else -> return false
+        }
+        index++
+    }
+    return true
+}
+
+// unreserved punctuation "-._~" plus sub-delims "!$&'()*+,;="
+private const val REG_NAME_SYMBOLS = "-._~!$&'()*+,;="
+
+private fun isHexDigit(character: Char): Boolean = character in '0'..'9' || character in 'a'..'f' || character in 'A'..'F'
+
 private fun isRoutingOverrideField(lowercaseName: String): Boolean =
     lowercaseName in ROUTING_OVERRIDE_FIELDS || ROUTING_OVERRIDE_FIELD_PREFIXES.any(lowercaseName::startsWith)
 
@@ -185,64 +240,4 @@ private fun requestsProtocolUpgrade(fields: List<Pair<String, String>>): Boolean
         "connection" -> value.split(',').any { it.trim(' ', '\t').equals("upgrade", ignoreCase = true) }
         else -> false
     }
-}
-
-private enum class ProviderAddressClass { PUBLIC, PRIVATE, FORBIDDEN }
-
-private fun classifyProviderAddress(address: InetAddress, translation: AcpProviderAddressTranslation): ProviderAddressClass {
-    val bytes = address.address
-    return when (bytes.size) {
-        4 -> classifyIpv4(bytes)
-        16 -> classifyIpv6(bytes, translation)
-        else -> ProviderAddressClass.FORBIDDEN
-    }
-}
-
-/** IANA IPv4 special-purpose registry entries are refused; RFC 1918 and shared space are private. */
-private fun classifyIpv4(bytes: ByteArray): ProviderAddressClass {
-    val a = bytes[0].toInt() and 0xff
-    val b = bytes[1].toInt() and 0xff
-    val c = bytes[2].toInt() and 0xff
-    return when {
-        a == 10 || a == 172 && b in 16..31 || a == 192 && b == 168 || a == 100 && b in 64..127 -> ProviderAddressClass.PRIVATE
-        a == 0 || a == 127 || a >= 224 || a == 169 && b == 254 || a == 198 && (b == 18 || b == 19) ||
-            a == 192 && (b == 0 && (c == 0 || c == 2) || b == 31 && c == 196 || b == 52 && c == 193 ||
-                b == 88 && c == 99 || b == 175 && c == 48) ||
-            a == 198 && b == 51 && c == 100 || a == 203 && b == 0 && c == 113 ->
-            ProviderAddressClass.FORBIDDEN
-        else -> ProviderAddressClass.PUBLIC
-    }
-}
-
-/**
- * Public IPv6 means an RIR-allocated global unicast block outside the IANA special-purpose
- * registry. Unique-local space is private. Everything else, including reserved space inside
- * 2000::/3, 6to4, Teredo, ORCHID, benchmarking, documentation, AS112, discard and local-use NAT64,
- * is refused. The well-known NAT64 prefix is admitted only when the operator enabled it and the
- * embedded IPv4 address is public; it is never treated as private.
- */
-private fun classifyIpv6(bytes: ByteArray, translation: AcpProviderAddressTranslation): ProviderAddressClass {
-    val word = IntArray(8) { ((bytes[it * 2].toInt() and 0xff) shl 8) or (bytes[it * 2 + 1].toInt() and 0xff) }
-    // An IPv4-mapped address is an IPv4 destination on the wire.
-    if ((0..4).all { word[it] == 0 } && word[5] == 0xffff) return classifyIpv4(bytes.copyOfRange(12, 16))
-    if (word[0] == 0x0064 && word[1] == 0xff9b && (2..5).all { word[it] == 0 }) {
-        val embedded = classifyIpv4(bytes.copyOfRange(12, 16))
-        return if (translation == AcpProviderAddressTranslation.WELL_KNOWN_NAT64 && embedded == ProviderAddressClass.PUBLIC) {
-            ProviderAddressClass.PUBLIC
-        } else ProviderAddressClass.FORBIDDEN
-    }
-    if (word[0] and 0xfe00 == 0xfc00) return ProviderAddressClass.PRIVATE
-    val specialPurpose = word[0] == 0x2001 && (word[1] < 0x0200 || word[1] == 0x0db8) ||
-        word[0] == 0x2620 && word[1] == 0x004f && word[2] == 0x8000
-    return if (!specialPurpose && isAllocatedGlobalUnicast(word[0], word[1])) ProviderAddressClass.PUBLIC else ProviderAddressClass.FORBIDDEN
-}
-
-/** IANA IPv6 global unicast blocks delegated to regional registries (excluding 2002::/16 6to4). */
-private fun isAllocatedGlobalUnicast(first: Int, second: Int): Boolean = when (first) {
-    0x2001 -> true
-    0x2003 -> second < 0x4000
-    in 0x2400..0x240f, in 0x2600..0x260f, in 0x2630..0x263f, in 0x2800..0x280f,
-    in 0x2a00..0x2a1f, in 0x2c00..0x2c0f -> true
-    0x2610, 0x2611, 0x2620, 0x2621 -> true
-    else -> false
 }

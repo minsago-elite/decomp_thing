@@ -165,6 +165,25 @@ class AcpProviderRoutingTest {
     }
 
     @Test
+    fun `the Host field must follow the uri-host and port grammar before it is discarded`() {
+        listOf(
+            "relay", "127.0.0.1:41000", "[::1]:41000", "[2001:db8::1]", "[::ffff:127.0.0.1]:1", "[1:2:3:4:5:6:7:8]",
+            "a-b.example", "x%41y", "host:65535", "host:0", "sub!$&'()*+,;=delims", "1.2.3.256", "under_score~",
+        ).forEach { host ->
+            val routed = assertIs<AcpProviderRouteDecision.Routed>(AcpProviderRouting.route(policy, head(fields = listOf("Host" to host, "Content-Length" to "2"))), host)
+            assertEquals("chatgpt.com", routed.upstreamHeaders().first { it.first == "Host" }.second)
+        }
+        listOf(
+            "", "relay:", "relay:65536", "relay:123456", "relay:-1", "relay:1:2", "relay: 1", ":41000", "[::1", "::1", "[::1]x",
+            "[::1]:", "[::1]:99999", "[]", "[v1.x]", "[fe80::1%eth0]", "[fe80::1%25eth0]", "[1::2::3]", "[12345::]",
+            "[1:2:3:4:5:6:7:8:9]", "[1:2:3:4:5:6:7]", "[::1.2.3.256]", "[::01.2.3.4]", "[1.2.3.4]", "[:1::]", "[1:::2]",
+            "re lay", "re\tlay", "relay/path", "user@relay", "relay?x", "relay#x", "%zz", "%4", "relay%", "\"relay\"", "<relay>",
+        ).forEach { host ->
+            assertRefused(AcpProviderRouteRefusal.MALFORMED_REQUEST, AcpProviderRouting.route(policy, head(fields = listOf("Host" to host, "Content-Length" to "2"))), host)
+        }
+    }
+
+    @Test
     fun `the head byte bound counts the request line field lines and terminator exactly`() {
         val exact = head(fields = listOf("Host" to "r", "Content-Length" to "1"))
         val bounded = approved("maximumHeaderBytes" to exact.size.toString(), "maximumHeaderFields" to "2")
@@ -194,6 +213,28 @@ class AcpProviderRoutingTest {
             "104.18.32.47", "8.8.8.8", "1.1.1.1", "2606:4700::6812:202f", "2001:4860:4860::8888", "2a00:1450:4001::200e",
             "2400:cb00::1", "2800:3f0::1", "2c0f:fb50::1", "2003:de::1", "2610:a1::1", "2620:fe::fe", "2630::1", "2a10::1",
         ).forEach { assertNull(AcpProviderRouting.destinationRefusal(policy, listOf(address(it))), it) }
+    }
+
+    @Test
+    fun `registry block boundaries admit allocated space and refuse its unallocated and special neighbours`() {
+        val six = ":ffff".repeat(6)
+        val seven = ":ffff".repeat(7)
+        val admitted = listOf(
+            "2410::", "241f$seven", "2c00::", "2c0f$seven", "2001:200::", "2001:e00::", "2001:fff$six",
+            "2001:1200::", "2001:4dff$six", "2001:5000::", "2001:5fff$six", "2001:8000::", "2001:bfff$six",
+            "2003::", "2003:3fff$six", "2610::", "2610:1ff$six", "2620::", "2620:1ff$six", "2630::",
+            "2001:db7$six", "2001:db9::", "2620:4f:7fff:ffff:ffff:ffff:ffff:ffff", "2620:4f:8001::",
+        )
+        admitted.forEach { assertNull(AcpProviderRouting.destinationRefusal(policy, listOf(address(it))), it) }
+        val refused = listOf(
+            "2420::", "2c10::", "2bff$seven", "2001:1000::", "2001:11ff$six", "2001:4e00::", "2001:4fff$six",
+            "2001:6000::", "2001:7fff$six", "2001:c000::", "2001:ffff$six", "2001:1ff$six", "2003:4000::",
+            "2610:200::", "2611$seven", "2612::", "2620:200::", "2621$seven", "2622::", "262f$seven", "2d00::", "3fff::", "2001:db8::", "2001:db8$six",
+            "2620:4f:8000::", "2620:4f:8000:ffff:ffff:ffff:ffff:ffff", "2002::", "2002$seven",
+        )
+        refused.forEach {
+            assertEquals(AcpProviderRouteRefusal.DESTINATION_ADDRESS_REFUSED, AcpProviderRouting.destinationRefusal(policy, listOf(address(it))), it)
+        }
     }
 
     @Test
