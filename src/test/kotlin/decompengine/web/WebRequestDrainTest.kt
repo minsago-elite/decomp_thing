@@ -81,12 +81,19 @@ class WebRequestDrainTest {
         drain.enterAudit()
         now = 150
         assertNull(drain.decide())
-        // A second stop call begins while the first waits: nothing is reset.
+        // The append ends while the request is still active (unwinding); a reset decision would now be ACTIVE.
+        now = 200
+        drain.exitAudit()
+        // An overlapping stop call begins while the first waits: neither the deadline nor the decision is reset.
         now = 600
         drain.begin(requestTimeoutNanos = 100, auditTimeoutNanos = 1000)
         assertNull(drain.decide())
         assertEquals(400, drain.waitNanos())
         now = 1000
+        assertEquals(WebRequestDrain.Outcome.AUDIT_PENDING, drain.decide())
+        // A later stop call shares the same outcome.
+        now = 1500
+        drain.begin(requestTimeoutNanos = 100, auditTimeoutNanos = 1000)
         assertEquals(WebRequestDrain.Outcome.AUDIT_PENDING, drain.decide())
     }
 }

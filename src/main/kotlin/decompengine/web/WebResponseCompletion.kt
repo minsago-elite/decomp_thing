@@ -21,6 +21,9 @@ internal class WebResponseCompletion(private val delegate: HttpExchange) : HttpE
     @Volatile private var failed = false
     @Volatile private var fixedLengthBody = false
     @Volatile private var completed = false
+    // Set before delegating an exchange close: the JDK then marks the body closed and swallows a short-body
+    // failure, so a later body close would wrongly look clean. Completion established earlier is kept.
+    @Volatile private var exchangeClosed = false
     private var body: TrackedBody? = null
 
     private inline fun <T> tracked(block: () -> T): T = try { block() } catch (failure: Throwable) { failed = true; throw failure }
@@ -47,7 +50,7 @@ internal class WebResponseCompletion(private val delegate: HttpExchange) : HttpE
         override fun flush() = tracked { output.flush() }
         override fun close() {
             tracked { output.close() }
-            if (fixedLengthBody && !failed) completed = true
+            if (fixedLengthBody && !failed && !exchangeClosed) completed = true
         }
     }
 
@@ -56,7 +59,10 @@ internal class WebResponseCompletion(private val delegate: HttpExchange) : HttpE
     override fun getRequestURI(): URI = delegate.requestURI
     override fun getRequestMethod(): String = delegate.requestMethod
     override fun getHttpContext(): HttpContext = delegate.httpContext
-    override fun close() = delegate.close()
+    override fun close() {
+        exchangeClosed = true
+        delegate.close()
+    }
     override fun getRequestBody(): InputStream = delegate.requestBody
     override fun getResponseCode(): Int = delegate.responseCode
     override fun getRemoteAddress(): InetSocketAddress = delegate.remoteAddress

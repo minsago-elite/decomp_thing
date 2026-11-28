@@ -32,9 +32,12 @@ class WebAuditRecorderTest {
             append()
             scoped += log.read().entries.size - before
         }
+        // Counted down after recorder.around exits, so every append and its scope callback has finished.
+        val handled = java.util.concurrent.CountDownLatch(6)
+        val closedBeforeBodyCompleted = java.util.concurrent.atomic.AtomicReference<Boolean>()
         http.createContext("/") { received ->
             val exchange = WebResponseCompletion(received)
-            recorder.around(exchange, WebAuditAction.SUPPORT_EXPORT, WebAuditTarget()) {
+            try { recorder.around(exchange, WebAuditAction.SUPPORT_EXPORT, WebAuditTarget()) {
                 when (exchange.requestURI.path) {
                     "/sent" -> { exchange.sendResponseHeaders(200, 2); exchange.responseBody.use { it.write("ok".toByteArray()) } }
                     // Headers are sent, then the body write fails; the dispatcher swallows it and returns normally.
@@ -43,6 +46,14 @@ class WebAuditRecorderTest {
                         exchange.responseBody.use { it.write("ok".toByteArray()) }
                     } catch (_: java.io.IOException) { exchange.close() }
                     // A chunked body completes normally, but its close cannot confirm the terminating chunk.
+                    // The exchange is closed before the declared body is written: the JDK swallows the short
+                    // body, so the later body close returns normally but must not confirm completion.
+                    "/closed-before-body" -> {
+                        exchange.sendResponseHeaders(200, 10)
+                        exchange.close()
+                        exchange.responseBody.close()
+                        closedBeforeBodyCompleted.set(WebResponseCompletion.completed(exchange))
+                    }
                     "/chunked" -> { exchange.sendResponseHeaders(200, 0); exchange.responseBody.use { it.write("ok".toByteArray()) } }
                     // The response completes, then the handler throws: a failed handler is never scoped.
                     "/thrown-after-response" -> {
@@ -52,7 +63,7 @@ class WebAuditRecorderTest {
                     // The failed path throws before any response is sent.
                     else -> error("handler failed before responding")
                 }
-            }
+            } } finally { handled.countDown() }
         }
         val client = HttpClient.newHttpClient()
         // POST: the client retries an idempotent GET once its connection is reset by a failed handler.
@@ -68,9 +79,10 @@ class WebAuditRecorderTest {
             assertTrue(post("/failed").let { it.isFailure || it.getOrThrow() >= 500 })
             assertEquals(200, post("/chunked").getOrThrow())
             assertEquals(200, post("/thrown-after-response").getOrThrow())
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
-            while (log.read().entries.size < 5 && System.nanoTime() < deadline) Thread.sleep(10)
-            assertEquals(5, log.read().entries.size)
+            post("/closed-before-body") // The client sees a reset; only the server-side audit scope matters.
+            assertTrue(handled.await(10, TimeUnit.SECONDS), "every handler finished its audit")
+            assertEquals(6, log.read().entries.size)
+            assertEquals(false, closedBeforeBodyCompleted.get(), "a body closed after its exchange closed is not completion")
             assertEquals(listOf(1), scoped.toList(), "only the completed response's append is post-response work")
             incomplete.cancel(true)
         } finally {
