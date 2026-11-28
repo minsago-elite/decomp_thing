@@ -1,5 +1,6 @@
 package decompengine.builtin
 
+import com.fasterxml.jackson.core.JsonGenerator
 import decompengine.agent.*
 import decompengine.builtin.provider.*
 import kotlinx.serialization.json.*
@@ -8,6 +9,71 @@ import java.security.MessageDigest
 import java.util.Collections
 
 data class BuiltinContextToolAudit(val callId: String, val tool: String, val resultSha256: String, val failed: Boolean)
+
+private fun writeEvidencePage(
+    out: JsonGenerator,
+    item: AgentContextInput,
+    sha256: String,
+    offset: Int,
+    text: String,
+    nextOffset: Int?,
+) {
+    out.writeStartObject(); out.writeStringField("id", item.id); out.writeStringField("mediaType", item.mediaType)
+    out.writeFieldName("description"); item.description?.let(out::writeString) ?: out.writeNull()
+    out.writeStringField("source", "immutable-request-context"); out.writeStringField("sha256", sha256)
+    out.writeNumberField("offset", offset); out.writeStringField("text", text)
+    out.writeFieldName("nextOffset"); nextOffset?.let { out.writeNumber(it) } ?: out.writeNull()
+    out.writeEndObject()
+}
+
+/**
+ * Confirm that an omitted input can be recovered through at least one result-bounded read page.
+ * The empty page below uses the largest valid offset widths; adding the largest encoded single
+ * code point proves that readEvidence can always shrink its page to a retrievable unit.
+ */
+internal fun canReadAnyEvidencePage(
+    input: AgentContextInput,
+    sha256: String,
+    maximumResultBytes: Int,
+    control: BuiltinExecutionControl,
+): Boolean {
+    if (maximumResultBytes <= 0) return false
+    val content = input.content
+    val base = try {
+        boundedProviderJson(maximumResultBytes) { out ->
+            writeEvidencePage(out, input, sha256, content.length, "", content.length.takeIf { content.isNotEmpty() })
+        }
+    } catch (failure: ModelProviderException) {
+        if (failure.kind == ModelFailureKind.RESOURCE_EXHAUSTED) return false
+        throw failure
+    }
+    if (content.isEmpty()) return true
+
+    var index = 0
+    var maximumCodePointBytes = 0
+    while (index < content.length) {
+        if ((index and 0x3fff) == 0) control.checkpoint()
+        val character = content[index]
+        val encodedBytes = when {
+            character == '"' || character == '\\' -> 2
+            character == '\b' || character == '\t' || character == '\n' || character == '\u000c' || character == '\r' -> 2
+            character < ' ' -> 6
+            character.isHighSurrogate() -> {
+                if (index + 1 >= content.length || !content[index + 1].isLowSurrogate()) return false
+                index++
+                12
+            }
+            character.isLowSurrogate() -> return false
+            character.code < 0x80 -> 1
+            character.code < 0x800 -> 2
+            else -> 3
+        }
+        maximumCodePointBytes = maxOf(maximumCodePointBytes, encodedBytes)
+        index++
+    }
+    val terminalNullReserve = maxOf(0, 4 - content.length.toString().length)
+    return maximumCodePointBytes <= maximumResultBytes - base.size - terminalNullReserve
+}
 
 /** Read-only views of the authority-supplied virtual workspace and immutable request evidence. */
 internal class BuiltinCapturedContextTools(
@@ -79,8 +145,42 @@ internal class BuiltinCapturedContextTools(
         val offset = arguments.getValue("offset").jsonPrimitive.int
         val items = evidence.values.sortedBy { it.id }
         if (offset !in 0..items.size) return BuiltinToolResult("invalid evidence page offset", failed = true)
-        val page = items.drop(offset).take(PAGE_ENTRIES)
-        return json { out ->
+        val remaining = items.size - offset
+        val maximumEntries = minOf(PAGE_ENTRIES, remaining)
+        var low = 1
+        var high = maximumEntries
+        var fittingPage: ByteArray? = null
+        while (low <= high) {
+            val entryCount = low + (high - low) / 2
+            try {
+                val page = items.subList(offset, offset + entryCount)
+                val encoded = evidenceListPage(items.size, offset, page, control)
+                fittingPage = encoded
+                low = entryCount + 1
+            } catch (failure: ModelProviderException) {
+                if (failure.kind != ModelFailureKind.RESOURCE_EXHAUSTED) throw failure
+                high = entryCount - 1
+            }
+        }
+        fittingPage?.let { return BuiltinToolResult(it.decodeToString()) }
+        if (maximumEntries == 0) {
+            try {
+                return BuiltinToolResult(evidenceListPage(items.size, offset, emptyList(), control).decodeToString())
+            } catch (failure: ModelProviderException) {
+                if (failure.kind != ModelFailureKind.RESOURCE_EXHAUSTED) throw failure
+            }
+        }
+        val message = if (maximumEntries == 0) "evidence inventory page exceeds the configured result limit"
+        else "next evidence entry exceeds the configured result limit"
+        return BuiltinToolResult(message, failed = true)
+    }
+
+    private fun evidenceListPage(
+        totalEntries: Int,
+        offset: Int,
+        page: List<AgentContextInput>,
+        control: BuiltinExecutionControl,
+    ): ByteArray = boundedProviderJson(maximumResultBytes) { out ->
             out.writeStartObject(); out.writeArrayFieldStart("evidence")
             page.forEach { item ->
                 control.checkpoint()
@@ -88,11 +188,10 @@ internal class BuiltinCapturedContextTools(
                 out.writeFieldName("description"); item.description?.let(out::writeString) ?: out.writeNull()
                 out.writeStringField("sha256", hash(item.content)); out.writeNumberField("utf8Bytes", item.content.toByteArray().size); out.writeEndObject()
             }
-            out.writeEndArray(); out.writeNumberField("totalEntries", items.size)
-            out.writeFieldName("nextOffset"); if (offset + page.size < items.size) out.writeNumber(offset + page.size) else out.writeNull()
+            out.writeEndArray(); out.writeNumberField("totalEntries", totalEntries)
+            out.writeFieldName("nextOffset"); if (offset + page.size < totalEntries) out.writeNumber(offset + page.size) else out.writeNull()
             out.writeEndObject()
         }
-    }
 
     private fun readEvidence(arguments: JsonObject, control: BuiltinExecutionControl): BuiltinToolResult {
         val item = evidence[arguments.getValue("id").jsonPrimitive.content]
@@ -100,6 +199,14 @@ internal class BuiltinCapturedContextTools(
         val offset = arguments.getValue("offset").jsonPrimitive.int
         if (offset !in 0..item.content.length || (offset < item.content.length && item.content[offset].isLowSurrogate()))
             return BuiltinToolResult("invalid evidence text offset", failed = true)
+        if (item.content.isEmpty()) {
+            return try {
+                BuiltinToolResult(evidencePage(item, 0, 0).decodeToString())
+            } catch (failure: ModelProviderException) {
+                if (failure.kind != ModelFailureKind.RESOURCE_EXHAUSTED) throw failure
+                BuiltinToolResult("evidence page exceeds the configured result limit", failed = true)
+            }
+        }
         var end = minOf(item.content.length, offset + PAGE_CHARACTERS)
         if (end < item.content.length && item.content[end - 1].isHighSurrogate()) end--
         control.checkpoint()
@@ -119,13 +226,8 @@ internal class BuiltinCapturedContextTools(
     }
 
     private fun evidencePage(item: AgentContextInput, offset: Int, end: Int) = boundedProviderJson(maximumResultBytes) { out ->
-            out.writeStartObject(); out.writeStringField("id", item.id); out.writeStringField("mediaType", item.mediaType)
-            out.writeFieldName("description"); item.description?.let(out::writeString) ?: out.writeNull()
-            out.writeStringField("source", "immutable-request-context"); out.writeStringField("sha256", hash(item.content))
-            out.writeNumberField("offset", offset); out.writeStringField("text", item.content.substring(offset, end))
-            out.writeFieldName("nextOffset"); if (end < item.content.length) out.writeNumber(end) else out.writeNull()
-            out.writeEndObject()
-        }
+        writeEvidencePage(out, item, hash(item.content), offset, item.content.substring(offset, end), end.takeIf { it < item.content.length })
+    }
 
     private fun previousCodePointBoundary(value: String, end: Int, minimum: Int): Int {
         var candidate = end - 1
