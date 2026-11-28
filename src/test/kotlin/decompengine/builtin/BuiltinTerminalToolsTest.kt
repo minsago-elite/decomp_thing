@@ -152,6 +152,11 @@ class BuiltinTerminalToolsTest {
             assertTrue(evidence.cleanupComplete)
             assertEquals(AgentStopReason.CANCELLED, receipt.requireResult().stopReason)
             val audit = dispatcher.terminalAudit()
+            val auditReasons = audit.joinToString { "${it.outcome.name}/${it.reason.name}" }
+            // The original request cancellation, not the terminal wall limit, must end the SIGTERM-ignoring
+            // setsid descendant through the shared ACP broker's scope termination before release.
+            assertTrue(audit.any { it.reason == AcpTerminalAuditReason.CANCELLED }, auditReasons)
+            assertTrue(audit.none { it.reason == AcpTerminalAuditReason.TIMEOUT }, auditReasons)
             assertTrue(audit.any { it.reason == AcpTerminalAuditReason.RELEASED })
             assertTrue(audit.none { it.reason == AcpTerminalAuditReason.CLEANUP_FAILED })
             assertTrue(dispatcher.sandboxEvidence().launches.isNotEmpty())
