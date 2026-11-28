@@ -59,6 +59,100 @@ class OracleJsonTest {
     }
 
     @Test
+    fun `parser fast path preserves plain ASCII values keys and escaped suffixes`() {
+        val input = """{"":"","plain":"letters 0123 -_ .!~","long":"${"a".repeat(20_000)}\nλ𝄞"}"""
+        val parsed = OracleJson.parse(input.toByteArray()) as JsonObject
+        assertEquals("", (parsed[""] as JsonPrimitive).content)
+        assertEquals("letters 0123 -_ .!~", (parsed["plain"] as JsonPrimitive).content)
+        assertEquals("a".repeat(20_000) + "\nλ𝄞", (parsed["long"] as JsonPrimitive).content)
+    }
+
+    @Test
+    fun `parser counts ASCII bytes directly and preserves UTF8 string limits`() {
+        val exact = StrictJsonLimits(maximumStringBytes = 3, maximumTotalStringBytes = 6)
+        assertEquals("abc", (OracleJson.parse("[\"abc\",\"def\"]".toByteArray(), exact) as JsonArray)
+            .first().let { (it as JsonPrimitive).content })
+
+        assertFailsWith<StrictJsonException> {
+            OracleJson.parse("\"abcd\"".toByteArray(), exact)
+        }
+        assertFailsWith<StrictJsonException> {
+            OracleJson.parse("[\"abc\",\"def\",\"x\"]".toByteArray(), exact)
+        }
+        assertEquals("é", (OracleJson.parse("\"é\"".toByteArray(), StrictJsonLimits(
+            maximumStringBytes = 2,
+            maximumTotalStringBytes = 2,
+        )) as JsonPrimitive).content)
+        assertFailsWith<StrictJsonException> {
+            OracleJson.parse("\"é\"".toByteArray(), StrictJsonLimits(
+                maximumStringBytes = 1,
+                maximumTotalStringBytes = 2,
+            ))
+        }
+        val supplementary = "𝄞"
+        assertEquals(supplementary, (OracleJson.parse("\"$supplementary\"".toByteArray(), StrictJsonLimits(
+            maximumStringBytes = 4,
+            maximumTotalStringBytes = 4,
+        )) as JsonPrimitive).content)
+        assertEquals(supplementary, (OracleJson.parse("\"\\uD834\\uDD1E\"".toByteArray(), StrictJsonLimits(
+            maximumStringBytes = 4,
+            maximumTotalStringBytes = 4,
+        )) as JsonPrimitive).content)
+        assertEquals("a$supplementary", (OracleJson.parse("\"a\\uD834\\uDD1E\"".toByteArray(), StrictJsonLimits(
+            maximumStringBytes = 5,
+            maximumTotalStringBytes = 5,
+        )) as JsonPrimitive).content)
+        assertFailsWith<StrictJsonException> {
+            OracleJson.parse("\"$supplementary\"".toByteArray(), StrictJsonLimits(
+                maximumStringBytes = 3,
+                maximumTotalStringBytes = 4,
+            ))
+        }
+        assertFailsWith<StrictJsonException> {
+            OracleJson.parse("\"a\\uD834\\uDD1E\"".toByteArray(), StrictJsonLimits(
+                maximumStringBytes = 5,
+                maximumTotalStringBytes = 4,
+            ))
+        }
+    }
+
+    @Test
+    fun `plain and escaped strings retain cooperative progress checkpoints`() {
+        val limits = StrictJsonLimits(
+            maximumInputBytes = 64 * 1024,
+            maximumStringBytes = 64 * 1024,
+            maximumTotalStringBytes = 64 * 1024,
+        )
+        for (suffix in listOf("", "\\n")) {
+            var checkpoints = 0
+            val value = "a".repeat(32_768) + suffix
+            OracleJson.parse("\"$value\"".toByteArray(), limits) { phase ->
+                if (phase == "while parsing strict JSON string") checkpoints++
+            }
+            assertEquals(2, checkpoints, "suffix=$suffix")
+        }
+
+        var transitionCheckpoints = 0
+        val transitionValue = "a".repeat(16_383) + "\\n" + "b".repeat(16_384)
+        OracleJson.parse("\"$transitionValue\"".toByteArray(), limits) { phase ->
+            if (phase == "while parsing strict JSON string") transitionCheckpoints++
+        }
+        assertEquals(2, transitionCheckpoints)
+
+        var canceled = false
+        val failure = assertFailsWith<IllegalStateException> {
+            OracleJson.parse("\"${"a".repeat(16_383)}\\n\"".toByteArray(), limits) { phase ->
+                if (phase == "while parsing strict JSON string") {
+                    canceled = true
+                    throw IllegalStateException("cooperative string cancellation")
+                }
+            }
+        }
+        assertTrue(canceled)
+        assertEquals("cooperative string cancellation", failure.message)
+    }
+
+    @Test
     fun `parser accepts only strict finite JSON numbers`() {
         listOf(
             "+1",

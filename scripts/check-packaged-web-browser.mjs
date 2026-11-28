@@ -2,13 +2,14 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { promises as fs, readFileSync, createReadStream } from 'node:fs';
-import { join, basename, dirname, isAbsolute, relative, resolve } from 'node:path';
+import { join, basename, dirname, isAbsolute, resolve } from 'node:path';
 import { createServer as createHttpServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
 import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
 import { seedStructure, qualifyStructure, structureFailureEvidence } from './packaged-browser-structure.mjs';
+import { resolveBrowserTempParent, createBrowserTemp } from './packaged-browser-temp-parent.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { qualifyLifecycle } from './packaged-browser-lifecycle.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
@@ -32,6 +33,7 @@ const { values } = parseArgs({ options: {
   mode: { type: 'string', default: 'public' },
   profile: { type: 'string', default: 'reference' },
   'work-parent': { type: 'string', default: join(repo, 'build') },
+  'browser-temp-parent': { type: 'string', default: repo },
   'keep-workdir': { type: 'boolean', default: false },
   chrome: { type: 'string' },
   'java-home': { type: 'string' },
@@ -40,7 +42,7 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|logs|sources|scale|structure|live|proxy|upgrade|legacy|audit] [--profile reference|constrained] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|logs|sources|scale|structure|live|proxy|upgrade|legacy|audit] [--profile reference|constrained] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--browser-temp-parent /absolute/short-owned-directory] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; sources: session plus two preseeded retained candidates browsed, previewed, highlighted and compared by keyboard; scale: session plus 10,000 persisted jobs and keyboard pagination; structure: session plus a 100,000-function recorded revision; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
@@ -73,12 +75,24 @@ const javaHome = values['java-home'];
 const chromeBinary = values.chrome;
 await fs.mkdir(join(repo, 'build'), { recursive: true });
 assert.ok((await fs.stat(values['work-parent'])).isDirectory(), '--work-parent must already exist');
+// Resolved through symbolic links and checked against the real repository root before anything is created (R6).
+const browserTempParent = await resolveBrowserTempParent(repo, values['browser-temp-parent']);
 if (values.mode === 'proxy') await fs.access(join(repo, 'frontend/node_modules/vite/bin/vite.js'));
 const sensitiveValues = [];
 const safeDiagnostic = (value) => {
   let safe = String(value).replaceAll(/#bootstrap=[A-Za-z0-9_-]+/g, '#bootstrap=[redacted]');
   for (const sensitive of sensitiveValues) if (sensitive) safe = safe.replaceAll(sensitive, '[redacted]');
   return safe;
+};
+const structureServerTimingSummary = (output) => {
+  const timings = [];
+  let overflow = 0;
+  for (const match of output.matchAll(/web-structure-timing phase=([a-z0-9-]{1,64}) elapsedNanos=(\d{1,16})/g)) {
+    const elapsedNanos = Number(match[2]);
+    if (timings.length >= 512 || !Number.isSafeInteger(elapsedNanos)) { overflow++; continue; }
+    timings.push({ phase: match[1], elapsedNanos });
+  }
+  return { timings, limit: 512, overflow };
 };
 const safeEvidence = (value) => {
   if (Array.isArray(value)) return value.map(safeEvidence);
@@ -456,7 +470,17 @@ async function prepareArchive(archivePath) {
   }
   // Gradle uses xargs with its default external echo command while parsing JVM options.
   await fs.symlink('/usr/bin/echo', join(bins, 'echo'));
-  const environment = { PATH: bins, JAVA_HOME: javaHome, LANG: 'C.UTF-8' };
+  const runtimeHome = join(working, 'jvm-home');
+  const runtimeTmp = join(working, 'jvm-tmp');
+  await fs.mkdir(runtimeHome);
+  await fs.mkdir(runtimeTmp);
+  // HOME/TMPDIR alone do not set HotSpot's directory properties. These controlled
+  // options keep the test JVM and its native extraction inside the owned workspace.
+  assert.ok(!/["\r\n]/.test(runtimeHome + runtimeTmp), 'JVM test directory cannot be represented in launcher options');
+  const structureTimingOption = values.mode === 'structure' ? ' -Ddecompengine.web.structureTiming=true' : '';
+  const environment = { PATH: bins, JAVA_HOME: javaHome, LANG: 'C.UTF-8', HOME: runtimeHome,
+    TMPDIR: runtimeTmp, TMP: runtimeTmp, TEMP: runtimeTmp,
+    JAVA_TOOL_OPTIONS: `-XX:-UsePerfData -Duser.home="${runtimeHome}" -Djava.io.tmpdir="${runtimeTmp}" -Djna.tmpdir="${runtimeTmp}"${structureTimingOption}` };
   for (const name of ['node', 'npm']) assert.notEqual(spawnSync('/bin/sh', ['-c', `command -v ${name}`], { env: environment }).status, 0);
   const data = join(working, 'untouched jobs');
   return { ...setup, archivePath, archiveSha256, work, before, working, environment, data };
@@ -543,10 +567,9 @@ try {
 
   // Chrome places SingletonSocket under TMPDIR. Keep it short enough even on hosted
   // runners whose checkout path is /home/runner/work/<repo>/<repo>.
-  browserTmp = await fs.mkdtemp(join(repo, '.ct-'));
-  const browserTmpForProcess = relative(repo, browserTmp);
-  assert(!isAbsolute(browserTmpForProcess) && browserTmpForProcess !== '..' && !browserTmpForProcess.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`),
-    'Browser temporary directory must remain inside the repository');
+  const ownedBrowserTemp = await createBrowserTemp(browserTempParent);
+  browserTmp = ownedBrowserTemp.directory;
+  const browserTmpForProcess = ownedBrowserTemp.forProcess;
   report.browserTempDirectory = browserTmp;
   await fs.mkdir(profile);
   browser = startOwned(chromeBinary, [...(observeNativeVisibility ? [] : ['--headless=new']), '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
@@ -1337,6 +1360,7 @@ try {
       process.exitCode = 1;
     }
   }
+  if (values.mode === 'structure') report.structureServerTiming = structureServerTimingSummary(applicationError);
   report.cdpLateSettlements = cdp ? cdp.lateEvidence() : { settlements: [], dropped: 0 };
   // Scrubbed, bounded and lossless (#1882): report.json stays within 512 KiB, with any larger
   // evidence in digest-referenced parts; a failed publication leaves a failure record and throws.

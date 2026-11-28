@@ -7288,6 +7288,7 @@ internal fun hashStableRegularFile(
     readBytes: (Int, Long) -> Unit,
     cancellationCheck: () -> Unit,
     validateMetadata: (LinuxDescriptor) -> Unit = {},
+    verifyChunk: (ByteArray, Int, Long) -> Unit = { _, _, _ -> },
     // Receives each chunk before final revalidation; callers must not treat it as verified until this returns.
     consumeBytes: (ByteArray, Int) -> Unit = { _, _ -> },
 ): StableFileDigest {
@@ -7335,6 +7336,7 @@ internal fun hashStableRegularFile(
                 if (count < 0) break
                 size = Math.addExact(size, count.toLong())
                 readBytes(count, size)
+                verifyChunk(buffer, count, size - count)
                 digest.update(buffer, 0, count)
                 consumeBytes(buffer, count)
                 utf8.accept(buffer, count)
@@ -7357,6 +7359,93 @@ internal fun hashStableRegularFile(
         authorized?.close()
         directories.asReversed().forEach { it.close() }
     }
+}
+
+internal enum class StableComparison { SAME, DIFFERENT }
+
+/** Compare only after the current capture has passed every stability fence. */
+internal fun compareStableRegularFile(
+    root: Path, relative: String, maximumBytes: Long, expected: StableRegularFile,
+    cancellationCheck: () -> Unit = {},
+): StableComparison {
+    require(maximumBytes in 1 until Int.MAX_VALUE.toLong())
+    var sizeMatches = false
+    var contentMatches = true
+    var opened: LinuxFileIdentity? = null
+    var changeTime: java.nio.file.attribute.FileTime? = null
+    val result = try { hashStableRegularFile(root, relative,
+        declaredSize = { size ->
+            if (size > maximumBytes) throw RepairBudgetExceededException("comparison exceeds read limit")
+            sizeMatches = size == expected.bytes.size.toLong()
+        },
+        readBytes = { _, total ->
+            if (total > maximumBytes) throw RepairBudgetExceededException("comparison exceeds read limit")
+        },
+        cancellationCheck = cancellationCheck,
+        validateMetadata = { descriptor ->
+            val identity = LinuxFilesystemSyscalls.identity(descriptor.fd)
+            // The proc entry is kernel-owned and the descriptor remains owned throughout capture.
+            val ctime = Files.getAttribute(Path.of("/proc/self/fd/${descriptor.fd}"), "unix:ctime")
+                as? java.nio.file.attribute.FileTime
+                ?: throw StableFileUnavailableException("comparison change time unavailable")
+            if (opened == null) {
+                if (!identity.isRegularFile || identity.isSymbolicLink || identity.linkCount != 1)
+                    throw StableFileUnavailableException("comparison target is unavailable")
+                opened = identity
+                changeTime = ctime
+            } else {
+                requireUnchanged(identity == opened && ctime == changeTime) {
+                    "comparison metadata changed during reading"
+                }
+            }
+        },
+        verifyChunk = { bytes, count, offset ->
+            val available = (expected.bytes.size.toLong() - offset).coerceAtLeast(0).coerceAtMost(count.toLong()).toInt()
+            if (available != count) contentMatches = false
+            if (available > 0 && !java.util.Arrays.equals(bytes, 0, available,
+                    expected.bytes, offset.toInt(), offset.toInt() + available)) contentMatches = false
+        })
+    } catch (failure: java.io.IOException) {
+        if (failure is java.io.InterruptedIOException || failure is java.nio.channels.ClosedByInterruptException ||
+            Thread.currentThread().isInterrupted) throw failure
+        throw StableFileUnavailableException("comparison target or required metadata unavailable: ${failure.message}")
+    } catch (failure: UnsupportedOperationException) {
+        throw StableFileUnavailableException("comparison required metadata unsupported: ${failure.message}")
+    }
+    return if (sizeMatches && contentMatches && result.size == expected.bytes.size.toLong() &&
+        result.sha256 == expected.sha256 && opened == expected.identity && result.identity == expected.identity)
+        StableComparison.SAME else StableComparison.DIFFERENT
+}
+
+/** Verify captured bytes without allocating another whole-file array. */
+internal fun verifyStableRegularFile(
+    root: Path, relative: String, maximumBytes: Long, expected: StableRegularFile,
+    cancellationCheck: () -> Unit = {},
+) {
+    require(maximumBytes in 1 until Int.MAX_VALUE.toLong())
+    val result = hashStableRegularFile(root, relative,
+        declaredSize = { size ->
+            if (size > maximumBytes) throw RepairBudgetExceededException("verification exceeds read limit")
+            requireUnchanged(size == expected.bytes.size.toLong()) { "verification length changed" }
+        },
+        readBytes = { _, total ->
+            if (total > maximumBytes) throw RepairBudgetExceededException("verification exceeds read limit")
+            requireUnchanged(total <= expected.bytes.size) { "verification grew" }
+        },
+        cancellationCheck = cancellationCheck,
+        validateMetadata = { descriptor ->
+            val identity = LinuxFilesystemSyscalls.identity(descriptor.fd)
+            requireUnchanged(identity == expected.identity && identity.isRegularFile &&
+                !identity.isSymbolicLink && identity.linkCount == 1) { "verification identity changed" }
+        },
+        verifyChunk = { bytes, count, offset ->
+            requireUnchanged(java.util.Arrays.equals(bytes, 0, count,
+                expected.bytes, offset.toInt(), offset.toInt() + count)) {
+                "verification content changed"
+            }
+        })
+    requireUnchanged(result.identity == expected.identity && result.size == expected.bytes.size.toLong() &&
+        result.sha256 == expected.sha256) { "verification commitment changed" }
 }
 
 /** Proven ENOENT during initial traversal only; never used for failed revalidation after a read. */
@@ -7532,13 +7621,28 @@ private fun readStableRegularFileInternal(
                 "stable file-read target $relative has ${before.size()} bytes; limit=$maximumBytes",
             )
         }
-        val bytes = admittedRead?.invoke(descriptorPath, before.size().toInt()) ?: try {
-            LinuxFilesystemSyscalls.read(readable, maximumBytes.toInt(), cancellationCheck)
-        } catch (_: LinuxResourceLimitException) {
-            throw RepairBudgetExceededException("stable file-read target $relative grew beyond $maximumBytes bytes")
+        val bytes = if (admittedRead != null) {
+            admittedRead.invoke(descriptorPath, before.size().toInt())
+        } else {
+            val observed = try {
+                LinuxFilesystemSyscalls.readKnownSize(
+                    readable, before.size().toInt(), maximumBytes.toInt(), cancellationCheck,
+                )
+            } catch (_: LinuxResourceLimitException) {
+                throw RepairBudgetExceededException("stable file-read target $relative grew beyond $maximumBytes bytes")
+            }
+            requireUnchanged(observed.observedCount == before.size()) {
+                "stable file-read descriptor changed while it was read: $relative"
+            }
+            requireNotNull(observed.bytes) {
+                "stable file-read descriptor changed while it was read: $relative"
+            }
         }
         afterRead?.invoke()
         cancellationCheck()
+        requireUnchanged(bytes.size.toLong() == before.size()) {
+            "stable file-read descriptor changed while it was read: $relative"
+        }
         val after = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
         requireUnchanged(
             after.isRegularFile && before.fileKey() == after.fileKey() &&

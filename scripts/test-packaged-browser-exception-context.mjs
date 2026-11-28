@@ -5,6 +5,7 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
+import { createEngineDiagnostics, diagnosticOverflowFailure } from './packaged-browser-engine-diagnostics.mjs';
 import { auditFixtures, engineSupplementalInteractionContexts } from './packaged-browser-audit.mjs';
 import { isPlaywrightScreenshotCspViolation } from './packaged-browser-engine-adapter.mjs';
 import { attachExceptionContext, exceptionContextLimits, exceptionContextSummaryLimit, summarizeExceptionContexts } from './packaged-browser-exception-context.mjs';
@@ -234,8 +235,10 @@ function runnerContext() {
     contexts.push(created);
     return created.context;
   } };
-  const make = runInNewContext(`(${source.slice(start, end)})`, { browser, attachExceptionContext, exceptionContexts });
-  return { source, make, calls, contexts, exceptionContexts };
+  // The runner also records bounded engine diagnostics (#1697); use the real recorder so both coexist.
+  const diagnostics = createEngineDiagnostics({ safe: String });
+  const make = runInNewContext(`(${source.slice(start, end)})`, { browser, attachExceptionContext, exceptionContexts, diagnostics });
+  return { source, make, calls, contexts, exceptionContexts, diagnostics };
 }
 
 test('runner context keeps its driver calls and String(error) exception list while attaching the recorder', async () => {
@@ -276,7 +279,7 @@ test('retains distinct audit phases and bounded exact-path matches for the same 
 });
 
 async function runJourney({ pageException = false, cspViolation = false, interrupted = false } = {}) {
-  const { source, make, contexts, exceptionContexts } = runnerContext();
+  const { source, make, contexts, exceptionContexts, diagnostics } = runnerContext();
   const start = source.indexOf('\ntry {\n  const installation = await prepare();');
   assert.ok(start >= 0);
   const repo = resolve(dirname(runner), '..');
@@ -293,7 +296,7 @@ async function runJourney({ pageException = false, cspViolation = false, interru
   let published;
   let focusContexts;
   const run = runInNewContext(`(async () => { ${source.slice(start)} })`, {
-    report, exceptionContexts, summarizeExceptionContexts, isPlaywrightScreenshotCspViolation,
+    report, exceptionContexts, summarizeExceptionContexts, isPlaywrightScreenshotCspViolation, diagnostics, diagnosticOverflowFailure,
     prepare: async () => ({ manifest: { buildId } }), launch: async () => origin,
     smoke: async () => ({ ...await make(), result: { storageEntries: 0 } }),
     probeNativeControlCsp: async () => undefined, probeApplicationShellCsp: async () => undefined,

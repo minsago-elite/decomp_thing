@@ -15,6 +15,8 @@ import decompengine.jobs.WorkflowStoreException
 import decompengine.jobs.WorkflowTerminalReason
 import decompengine.jobs.WorkflowTransition
 import decompengine.jobs.recoveryDisposition
+import decompengine.project.SourceTreeManifestProbe
+import decompengine.project.SourceTreeManifestStage
 import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
@@ -308,7 +310,8 @@ class WebJobService(
     private fun newUploadStorage(maximumBytes: Long) = WebUploadStorage(store.storageRoot, maximumBytes, measure = {
         storageWriterExclusion { decompengine.jobs.RetainedStorageUsage.measure(store.storageRoot, maximumBytes).logicalBytes }
     })
-    private val sourceCatalogEvidence = WebSourceCatalogEvidence(sourceProfiles, ::readSourceCatalogInput, ::readArtifact)
+    private val sourceCatalogEvidence = WebSourceCatalogEvidence(sourceProfiles, ::readSourceCatalogInput, ::readArtifact,
+        ::verifySourceCatalogInput, ::verifySourceCatalogArtifact, ::compareSourceCatalogArtifact)
     private val programStructureCache = WebProgramStructureCache()
 
     /** Installs a deterministic retained-byte ceiling before tests admit any upload. */
@@ -828,6 +831,41 @@ class WebJobService(
         return store.readInput(jobId)
     }
 
+    @Synchronized
+    private fun verifySourceCatalogInput(jobId: String, expected: decompengine.repair.StableRegularFile) {
+        requireInitializedRead()
+        sourceCatalogVerification { store.verifyInput(jobId, expected) }
+    }
+
+    @Synchronized
+    private fun verifySourceCatalogArtifact(jobId: String, path: String, maximumBytes: Long,
+        expected: decompengine.repair.StableRegularFile) {
+        requireInitializedRead()
+        val segments = canonicalReportSegments(path)
+        if (segments[1] == "runs") getAttempt(jobId, segments[2]) else presentation(jobId)
+        sourceCatalogVerification { store.verifyArtifact(jobId, path, maximumBytes, expected) }
+    }
+
+    @Synchronized
+    private fun compareSourceCatalogArtifact(jobId: String, path: String, maximumBytes: Long,
+        expected: decompengine.repair.StableRegularFile): decompengine.repair.StableComparison {
+        requireInitializedRead()
+        val segments = canonicalReportSegments(path)
+        if (segments[1] == "runs") getAttempt(jobId, segments[2]) else presentation(jobId)
+        return try { store.compareArtifact(jobId, path, maximumBytes, expected) }
+        catch (failure: decompengine.jobs.ArtifactChangedException) {
+            if (Thread.currentThread().isInterrupted) throw failure
+            throw WebAccessDenied(409, "SOURCE_CATALOG_CHANGED", "Source catalog changed during capture. Refresh its first page.")
+        }
+    }
+
+    private inline fun sourceCatalogVerification(verify: () -> Unit) {
+        try { verify() } catch (failure: Exception) {
+            if (failure is InterruptedException || Thread.currentThread().isInterrupted) throw failure
+            throw WebAccessDenied(409, "SOURCE_CATALOG_CHANGED", "Source catalog changed during capture. Refresh its first page.")
+        }
+    }
+
     /** Authorize before capture and again before returning, without locking jobs during JSON parsing. */
     internal fun readSourceCatalog(jobId: String, runId: String): WebSourceCatalogSnapshot {
         val attempt = getAttempt(jobId, runId)
@@ -890,10 +928,33 @@ class WebJobService(
     internal fun <T> readProgramStructure(jobId: String, runId: String, revisionId: String,
         project: (WebProgramStructureIndex, () -> ByteArray) -> T): T {
         val reference = revisionSourceReference(jobId, runId, revisionId)
-        val result = try { sourceCatalogEvidence.readStructure(reference, programStructureCache, project) }
+        val structureTiming = java.lang.Boolean.getBoolean("decompengine.web.structureTiming")
+        val timing = if (structureTiming) { phase: String, elapsedNanos: Long ->
+            System.err.println("web-structure-timing phase=$phase elapsedNanos=$elapsedNanos")
+        } else null
+        val manifestProbe = if (structureTiming) object : SourceTreeManifestProbe {
+            private var active: SourceTreeManifestStage? = null
+            private var startedNanos = 0L
+
+            override fun start(stage: SourceTreeManifestStage) {
+                end()
+                active = stage
+                startedNanos = System.nanoTime()
+            }
+
+            override fun end() {
+                val stage = active ?: return
+                val elapsedNanos = System.nanoTime() - startedNanos
+                active = null
+                System.err.println("web-structure-manifest-timing stage=${stage.marker} elapsedNanos=$elapsedNanos")
+            }
+        } else null
+        val result = try {
+            sourceCatalogEvidence.readStructureDiagnosed(reference, programStructureCache, timing, null, manifestProbe, project)
+        }
             catch (changed: WebAccessDenied) { throw changed }
             catch (failure: Exception) {
-                if (failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
+                if (failure is java.util.concurrent.CancellationException || failure is InterruptedException || Thread.currentThread().isInterrupted) throw failure
                 throw WebAccessDenied(503, "PROGRAM_STRUCTURE_UNAVAILABLE", "The revision structure records are unavailable or exceed their limits.")
             }
         if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()

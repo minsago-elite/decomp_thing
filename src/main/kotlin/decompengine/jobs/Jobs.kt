@@ -424,6 +424,32 @@ class JobStore internal constructor(
         ) { "artifact path must be a canonical report path" }
     }
 
+    internal fun verifyInput(jobId: String, expected: StableRegularFile) {
+        jobDirectory(jobId)
+        contained("job input") {
+            decompengine.repair.verifyStableRegularFile(root, "$jobId/input.elf", MAX_INPUT_BYTES.toLong(), expected)
+        }
+    }
+
+    internal fun compareArtifact(
+        jobId: String, relativePath: String, maximumBytes: Long, expected: StableRegularFile,
+        cancellationCheck: () -> Unit = {},
+    ): decompengine.repair.StableComparison {
+        jobDirectory(jobId)
+        requireCanonicalReportPath(relativePath)
+        return contained("artifact") {
+            decompengine.repair.compareStableRegularFile(root, "$jobId/$relativePath", maximumBytes, expected, cancellationCheck)
+        }
+    }
+
+    internal fun verifyArtifact(jobId: String, relativePath: String, maximumBytes: Long, expected: StableRegularFile) {
+        jobDirectory(jobId)
+        requireCanonicalReportPath(relativePath)
+        contained("artifact") {
+            decompengine.repair.verifyStableRegularFile(root, "$jobId/$relativePath", maximumBytes, expected)
+        }
+    }
+
     /**
      * Hash or stream one canonical report artifact through pinned descriptors without retaining its body.
      * [consume] sees bytes before the final identity/metadata revalidation; only a normal return confirms them.

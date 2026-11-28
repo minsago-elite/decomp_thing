@@ -34,6 +34,7 @@ import { focusSurvivingNotice, restoreSettledFocus, useDepartingFocus } from '..
 import { attemptOutcomeCopy as outcomeCopy, stopOutcomeCopy } from '../copy/attemptOutcome';
 import { QueuePosition, useQueueObservation } from '../jobs/QueuePosition';
 import { jobCopy } from '../copy/job';
+import { loadStructureRoute } from './loadStructureRoute';
 
 // Contracts decoded only by lazily loaded routes stay out of the initial bundle.
 registerContractExtension(lazyContractSchema);
@@ -64,6 +65,9 @@ function Details({ jobId, runId, basePath, session, view, navigation, onDeleted,
     const from = settledFrom.current; settledFrom.current = null;
     restoreSettledFocus(from, refreshControl.current);
   });
+  useEffect(() => {
+    if (run?.resultRevisionId) void loadStructureRoute().catch(() => undefined);
+  }, [run?.resultRevisionId]);
   useEffect(() => {
     const controller = new AbortController();
     const settle = () => {

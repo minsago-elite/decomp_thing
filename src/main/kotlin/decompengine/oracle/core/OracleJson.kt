@@ -231,8 +231,26 @@ private class StrictParser(
 
     private fun parseStringAndCharge(): String {
         expect('"')
-        val result = StringBuilder()
+        val start = offset
         var lastProgressOffset = offset
+        while (offset < source.length) {
+            val current = source[offset]
+            if (current == '"') {
+                val end = offset++
+                chargeStringBytes(end - start)
+                return source.substring(start, end)
+            }
+            if (current == '\\' || current.code < 0x20 || current.code >= 0x7f) break
+            offset++
+            if (offset - lastProgressOffset >= PROGRESS_CHECKPOINT_CHARACTERS) {
+                checkpoint("while parsing strict JSON string")
+                lastProgressOffset = offset
+            }
+        }
+        if (offset == source.length) fail("unterminated JSON string")
+
+        val result = StringBuilder()
+        result.append(source, start, offset)
         while (offset < source.length) {
             val current = source[offset++]
             when {
@@ -315,6 +333,10 @@ private class StrictParser(
 
     private fun chargeString(value: String) {
         val byteCount = value.toByteArray(StandardCharsets.UTF_8).size
+        chargeStringBytes(byteCount)
+    }
+
+    private fun chargeStringBytes(byteCount: Int) {
         if (byteCount > limits.maximumStringBytes) fail("JSON string exceeds the configured byte limit")
         if (totalStringBytes > limits.maximumTotalStringBytes - byteCount) {
             fail("JSON strings exceed the configured aggregate byte limit")
