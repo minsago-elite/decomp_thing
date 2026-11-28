@@ -198,6 +198,374 @@ export function assertStructureSourceLink(href, { revision, browserOrigin, snaps
   ], 'Source link must carry exactly the originating source and metadata pins');
 }
 
+// Ordinary Structure journey (#1697, #1879): the journey CI always runs, with bounded module-body observations.
+// The #536 budgeted journey and cold sample below share its observer and failure evidence.
+/** Fixed Structure module-body stages. Observation labels only, never a cause (#1879). */
+export const STRUCTURE_BODY_STAGES = Object.freeze(['before-lookup', 'lookup', 'body-call', 'body-decode', 'source-link', 'after-source-link']);
+const BODY_OUTCOMES = Object.freeze(['not-called', 'pending', 'resolved', 'rejected']);
+const MAX_TRACKED = 64;
+const MAX_COUNT = 100_000;
+const MAX_MS = 3_600_000;
+const MAX_BYTES = 2 ** 31;
+const MODULE_DETAIL = /\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/modules\/[^/]+$/;
+const structureFailures = new WeakMap();
+/** Body-read observations recorded when qualifyStructure threw this error, or null. Never reads the error itself. */
+export function structureFailureEvidence(error) {
+  return (error !== null && typeof error === 'object' && structureFailures.get(error)) || null;
+}
+
+/**
+ * In-memory observations of already-emitted module-detail events. Adds no CDP call, wait or retry, and
+ * persists no request/session ids, URLs or payloads: only fixed labels, booleans and bounded numbers.
+ */
+export function moduleBodyObserver() {
+  let incomplete = false;
+  const started = performance.now();
+  const clamp = (value, max) => {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) { incomplete = true; return null; }
+    if (value > max) { incomplete = true; return max; }
+    return Math.round(value);
+  };
+  const elapsed = (from, to = performance.now()) => from === null || to === null ? null : clamp(to - from, MAX_MS);
+  // Host receipt instant in the same performance.now domain; a clock fault yields null and changes nothing else (#1879).
+  const hostNow = () => {
+    try { const value = performance.now(); return typeof value === 'number' && Number.isFinite(value) ? value : null; }
+    catch { return null; }
+  };
+  // Ordered host receipt gap only; never marks incomplete and never exports either instant.
+  const receiptGap = (from, to) => typeof from === 'number' && typeof to === 'number' && Number.isFinite(from)
+    && Number.isFinite(to) && to >= from ? Math.min(Math.floor(to - from), MAX_MS) : null;
+  const increment = (value) => { if (value >= MAX_COUNT) { incomplete = true; return MAX_COUNT; } return value + 1; };
+  const counts = { moduleRequests: 0, moduleResponses: 0, moduleOkResponses: 0 };
+  const entries = new Map();
+  const routeResponses = new Map();
+  let stage = 'before-lookup', selected = null, origin = null;
+  const bump = (name) => { counts[name] = increment(counts[name]); };
+  const route = (url) => {
+    if (typeof url !== 'string' || url.length > 8192) { incomplete = true; return null; }
+    const parsed = new URL(url);
+    return parsed.origin === origin && MODULE_DETAIL.test(parsed.pathname) ? parsed.pathname : null;
+  };
+  const entry = (requestId, create) => {
+    if (typeof requestId !== 'string' || requestId.length === 0 || requestId.length > 256) { incomplete = true; return null; }
+    if (entries.has(requestId) || !create) return entries.get(requestId) ?? null;
+    if (entries.size >= MAX_TRACKED) { incomplete = true; return null; }
+    const value = { responseAt: null, status: null, servedFromCache: false, fromDiskCache: false, fromServiceWorker: false,
+      finishedAt: null, encodedDataLength: null, failed: false, canceled: false, failedAt: null,
+      calledAt: null, settledAt: null, finishedBeforeCall: null, failedBeforeCall: null, responseBeforeCall: null, outcome: 'not-called' };
+    entries.set(requestId, value);
+    return value;
+  };
+  const guarded = (listener) => (event) => { try { listener(event); } catch { incomplete = true; } };
+  return {
+    attach(cdp, sessionId, browserOrigin) {
+      origin = new URL(browserOrigin).origin;
+      cdp.on('Network.requestWillBeSent', guarded((event) => {
+        if (route(event.request.url) !== null) { bump('moduleRequests'); entry(event.requestId, true); }
+      }), sessionId);
+      cdp.on('Network.responseReceived', guarded((event) => {
+        const path = route(event.response.url);
+        if (path === null) return;
+        bump('moduleResponses');
+        const status = event.response.status;
+        if (status === 200) bump('moduleOkResponses');
+        if (routeResponses.has(path) || routeResponses.size < MAX_TRACKED) routeResponses.set(path, increment(routeResponses.get(path) ?? 0));
+        else incomplete = true;
+        const value = entry(event.requestId, true);
+        if (!value) return;
+        value.responseAt = performance.now();
+        if (Number.isSafeInteger(status) && status >= 0 && status < 1000) value.status = status;
+        else { value.status = null; incomplete = true; }
+        value.fromDiskCache = event.response.fromDiskCache === true;
+        value.fromServiceWorker = event.response.fromServiceWorker === true;
+      }), sessionId);
+      cdp.on('Network.requestServedFromCache', guarded((event) => {
+        const value = entry(event.requestId, false);
+        if (value) value.servedFromCache = true;
+      }), sessionId);
+      cdp.on('Network.loadingFinished', guarded((event) => {
+        const value = entry(event.requestId, false);
+        if (!value) return;
+        value.finishedAt = performance.now();
+        const length = event.encodedDataLength;
+        value.encodedDataLength = clamp(length, MAX_BYTES);
+      }), sessionId);
+      cdp.on('Network.loadingFailed', guarded((event) => {
+        const value = entry(event.requestId, false);
+        if (!value) return;
+        const firstFailure = value.failed !== true;
+        value.failed = true;
+        value.canceled = event.canceled === true;
+        if (firstFailure) value.failedAt = hostNow();
+      }), sessionId);
+    },
+    stage(name) {
+      assert.ok(STRUCTURE_BODY_STAGES.includes(name));
+      stage = name;
+    },
+    /** Remembers which already-observed response the qualifier selected; the id and route stay in memory. */
+    select(requestId, path) {
+      const value = entry(requestId, false);
+      if (!value || !routeResponses.has(path)) incomplete = true;
+      selected = { value, sameRouteResponses: routeResponses.get(path) ?? 0 };
+    },
+    /**
+     * Observes a response-stage body read of one paused network request (#1879). Ordering flags are sampled from
+     * events actually received when the read starts; the same promise outcome and error object propagate.
+     */
+    bodyCall(networkId, call) {
+      const target = entry(networkId, true);
+      if (target) {
+        target.calledAt = performance.now();
+        target.responseBeforeCall = target.responseAt !== null;
+        target.finishedBeforeCall = target.finishedAt !== null;
+        target.failedBeforeCall = target.failed === true;
+        target.outcome = 'pending';
+      }
+      const record = (outcome) => { if (target) { target.outcome = outcome; target.settledAt = performance.now(); } };
+      let pending;
+      try { pending = call(); } catch (error) { record('rejected'); throw error; }
+      return pending.then((value) => { record('resolved'); return value; }, (error) => { record('rejected'); throw error; });
+    },
+    snapshot() {
+      const value = selected?.value ?? null;
+      const totalMs = elapsed(started);
+      const called = value?.calledAt != null;
+      // Null when the response-stage read began before the response receipt: there is no forward gap to report.
+      const responseToBodyCallMs = called && value.responseBeforeCall ? receiptGap(value.responseAt, value.calledAt) : null;
+      const bodyCallMs = called ? elapsed(value.calledAt, value.settledAt ?? performance.now()) : null;
+      const failedBeforeBodyCall = called ? value.failedBeforeCall : null;
+      const responseToFailedMs = failedBeforeBodyCall === null ? null : receiptGap(value.responseAt, value.failedAt);
+      const detail = selected && Object.freeze({
+        observationAvailable: value !== null,
+        sameRouteResponses: selected.sameRouteResponses,
+        responseObserved: value?.responseAt != null,
+        status: value?.status ?? null,
+        servedFromCache: value?.servedFromCache ?? false,
+        fromDiskCache: value?.fromDiskCache ?? false,
+        fromServiceWorker: value?.fromServiceWorker ?? false,
+        loadingFinished: value?.finishedAt != null,
+        bodyReadStage: called ? 'fetch-response' : 'not-read',
+        responseBeforeBodyCall: called ? value.responseBeforeCall : null,
+        finishedBeforeBodyCall: called ? value.finishedBeforeCall : null,
+        failedBeforeBodyCall,
+        loadingFailed: value?.failed ?? false,
+        loadingCanceled: value?.canceled ?? false,
+        encodedDataLength: value?.encodedDataLength ?? null,
+        responseToBodyCallMs, bodyCallMs, responseToFailedMs,
+        bodyOutcome: called && BODY_OUTCOMES.includes(value.outcome) ? value.outcome : 'not-called',
+      });
+      return Object.freeze({ stage, totalMs, ...counts, trackedRequests: entries.size, trackedRoutes: routeResponses.size, trackedIncomplete: incomplete, selected: detail });
+    },
+  };
+}
+
+export async function qualifyStructure(context) {
+  const observer = moduleBodyObserver();
+  try {
+    return await qualify(context, observer);
+  } catch (error) {
+    if (error !== null && typeof error === 'object' && !structureFailures.has(error)) {
+      try { structureFailures.set(error, observer.snapshot()); }
+      catch { /* Evidence never replaces the original failure. */ }
+    }
+    throw error;
+  }
+}
+
+const MODULE_CAPTURE_LIMIT = 8;
+const decodeBody = (response) => response.base64Encoded ? Buffer.from(response.body, 'base64').toString('utf8') : response.body;
+
+/**
+ * Response-stage capture of one module-detail route on one target (#1879). Every paused response is continued
+ * unchanged exactly once; the handler never fulfils, fails, retries or refetches. A capture is eligible only for an
+ * exact same-origin GET of the route made by Fetch/XHR with a 200 response.
+ */
+function moduleCapture(cdp, sessionId, browserOrigin, modulePath, observer) {
+  const origin = new URL(browserOrigin).origin;
+  const captures = new Map();
+  const inflight = new Set();
+  let active = true, overflow = false;
+  cdp.on('Fetch.requestPaused', (event) => {
+    const handled = (async () => {
+      let value = null;
+      try {
+        if (!active) return;
+        let url = null;
+        try { url = new URL(event.request.url); } catch { url = null; }
+        if (url === null || url.origin !== origin || url.pathname !== modulePath) return;
+        const networkId = event.networkId;
+        if (typeof networkId !== 'string' || captures.has(networkId)) {
+          if (typeof networkId === 'string') captures.get(networkId).duplicate = true;
+          else overflow = true;
+          return;
+        }
+        if (captures.size >= MODULE_CAPTURE_LIMIT) { overflow = true; return; }
+        value = { eligible: event.request.method === 'GET' && ['Fetch', 'XHR'].includes(event.resourceType)
+          && event.responseStatusCode === 200 && event.responseErrorReason === undefined,
+        body: null, text: null, continued: false, duplicate: false };
+        captures.set(networkId, value);
+        if (!value.eligible) return;
+        try { value.body = observer.bodyCall(networkId, () => cdp.call('Fetch.getResponseBody', { requestId: event.requestId }, sessionId)); }
+        catch (error) { value.body = Promise.reject(error); }
+        value.text = decodeBody(await value.body);
+      } catch { /* The bound read keeps its original error in value.body. */ }
+      finally {
+        try { await cdp.call('Fetch.continueResponse', { requestId: event.requestId }, sessionId); if (value) value.continued = true; }
+        catch { /* A failed continuation leaves the capture ineligible. */ }
+      }
+    })();
+    inflight.add(handled);
+  }, sessionId);
+  return {
+    /** Waits for every paused response to be continued and stops interception, including after a failure. */
+    async release() {
+      active = false;
+      await Promise.allSettled(inflight);
+      await cdp.call('Fetch.disable', {}, sessionId);
+    },
+    /**
+     * Returns the originating request's body. Another response for the route is explained only when it is a
+     * byte-identical refetch or was canceled before any response stage; anything else is ambiguous.
+     */
+    async bodyFor(requestId) {
+      const bound = captures.get(requestId);
+      assert.ok(!overflow, 'Module detail capture overflowed');
+      assert.ok(bound, 'Missing response-stage capture of the originating module detail request');
+      assert.ok(bound.eligible && !bound.duplicate, 'Originating module detail capture is not one exact Fetch/XHR GET 200 response');
+      await bound.body;
+      assert.ok(bound.continued && typeof bound.text === 'string', 'Originating module detail response was not continued unchanged');
+      for (const [id, other] of captures) {
+        if (id === requestId) continue;
+        assert.ok(other.eligible && !other.duplicate && other.continued && other.text === bound.text,
+          'Ambiguous module detail responses: another capture differs from the originating response');
+      }
+      return bound.text;
+    },
+  };
+}
+
+async function qualify({ fixture, makeTarget, cdp, evaluate, ready, browserOrigin }, observer) {
+  const tab = await makeTarget();
+  await cdp.call('Performance.enable', {}, tab.sessionId);
+  const inventoryReads = [];
+  const moduleResponses = new Map();
+  cdp.on('Network.responseReceived', (event) => {
+    const url = new URL(event.response.url);
+    if (url.origin === new URL(browserOrigin).origin && event.response.status === 200
+      && /\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/modules\/[^/]+$/.test(url.pathname)) {
+      moduleResponses.set(url.pathname, event.requestId);
+    }
+  }, tab.sessionId);
+  cdp.on('Network.requestWillBeSent', (event) => {
+    const url = new URL(event.request.url);
+    if (/\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/functions$/.test(url.pathname)) inventoryReads.push(url.searchParams.get('limit'));
+  }, tab.sessionId);
+  observer.attach(cdp, tab.sessionId, browserOrigin);
+  let peakBrowserHeapBytes = 0;
+  const heap = async () => {
+    const metrics = (await cdp.call('Performance.getMetrics', {}, tab.sessionId)).metrics;
+    peakBrowserHeapBytes = Math.max(peakBrowserHeapBytes, metrics.find((metric) => metric.name === 'JSHeapUsedSize').value);
+  };
+  const enter = async () => {
+    await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', text: '\r', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, tab.sessionId);
+    await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, tab.sessionId);
+  };
+  const run = `/nested/jobs/${fixture.jobId}/runs/${fixture.runId}`;
+  const revision = `${run}/revisions/${fixture.revisionId}`;
+  const address = (index) => `0x${fixture.functionAddress(index).toString(16)}`;
+  await cdp.call('Page.navigate', { url: browserOrigin + run }, tab.sessionId);
+  await ready(tab, `[...document.querySelectorAll('a')].some(a => a.textContent === 'Browse recovered functions')`, 'structure links on the result revision');
+  let started = performance.now();
+  await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'Browse recovered functions').click()`);
+  await ready(tab, `(${ROWS}).length === 100 && document.body.innerText.includes('of 100000 matching functions (100000 recorded)')`, 'first page of 100000 recorded functions');
+  const firstPageMs = performance.now() - started;
+  assert.equal(await evaluate(tab, 'location.pathname'), `${revision}/functions`);
+  assert.deepEqual(await evaluate(tab, ROWS), Array.from({ length: 100 }, (_, index) => address(index)));
+  await heap();
+  const pageMs = [];
+  for (let page = 1; page <= 20; page++) {
+    await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Next page').focus()`);
+    started = performance.now();
+    await enter();
+    await ready(tab, `(${ROWS})[0] === ${JSON.stringify(address(page * 100))} && document.activeElement?.textContent === 'Function results'`, `function page ${page + 1}`);
+    pageMs.push(performance.now() - started);
+    assert.equal((await evaluate(tab, ROWS)).length, 100);
+    assert.ok(await evaluate(tab, `document.querySelectorAll('tr').length`) <= 500, 'Mounted table rows exceed the D0 DOM budget');
+    await heap();
+  }
+  assert.ok(await evaluate(tab, `document.body.innerText.includes('Showing 2001–2100 of 100000 matching functions')`));
+  await cdp.call('Page.reload', {}, tab.sessionId);
+  await ready(tab, `(${ROWS})[0] === ${JSON.stringify(address(2000))}`, 'function cursor restored after reload');
+
+  started = performance.now();
+  await evaluate(tab, `(() => {
+    const field = document.querySelector('input[name="search"]');
+    field.value = 'synthetic_function_99999'; field.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Apply filters').click()`);
+  await ready(tab, `(${ROWS}).length === 1 && document.body.innerText.includes('Showing 1–1 of 1 matching functions (100000 recorded)')`, 'exact function search across 100000 records');
+  const searchMs = performance.now() - started;
+  assert.equal(await evaluate(tab, 'location.search'), '?search=synthetic_function_99999');
+  assert.ok(await evaluate(tab, `document.body.innerText.includes('No owning module') && document.body.innerText.includes('Excluded')`));
+  await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'synthetic_function_99999').click()`);
+  await ready(tab, `document.querySelector('main h2')?.textContent === 'synthetic_function_99999' && document.body.innerText.includes('Excluded: the recorded module plan assigns this entity to no module.')`, 'excluded function facts');
+  assert.match(await evaluate(tab, 'location.search'), /^\?structureVersion=[a-f0-9]{64}$/);
+  assert.ok(await evaluate(tab, `document.body.innerText.includes('Recovery assessment: unassessed')`));
+  await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'synthetic_function_99998').click()`);
+  await ready(tab, `document.querySelector('main h2')?.textContent === 'synthetic_function_99998'`, 'caller cross-link within the pinned structure version');
+  const module = fixture.moduleId(Math.floor(99998 / 24));
+  const modulePath = `/nested/api/v1/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}/modules/${module}`;
+  // #1879: the page cancels the module request after consuming it and Chrome then evicts the body, so the body is
+  // read at Fetch response stage before delivery. Interception covers only this untimed module navigation.
+  const capture = moduleCapture(cdp, tab.sessionId, browserOrigin, modulePath, observer);
+  await cdp.call('Fetch.enable', { patterns: ['Fetch', 'XHR'].map((resourceType) =>
+    ({ urlPattern: `${new URL(browserOrigin).origin}${modulePath}*`, resourceType, requestStage: 'Response' })) }, tab.sessionId);
+  let navigated = false;
+  try {
+    await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === ${JSON.stringify(module)}).click()`);
+    await ready(tab, `document.querySelector('main h2')?.textContent === ${JSON.stringify(module)} && document.querySelector('table caption')?.textContent === 'Functions'`, 'owning module detail');
+    navigated = true;
+  } finally {
+    // Release never replaces an earlier failure.
+    await capture.release().catch((error) => { if (navigated) throw error; });
+  }
+  const owned = Math.min(24, OWNED - Math.floor(99998 / 24) * 24);
+  assert.equal(await evaluate(tab, `document.querySelectorAll('table tbody tr').length`), owned);
+  const implementation = await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'src/modules/${module}.c')?.getAttribute('href')`);
+  observer.stage('lookup');
+  const requestId = moduleResponses.get(modulePath);
+  assert.ok(requestId, 'Missing originating module detail response');
+  observer.select(requestId, modulePath);
+  observer.stage('body-call');
+  // The originating request's body was captured before the page consumed it; no other read is made.
+  const text = await capture.bodyFor(requestId);
+  observer.stage('body-decode');
+  const snapshot = JSON.parse(text).data;
+  assert.equal(snapshot.module.moduleId, module);
+  observer.stage('source-link');
+  assertStructureSourceLink(implementation, { revision, browserOrigin, snapshot });
+  observer.stage('after-source-link');
+  await cdp.call('Page.navigate', { url: browserOrigin + `${revision}/modules` }, tab.sessionId);
+  await ready(tab, `document.body.innerText.includes('Showing 1–100 of ${fixture.modules} modules.') && document.querySelector('table caption')?.textContent === 'Recorded totals'`, 'module inventory with recorded totals');
+  assert.ok(await evaluate(tab, `[...document.querySelectorAll('dt')].find(dt => dt.textContent === 'Names shared by several functions or globals')?.nextElementSibling.textContent === '1'`));
+  await heap();
+  for (const width of [390, 320]) {
+    await cdp.call('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: false }, tab.sessionId);
+    const dimensions = await evaluate(tab, `({ available: document.documentElement.clientWidth, document: document.documentElement.scrollWidth })`);
+    assert.ok(dimensions.document <= dimensions.available, `Structure view overflows at ${width}px: ${JSON.stringify(dimensions)}`);
+  }
+  assert.ok(inventoryReads.length >= 22 && inventoryReads.every((limit) => limit === '100'), 'Every inventory read must request one bounded page');
+  assert.deepEqual(tab.exceptions, []);
+  assert.ok(tab.requests.every((request) => ['GET', 'HEAD'].includes(request.method)));
+  assert.ok(peakBrowserHeapBytes <= 128 * 1024 * 1024, `Browser heap ${peakBrowserHeapBytes} exceeds the D0 budget`);
+  pageMs.sort((a, b) => a - b);
+  return { recordedFunctions: fixture.functions, modules: fixture.modules, modelBytes: fixture.modelBytes, rowsPerPage: 100,
+    pagesVisited: 21, maximumMountedRows: 100, firstPageMs: Math.round(firstPageMs), pageMsP50: Math.round(pageMs[10]),
+    pageMsP95: Math.round(pageMs[18]), searchMs: Math.round(searchMs), peakBrowserHeapBytes, cursorReload: true,
+    pinnedCrossLinks: true, moduleSourceLink: true, narrowReflow: true, boundedInventoryReads: inventoryReads.length, mutationRequests: 0 };
+}
+
 export function nearestRankP95(values) {
   if (!Array.isArray(values) || values.length === 0 || values.some(value => !Number.isFinite(value) || value < 0)) {
     throw new TypeError('p95 requires non-empty finite nonnegative samples');
@@ -686,6 +1054,10 @@ export function createStructureResponseRecorder({ candidateLimit = MODULE_CANDID
       value.responseRequestId = safeId(responseRequestId);
       value.capture = ['not-ok', 'response-error', 'read-failed', 'foreign'].includes(reason) ? reason : 'unavailable';
     },
+    /** Ledger network IDs recorded for this module route, in arrival order; for the in-memory observer only. */
+    networkIds(path) {
+      return order.filter((value) => value.path === path).map((value) => value.networkId);
+    },
     continued(networkId, ok) {
       const value = byNetworkId.get(safeId(networkId));
       if (value) value.continuation = ok ? 'continued' : 'continue-failed';
@@ -711,8 +1083,9 @@ export function createStructureResponseRecorder({ candidateLimit = MODULE_CANDID
       };
     },
     /**
-     * Identify the single captured response whose recorded identity the rendered page shows. Superseded requests
-     * cancelled before any body was captured are accounted for; every other candidate must be the consumed one.
+     * Identify the captured response whose recorded identity the rendered page shows. Superseded requests
+     * cancelled before any body was captured and byte-identical continued refetches are accounted for; every other
+     * candidate must be the consumed one.
      */
     consumedResponse(path, matchesRendered) {
       const captures = order.filter((value) => value.path === path);
@@ -735,24 +1108,29 @@ export function createStructureResponseRecorder({ candidateLimit = MODULE_CANDID
         try { matched = matchesRendered(snapshot) === true; } catch { matched = false; }
         if (matched) matches.push({ value, snapshot });
       }
-      if (matches.length > 1) {
-        for (const { value } of matches) value.role = 'duplicate-match';
-        fail('Unaccounted duplicate module responses');
-      }
       if (matches.length === 0) fail('No captured module response matches the rendered identity');
-      const [{ value: consumed, snapshot }] = matches;
+      // As on master (#1879), matching captures with byte-identical bodies are one response fetched again: a
+      // benign refetch. Matching captures whose bytes differ conflict, and nothing else excuses them.
+      if (matches.some(({ value }) => value.body !== matches[0].value.body)) {
+        for (const { value } of matches) value.role = 'conflicting-match';
+        fail('Conflicting module responses match the rendered identity');
+      }
+      const delivered = (value) => value.pausedStatus === 200 && value.networkStatus === 200 && !value.fromDiskCache
+        && !value.fromServiceWorker && value.continuation === 'continued' && value.terminal !== 'failed';
+      const { value: consumed, snapshot } = matches.find(({ value }) => delivered(value)) ?? matches[0];
       consumed.role = 'consumed';
-      const valid = consumed.pausedStatus === 200 && consumed.networkStatus === 200 && !consumed.fromDiskCache
-        && !consumed.fromServiceWorker && consumed.continuation === 'continued' && consumed.terminal !== 'failed';
+      // A refetch, like master's other captures, must itself have been continued unchanged.
+      for (const { value } of matches) if (value !== consumed && value.continuation === 'continued') value.role = 'identical-refetch';
       for (const value of captures) {
         if (value === consumed) continue;
         if (value.terminal === 'canceled' && value.capture === 'pending') value.role = 'superseded-canceled';
       }
-      if (!valid) fail('Consumed module response violates delivery constraints');
+      if (!delivered(consumed)) fail('Consumed module response violates delivery constraints');
       if (captures.some((value) => value.role === undefined)) fail('Unaccounted module response');
       return { snapshot, evidence: { networkId: consumed.networkId, xRequestId: consumed.responseRequestId,
         terminal: consumed.terminal, candidates: captures.length,
-        supersededCanceled: captures.filter((value) => value.role === 'superseded-canceled').length } };
+        supersededCanceled: captures.filter((value) => value.role === 'superseded-canceled').length,
+        identicalRefetches: captures.filter((value) => value.role === 'identical-refetch').length } };
     },
   };
 }
@@ -761,7 +1139,7 @@ export function createStructureResponseRecorder({ candidateLimit = MODULE_CANDID
  * Fetch.requestPaused handler: reads the body before continuation and always continues the response unchanged.
  * It never fulfils, fails, retries, or refetches a request.
  */
-export function createModuleResponseInterceptor({ call, recorder, browserOrigin }) {
+export function createModuleResponseInterceptor({ call, recorder, browserOrigin, observer = null }) {
   return async (event) => {
     const interceptionId = event?.requestId;
     let ok = false;
@@ -787,7 +1165,9 @@ export function createModuleResponseInterceptor({ call, recorder, browserOrigin 
         return;
       }
       let body;
-      try { body = await call('Fetch.getResponseBody', { requestId: interceptionId }); }
+      // The #1879 observer, when given, records this response-stage read's ordering and outcome (R2).
+      const read = () => call('Fetch.getResponseBody', { requestId: interceptionId });
+      try { body = await (observer ? observer.bodyCall(networkId, read) : read()); }
       catch {
         recorder.bodyUnavailable(networkId, path, { status, responseRequestId, reason: 'read-failed' });
         return;
@@ -1494,16 +1874,34 @@ export function assessArchivedConsumption(measurements) {
   return valid ? { validatedConsumption: true } : { validatedConsumption: false, status: 'FAIL', reason: 'unproven: report lacks response-body and document-nonce consumption evidence' };
 }
 
-export async function qualifyStructure(options) {
-  const jvmRssSampler = await startJvmRssSampler(options.applicationPid);
-  try { return await qualifyStructureWithRssSampler(options, jvmRssSampler); }
-  finally { await jvmRssSampler.stop(); }
+/** Attaches the #1879 observer's bounded snapshot to a budgeted or cold failure, as qualifyStructure does (R2). */
+async function observeStructureFailure(run) {
+  const observer = moduleBodyObserver();
+  try {
+    return await run(observer);
+  } catch (error) {
+    if (error !== null && typeof error === 'object' && !structureFailures.has(error)) {
+      try { structureFailures.set(error, observer.snapshot()); }
+      catch { /* Evidence never replaces the original failure. */ }
+    }
+    throw error;
+  }
+}
+
+export async function qualifyStructureBudgets(options) {
+  return observeStructureFailure(async (observer) => {
+    const jvmRssSampler = await startJvmRssSampler(options.applicationPid);
+    try { return await qualifyStructureWithRssSampler(options, jvmRssSampler, observer); }
+    finally { await jvmRssSampler.stop(); }
+  });
 }
 
 export async function qualifyStructureColdSample(options) {
-  const jvmRssSampler = await startJvmRssSampler(options.applicationPid);
-  try { return await qualifyStructureWithRssSampler({ ...options, coldSample: true }, jvmRssSampler); }
-  finally { await jvmRssSampler.stop(); }
+  return observeStructureFailure(async (observer) => {
+    const jvmRssSampler = await startJvmRssSampler(options.applicationPid);
+    try { return await qualifyStructureWithRssSampler({ ...options, coldSample: true }, jvmRssSampler, observer); }
+    finally { await jvmRssSampler.stop(); }
+  });
 }
 
 export async function qualifyStructureRecordDownloads({ fixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin,
@@ -1578,8 +1976,9 @@ export async function qualifyStructureRecordDownloads({ fixture, makeTarget, cdp
 }
 
 async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin,
-  profile: profileName = 'loopback', coldSample = false }, jvmRssSampler) {
+  profile: profileName = 'loopback', coldSample = false }, jvmRssSampler, observer = moduleBodyObserver()) {
   const tab = await makeTarget();
+  observer.attach(cdp, tab.sessionId, browserOrigin);
   const profile = structureProfile(profileName);
   await applyStructureProfile(cdp, tab.sessionId, profile);
   const localFeedbackMs = [];
@@ -1665,7 +2064,7 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   cdp.on('Network.loadingFinished', (event) => moduleResponses.loadingFinished(event.requestId), tab.sessionId);
   cdp.on('Network.loadingFailed', (event) => moduleResponses.loadingFailed(event.requestId, event), tab.sessionId);
   cdp.on('Fetch.requestPaused', createModuleResponseInterceptor({
-    call: (method, params) => cdp.call(method, params, tab.sessionId), recorder: moduleResponses, browserOrigin,
+    call: (method, params) => cdp.call(method, params, tab.sessionId), recorder: moduleResponses, browserOrigin, observer,
   }), tab.sessionId);
   await cdp.call('Fetch.enable', { patterns: [moduleDetailFetchPattern(browserOrigin)] }, tab.sessionId);
   cdp.on('Network.requestWillBeSent', (event) => {
@@ -1863,14 +2262,21 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   const implementation = await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'src/modules/${module}.c')?.getAttribute('href')`);
   const evidenceFailures = [];
   let moduleResponseEvidence = null;
+  const moduleApiPath = `/nested/api/v1/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}/modules/${module}`;
+  // #1879 stages: a readiness failure above stays at before-lookup; a lone candidate is selected before matching.
+  observer.stage('lookup');
+  const moduleCandidates = moduleResponses.networkIds(moduleApiPath);
+  if (moduleCandidates.length === 1) observer.select(moduleCandidates[0], moduleApiPath);
+  observer.stage('body-decode');
   try {
-    const consumed = moduleResponses.consumedResponse(
-      `/nested/api/v1/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}/modules/${module}`,
+    const consumed = moduleResponses.consumedResponse(moduleApiPath,
       (snapshot) => {
         assert.equal(snapshot?.module?.moduleId, module);
         assertStructureSourceLink(implementation, { revision, browserOrigin, snapshot });
         return true;
       });
+    if (moduleCandidates.length !== 1) observer.select(consumed.evidence.networkId, moduleApiPath);
+    observer.stage('after-source-link');
     moduleResponseEvidence = consumed.evidence;
   } catch (failure) {
     let rendered = { path: false, moduleHeading: false, ownedTable: false };

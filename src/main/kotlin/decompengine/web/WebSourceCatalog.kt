@@ -107,12 +107,46 @@ internal class WebSourceCatalogEvidence(
             revision(reference, manifest, captured) { snapshot ->
                 if (expectedMetadataVersion != null && expectedMetadataVersion != snapshot.metadataVersion) expiredSourceMetadata()
                 val file = selectRevisionSourceFile(snapshot, fileId, purpose)
-                val content = WebRevisionSourceContent(snapshot, fileId, file,
-                    readSource(reference.jobId, reference.runId, file.evidence.path, WebRevisionSourceContent.MAXIMUM_FILE_BYTES))
-                content.requireSame(readSource(reference.jobId, reference.runId, file.evidence.path, WebRevisionSourceContent.MAXIMUM_FILE_BYTES))
+                fun capture() = try {
+                    readSource(reference.jobId, reference.runId, file.evidence.path, WebRevisionSourceContent.MAXIMUM_FILE_BYTES)
+                } catch (_: RepairBudgetExceededException) { sourceFileTooLarge() } // Only manifest-only sizes are unrecorded.
+                val content = WebRevisionSourceContent(snapshot, fileId, file, capture())
+                content.requireSame(capture())
                 content
             }
         }
+
+    /**
+     * One bounded search admission. Metadata is captured before and after the scan; each body is selected only from
+     * that snapshot's canonical inputs and must match its committed size and SHA-256. Missing bodies are reported as
+     * unavailable to the scan; changed bodies or metadata refuse the whole page.
+     */
+    fun search(reference: WebRevisionSourceReference, readSource: (String, String, String, Long) -> StableRegularFile,
+        scan: (WebRevisionSourceSnapshot, (WebRevisionSourceFile) -> ByteArray?) -> JsonObject): JsonObject {
+        if (!searching.compareAndSet(false, true)) {
+            throw WebAccessDenied(429, "SOURCE_SEARCH_BUSY", "Another source search is in progress. Try this search again later.")
+        }
+        try {
+            val before = readRevision(reference)
+            val members = Collections.newSetFromMap(java.util.IdentityHashMap<WebRevisionSourceFile, Boolean>()).apply { addAll(before.files) }
+            val result = scan(before) { file ->
+                check(file in members)
+                val captured = try {
+                    // The scan reserves this limit plus the pinned reader's one-byte overflow probe, even on failure.
+                    readSource(reference.jobId, reference.runId, file.evidence.path, sourceSearchReadReservation(file) - 1)
+                } catch (failure: Exception) {
+                    if (failure is WebAccessDenied || failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
+                    null
+                }
+                captured?.bytes?.copyOf()?.also { bytes ->
+                    if (bytes.size.toLong() != file.sizeBytes || captured.sha256 != file.evidence.sha256 ||
+                        WebExplorationArtifact.sha256(bytes) != file.evidence.sha256) revisionSourceChanged()
+                }
+            }
+            if (readRevision(reference).metadataVersion != before.metadataVersion) revisionSourceChanged()
+            return result
+        } finally { searching.set(false) }
+    }
 
     /**
      * Program-structure projection of the selected candidate. A retained projection is reused only for the
@@ -229,13 +263,14 @@ internal class WebSourceCatalogEvidence(
                     if (read.sha256 != record.sha256 || WebExplorationArtifact.sha256(read.bytes) != record.sha256) revisionSourceChanged()
                     return read.bytes
                 }
-                override fun entity(record: WebStructureRecord, maximumBytes: Int, offset: Long): WebStructureEntityFields {
-                    val stream = streamArtifact ?: return super.entity(record, maximumBytes, offset)
+                override fun entity(record: WebStructureRecord, maximumBytes: Int, offset: Long,
+                    policy: WebRedactionPolicy): WebStructureEntityFields {
+                    val stream = streamArtifact ?: return super.entity(record, maximumBytes, offset, policy)
                     require(offset in 0 until record.sizeBytes)
                     var fields: WebStructureEntityFields? = null
                     stream(reference.jobId, "$root/${record.path}", maximumBytes.toLong(), record.sha256, record.sizeBytes) { input ->
                         input.skipNBytes(offset)
-                        fields = readWebStructureEntity(input)
+                        fields = readWebStructureEntity(input, policy = policy)
                     }
                     return checkNotNull(fields)
                 }
@@ -252,37 +287,6 @@ internal class WebSourceCatalogEvidence(
             tasks.forEach { it.cancel(true) }
             finished()
         }
-    }
-
-    /**
-     * One bounded search admission. Metadata is captured before and after the scan; each body is selected only from
-     * that snapshot's canonical inputs and must match its committed size and SHA-256. Missing bodies are reported as
-     * unavailable to the scan; changed bodies or metadata refuse the whole page.
-     */
-    fun search(reference: WebRevisionSourceReference, readSource: (String, String, String, Long) -> StableRegularFile,
-        scan: (WebRevisionSourceSnapshot, (WebRevisionSourceFile) -> ByteArray?) -> JsonObject): JsonObject {
-        if (!searching.compareAndSet(false, true)) {
-            throw WebAccessDenied(429, "SOURCE_SEARCH_BUSY", "Another source search is in progress. Try this search again later.")
-        }
-        try {
-            val before = readRevision(reference)
-            val members = Collections.newSetFromMap(java.util.IdentityHashMap<WebRevisionSourceFile, Boolean>()).apply { addAll(before.files) }
-            val result = scan(before) { file ->
-                check(file in members)
-                val captured = try {
-                    readSource(reference.jobId, reference.runId, file.evidence.path, WebRevisionSourceContent.MAXIMUM_FILE_BYTES)
-                } catch (failure: Exception) {
-                    if (failure is WebAccessDenied || failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
-                    null
-                }
-                captured?.bytes?.copyOf()?.also { bytes ->
-                    if (bytes.size.toLong() != file.sizeBytes || captured.sha256 != file.evidence.sha256 ||
-                        WebExplorationArtifact.sha256(bytes) != file.evidence.sha256) revisionSourceChanged()
-                }
-            }
-            if (readRevision(reference).metadataVersion != before.metadataVersion) revisionSourceChanged()
-            return result
-        } finally { searching.set(false) }
     }
 
     private fun <T> revision(reference: WebRevisionSourceReference, manifest: decompengine.project.SourceTreeManifest,

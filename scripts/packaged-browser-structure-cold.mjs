@@ -1,9 +1,10 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { basename, dirname, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { createReadStream } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { MAX_REPORT_BYTES, MAX_REPORT_PARTS, REPORT_PART_BYTES } from './packaged-browser-restart.mjs';
 
 export const COLD_SAMPLE_COUNT = 20;
 export const COLD_SAMPLE_TIMEOUT_MS = 45_000;
@@ -13,7 +14,6 @@ export const STRUCTURE_QUALIFICATION_SOURCE_FILES = Object.freeze([
   'frontend/package.json',
   'scripts/check-packaged-web-browser.mjs',
   'scripts/packaged-browser-structure.mjs',
-  'scripts/packaged-browser-native-download.mjs',
   'scripts/packaged-browser-structure-cold.mjs',
   'scripts/packaged-browser-structure-profile.json',
   'scripts/frontend-node-sha256.txt',
@@ -33,6 +33,13 @@ export const STRUCTURE_QUALIFICATION_SOURCE_FILES = Object.freeze([
   'scripts/packaged-browser-upgrade.mjs',
   'scripts/packaged-browser-audit.mjs',
   'scripts/packaged-browser-cdp-diagnostics.mjs',
+  'scripts/packaged-browser-target-lifecycle.mjs',
+  'scripts/packaged-browser-temp-parent.mjs',
+  'scripts/packaged-browser-log-server-phases.mjs',
+  'scripts/packaged-browser-logs.mjs',
+  'scripts/packaged-browser-log-projection-evidence.mjs',
+  'scripts/packaged-browser-sources.mjs',
+  'scripts/packaged-browser-native-download.mjs',
   'scripts/test-packaged-browser-structure.mjs',
   'scripts/test-packaged-browser-structure-cold.mjs',
 ]);
@@ -169,16 +176,61 @@ export async function verifyStructureBrowser({ repoRoot, chromePath, sourceLockP
     revision: sourceLock.revision, archiveSha256: sourceLock.sha256, executableSha256, lockSha256: createHash('sha256').update(sourceLockBytes).digest('hex') };
 }
 
-async function waitForProcessGroupExit(pid, timeoutMs) {
+/**
+ * Live (not zombie or dead) members of a Linux process group, read from /proc. Returns null when absence cannot be
+ * established: an unreadable /proc, an unreadable entry other than one that exited meanwhile, or a malformed record.
+ */
+export async function liveProcessGroupMembers(processGroupId, { readdir = fs.readdir, readFile = fs.readFile } = {}) {
+  let names;
+  try { names = await readdir('/proc'); }
+  catch { return null; }
+  const pids = names.filter(name => /^[1-9][0-9]{0,9}$/.test(name));
+  const live = [];
+  for (let start = 0; start < pids.length; start += 64) {
+    const batch = await Promise.all(pids.slice(start, start + 64).map(name => Promise.resolve().then(() => readFile(`/proc/${name}/stat`, 'utf8'))
+      .then(stat => ({ name, stat }), error => ({ name, error }))));
+    for (const { name, stat, error } of batch) {
+      if (error) {
+        if (error?.code === 'ENOENT' || error?.code === 'ESRCH') continue; // Exited after the listing.
+        return null;
+      }
+      const member = liveMember(stat, processGroupId);
+      if (member === null) return null; // A malformed record cannot prove absence.
+      if (member) live.push(Number(name));
+    }
+  }
+  return live;
+}
+
+/** True for a live member of the group, false for another group or a zombie or dead member, null when malformed. */
+function liveMember(stat, processGroupId) {
+  const commandEnd = typeof stat === 'string' ? stat.lastIndexOf(') ') : -1;
+  const fields = commandEnd < 0 ? [] : stat.slice(commandEnd + 2).trim().split(/\s+/);
+  const state = fields[0];
+  const group = Number(fields[2]);
+  if (!/^[A-Za-z]$/.test(state ?? '') || !Number.isSafeInteger(group)) return null;
+  return group === processGroupId && !['Z', 'X', 'x'].includes(state);
+}
+
+/**
+ * Confirms that no live member of the process group remains. kill(-group, 0) still succeeds while the group holds only
+ * zombies that a non-reaping PID 1 never collects (R4), so those are read from /proc: two zombie-only observations one
+ * poll apart mean no member can still run or fork. Anything that cannot be established stays unconfirmed.
+ */
+export async function waitForProcessGroupExit(pid, timeoutMs, { members = liveProcessGroupMembers, pollMs = 100 } = {}) {
   if (process.platform !== 'linux' || !Number.isSafeInteger(pid) || pid <= 0) return false;
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  let zombieOnlyObservations = 0;
+  for (;;) {
     try { process.kill(-pid, 0); }
     catch (error) { return error?.code === 'ESRCH'; }
-    await new Promise(resolve => setTimeout(resolve, 100));
+    const live = await members(pid);
+    zombieOnlyObservations = Array.isArray(live) && live.length === 0 ? zombieOnlyObservations + 1 : 0;
+    if (zombieOnlyObservations >= 2) return true;
+    // A zombie-only observation at the deadline gets exactly one more poll to complete its pair.
+    if (Date.now() >= deadline && zombieOnlyObservations === 0) return false;
+    await new Promise(resolve => setTimeout(resolve, pollMs));
   }
-  try { process.kill(-pid, 0); return false; }
-  catch (error) { return error?.code === 'ESRCH'; }
 }
 
 async function forceStopProcessGroup(pid, timeoutMs = 10_000) {
@@ -340,7 +392,7 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
         browserHeapBytes: evidence?.browserHeapMemory?.sampledPeakBytes ?? null,
         jvmRssIncrementBytes: evidence?.jvmMemory?.incrementalPeakBytes ?? null,
         profileApplied: evidence?.profileApplied ?? null,
-        reportPath: childReport?.path ?? null, reportSha256: childReport?.sha256 ?? null, driverCommit: report?.driverCommit ?? null,
+        reportPath: childReport?.path ?? null, reportSha256: childReport?.sha256 ?? null, reportFullSha256: childReport?.fullSha256 ?? null, driverCommit: report?.driverCommit ?? null,
         driverPullRequestHeadCommit: report?.driverPullRequestHeadCommit ?? null,
         driverPullRequestBaseCommit: report?.driverPullRequestBaseCommit ?? null,
         sourceIdentity: report?.sourceIdentity ?? null,
@@ -351,8 +403,9 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
         shutdownConfirmed, processTreeForced, timedOut, error: outcome.timeout ? 'Cold sample timed out'
           : outcome.error ? String(outcome.error.message).slice(0, 512)
           : !report ? `Child exited with code ${exitCode ?? 'unknown'} without a retained report; primary failure unavailable`
-          : report.reportBound?.status === 'exceeded'
-            ? `Child report exceeded its byte bound; primary failure: ${firstDiagnosticLine(report.error) ?? 'unavailable'}`
+          // A #1882 publication failure leaves a bounded failure record whose facts are scrubbed previews.
+          : report.reportPublication?.status === 'failed'
+            ? `Child report publication failed; primary failure: ${firstDiagnosticLine(report.error?.preview) ?? 'unavailable'}`
           : !sourceHeadMatches ? 'Child report did not match the declared pull-request head SHA'
           : !sourceBaseMatches ? 'Child report did not match the declared pull-request base SHA'
           : !revisionBindingMatches ? 'Child report did not bind the source commit to the declared pull-request revisions'
@@ -360,7 +413,7 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
           : evidence?.failures?.[0] ?? (report.status !== 'passed' ? firstDiagnosticLine(report.error) : null) ?? (processTreeForced ? 'Forced process-group kill was required after the packaged driver exited'
             : evidence?.profileApplied !== profile.name ? 'Child report did not confirm the requested profile' : null),
         failureClass: passed ? null : outcome.timeout ? 'timeout' : outcome.error ? 'launch' : !report ? 'report-unavailable'
-          : report.reportBound?.status === 'exceeded' ? 'report-cap' : 'reported',
+          : report.reportPublication?.status === 'failed' ? 'report-publication' : 'reported',
         diagnostic });
       if (!shutdownConfirmed) break; // Never overlap another run with an unconfirmed child process tree.
       if (interrupted) break;
@@ -423,13 +476,66 @@ function firstDiagnosticLine(value) {
   return line ? line.trim().slice(0, 512) : null;
 }
 
-async function readChildReport(stdout) {
+const reportDigest = bytes => createHash('sha256').update(bytes).digest('hex');
+
+/**
+ * Reads a child's report. When #1882 publication moved facts out of report.json into digest references, the full
+ * scrubbed report is rebuilt from its parts and bound back to report.json, so aggregation never reads structureCold or
+ * any other field from a reference (R5). Every inconsistency throws, which fails that sample.
+ */
+export async function readChildReport(stdout, { readFile = fs.readFile } = {}) {
   const match = stdout.match(/Report: (.+\/report\.json)\s*$/m);
   if (!match) return null;
   const path = resolve(match[1]);
-  const bytes = await fs.readFile(path);
-  const report = JSON.parse(bytes.toString('utf8'));
-  return { path, report, sha256: createHash('sha256').update(bytes).digest('hex') };
+  const bytes = await readFile(path);
+  if (bytes.length > MAX_REPORT_BYTES) throw new Error('Child report.json exceeds its published byte bound');
+  const primary = JSON.parse(bytes.toString('utf8'));
+  if (!primary || typeof primary !== 'object' || Array.isArray(primary)) throw new Error('Child report.json is not a report object');
+  if (!Object.hasOwn(primary, 'reportEvidence')) return { path, report: primary, sha256: reportDigest(bytes) };
+  const { report, fullSha256 } = await reconstructChildReport(dirname(path), primary, readFile);
+  return { path, report, sha256: reportDigest(bytes), fullSha256 };
+}
+
+async function reconstructChildReport(directory, primary, readFile) {
+  const fail = (message) => { throw new Error(`Child report parts are inconsistent: ${message}`); };
+  const evidence = primary.reportEvidence;
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) fail('reportEvidence is not an object');
+  const { parts, bytes: fullLength, sha256: fullSha256, referencedKeys } = evidence;
+  if (evidence.partBytes !== REPORT_PART_BYTES || evidence.maxParts !== MAX_REPORT_PARTS || evidence.primaryMaxBytes !== MAX_REPORT_BYTES) {
+    fail('unexpected publication limits');
+  }
+  if (!Number.isSafeInteger(fullLength) || fullLength <= MAX_REPORT_BYTES || fullLength > REPORT_PART_BYTES * MAX_REPORT_PARTS) fail('full size');
+  if (!/^[0-9a-f]{64}$/.test(fullSha256 ?? '')) fail('full digest');
+  if (!Array.isArray(parts) || parts.length !== Math.ceil(fullLength / REPORT_PART_BYTES)) fail('part count');
+  const chunks = [];
+  let offset = 0;
+  for (const [index, part] of parts.entries()) {
+    // Names are checked before any read, so a part can never name a path outside the report directory.
+    if (part?.file !== `report.full.part-${String(index).padStart(3, '0')}`) fail(`part ${index} name`);
+    if (part.bytes !== Math.min(REPORT_PART_BYTES, fullLength - offset) || !/^[0-9a-f]{64}$/.test(part.sha256 ?? '')) fail(`part ${index} size`);
+    const data = await readFile(join(directory, part.file));
+    if (data.length !== part.bytes || reportDigest(data) !== part.sha256) fail(`part ${index} bytes`);
+    chunks.push(data);
+    offset += data.length;
+  }
+  const fullBytes = Buffer.concat(chunks);
+  if (fullBytes.length !== fullLength || reportDigest(fullBytes) !== fullSha256) fail('reassembled bytes');
+  const report = JSON.parse(fullBytes.toString('utf8'));
+  if (!report || typeof report !== 'object' || Array.isArray(report) || Object.hasOwn(report, 'reportEvidence')) fail('full report shape');
+  // report.json must be exactly the full report with only its listed keys replaced by their digest references.
+  const keys = Object.keys(primary).filter(key => key !== 'reportEvidence');
+  if (JSON.stringify(keys) !== JSON.stringify(Object.keys(report))) fail('top-level keys');
+  if (!Array.isArray(referencedKeys) || new Set(referencedKeys).size !== referencedKeys.length
+    || referencedKeys.some(key => key === 'status' || !keys.includes(key))) fail('referenced keys');
+  for (const key of keys) {
+    const valueBytes = Buffer.from(JSON.stringify(report[key]), 'utf8');
+    if (referencedKeys.includes(key)) {
+      const reference = primary[key];
+      if (reference?.reportEvidence !== key || reference.bytes !== valueBytes.length || reference.sha256 !== reportDigest(valueBytes)
+        || Object.keys(reference).length !== 3) fail(`reference ${key}`);
+    } else if (JSON.stringify(primary[key]) !== JSON.stringify(report[key])) fail(`inline ${key}`);
+  }
+  return { report, fullSha256 };
 }
 
 export async function writeColdAggregate(path, result) {

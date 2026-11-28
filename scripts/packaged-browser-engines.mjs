@@ -9,6 +9,7 @@ import { assertAudit, auditFixtures, clickJourneyLink, runGraphJourney, auditPro
 import { createEngineDiagnostics, diagnosticOverflowFailure } from './packaged-browser-engine-diagnostics.mjs';
 import { armAttemptCommandSettle } from './packaged-browser-engine-keyboard.mjs';
 import { isPlaywrightScreenshotCspViolation, openEngineAuditPage, serveEngineAuditFixtures, waitForEngineExpression } from './packaged-browser-engine-adapter.mjs';
+import { attachExceptionContext, summarizeExceptionContexts } from './packaged-browser-exception-context.mjs';
 
 // Cross-engine packaged smoke and audit (#631). The DevTools-based check-packaged-web-browser.mjs
 // is Chromium-only; this runner drives Firefox, WebKit or Chromium through Playwright against the
@@ -49,6 +50,7 @@ function parseUrl(value, label) {
 const report = { status: 'running', engine: values.engine, playwright: readJson(join(values.playwright, 'package.json'), 'Playwright package metadata').version,
   driverNode: process.versions.node, evidenceDirectory: root };
 const secrets = [];
+const exceptionContexts = [];
 const safe = (text) => secrets.reduce((value, secret) => value.replaceAll(secret, '[redacted]'), String(text)).replaceAll(/#bootstrap=[A-Za-z0-9_-]+/g, '#bootstrap=[redacted]');
 let work; let application; let browser; let output = ''; let errors = '';
 
@@ -101,7 +103,9 @@ async function stop(child) {
 /** One context per viewport; CSP violations, responses and workers are recorded per context. */
 async function context(options = {}) {
   const created = await browser.newContext({ acceptDownloads: true, ...options });
-  const record = { responses: [], csp: [], documents: [], exceptions: [], workers: [], apiRequests: [] };
+  const exceptionContext = attachExceptionContext(created);
+  exceptionContexts.push(exceptionContext);
+  const record = { responses: [], csp: [], documents: [], exceptions: [], workers: [], apiRequests: [], exceptionContext };
   const diag = diagnostics.context(diagnostics.currentPhase() ?? 'unscoped');
   record.diagnosticContext = diag.id;
   await created.exposeBinding('__decompRecordCspViolation', (_source, payload) => {
@@ -478,6 +482,7 @@ async function probeApplicationShellCsp(origin) {
 /** Real server session: bootstrap link, cookie restore across reload, runtime identity and sign-out. */
 async function smoke(origin, manifest) {
   const { context: created, record } = await context();
+  record.exceptionContext.auditPhase = 'smoke';
   const page = await created.newPage();
   const link = await waitFor(() => output.split(/\s+/).find((part) => part.startsWith(`${origin}/nested/#bootstrap=`)), 'local bootstrap handoff');
   secrets.push(parseUrl(link, 'bootstrap handoff').hash.slice('#bootstrap='.length));
@@ -502,6 +507,7 @@ async function smoke(origin, manifest) {
   await page.getByRole('button', { name: 'Sign out' }).click();
   await page.getByText(/You signed out of this browser/).waitFor();
   const storage = await page.evaluate(() => localStorage.length + sessionStorage.length);
+  record.exceptionContext.auditPhase = 'smoke closing';
   await created.close();
   return { record, result: { authenticated: true, fragmentRemoved: true, restoredAfterReload: true, runtimeBuild: manifest.buildId, signedOut: true, storageEntries: storage } };
 }
@@ -523,6 +529,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
   const populated = (page) => `document.querySelector('main h1') !== null && document.querySelector('main [aria-busy="true"]') === null
     && document.body.innerText.includes(${JSON.stringify(page.rendered)}) && !document.querySelector('main [role="alert"]')`;
   const open = async (target, page, context, prepare = true) => {
+    records.at(-1).exceptionContext.auditPhase = `${context}: ${page.name}`;
     try {
       interactions.push(...await diagnostics.phase(`navigate:${context}:${page.name}`, () => openEngineAuditPage(target, { origin, page, fulfilled, context, prepare })));
     } catch (failure) {
@@ -692,6 +699,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
         evaluate: expression => target.evaluate(expression) }));
       record.workerPurpose = null;
     });
+    record.exceptionContext.auditPhase = `${viewport.name} closing`;
     await created.close();
   });
   // Timing: initial-route metadata only; explicit-read population is recorded in interactions.
@@ -707,6 +715,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
       const cycle = fixtures.pages.filter((page) => page.name !== 'upload');
       for (let index = 0; index < 50; index += 1) {
         const page = cycle[(index + 1) % cycle.length];
+        record.exceptionContext.auditPhase = `route timing ${index}: ${page.name}`;
         const timing = await diagnostics.phase(`timing:route-${index}:${page.name}`, () => target.evaluate(`new Promise((resolve, reject) => {
           const target = ${JSON.stringify(page.path)};
           const link = document.createElement('a'); link.href = target; link.textContent = 'audit'; document.querySelector('main').append(link);
@@ -723,6 +732,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
         feedback.push(timing.focused); data.push(timing.populated);
       }
     }
+    record.exceptionContext.auditPhase = `cold sample ${sample} closing`;
     await created.close();
   });
   const summary = (list) => { const sorted = [...list].sort((a, b) => a - b); const at = (f) => Number(sorted[Math.min(sorted.length - 1, Math.ceil(f * sorted.length) - 1)].toFixed(1));
@@ -753,12 +763,12 @@ try {
   const audited = await diagnostics.phase('audit', () => audit(origin, installation.manifest));
   report.audit = audited.result;
   report.auditOrigins = { packaged: origin, fixtures: audited.origin };
+  const interactionPages = auditFixtures(repo, installation.manifest.buildId).pages;
   report.auditVerdict = assertAudit(audited.result, installation.manifest, audited.responses, audited.origin, undefined,
     // Chrome-only connection, explicit-filter and source-file-open timings are qualified by DevTools
     // (#1896, #623); this runner does not measure them, so their verdicts are omitted rather than claimed.
     { connectionNotice: false, jobFilter: false, fileOpen: false,
-      interactionPages: auditFixtures(repo, installation.manifest.buildId).pages,
-      extraInteractionContexts: engineSupplementalInteractionContexts });
+      interactionPages, extraInteractionContexts: engineSupplementalInteractionContexts(interactionPages) });
   const records = [smoked.record, ...audited.records];
   const cspEvents = records.flatMap((record) => record.csp);
   const playwrightScreenshotEvents = cspEvents.filter(isPlaywrightScreenshotCspViolation);
@@ -799,6 +809,8 @@ try {
     try { execFileSync(values.python, [installHelper, 'cleanup', '--work', work, '--owner-token', ownerToken]); report.workCleanupConfirmed = true; }
     catch (error) { report.workCleanupError = String(error); process.exitCode = 1; }
   }
+  // Report observations from every created context, including probes and interrupted journeys.
+  report.pageExceptionContexts = summarizeExceptionContexts(exceptionContexts.map((exceptionContext) => exceptionContext.snapshot()));
   await fs.writeFile(join(root, 'report.json'), safe(JSON.stringify(report, null, 2)) + '\n');
   console.log(`${values.engine}: ${report.status}. Report: ${join(root, 'report.json')}`);
 }

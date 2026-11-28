@@ -1,8 +1,12 @@
 name: Set up Gradle and refreshable compiler cache
 description: Keep dependency caching separate from default-branch compiler outputs
 inputs:
+  matrix:
+    description: Exact caller matrix dimensions for generated and metadata cache isolation
+    required: false
+    default: '{}'
   cache-read-only:
-    description: Preserve the basic Gradle dependency cache write policy
+    description: Restore Gradle dependencies without publishing a new cache
     required: false
     default: 'true'
 outputs:
@@ -18,9 +22,12 @@ outputs:
 runs:
   using: composite
   steps:
-    - uses: gradle/actions/setup-gradle@v6
+    - uses: gradle/actions/wrapper-validation@8da46b539cd8fe6ab27ca75128919a18d757604c # v6; retain wrapper authentication
+    - uses: minsago-elite/gradle-cache-action@6dea8fd64949676aa3da5d1e107d8efaaca7e05a
       with:
-        cache-provider: basic
+        cache-family: decomp-gradle-dependencies-v1
+        matrix: ${{ inputs.matrix }}
+        cache-key-prefix: decomp-gradle-v1
         cache-read-only: ${{ inputs.cache-read-only }}
     - name: Identify the compiler cache bucket without launching another JVM
       id: compiler-key

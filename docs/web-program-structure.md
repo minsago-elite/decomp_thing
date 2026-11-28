@@ -267,10 +267,12 @@ the packaged JVM, creates a fresh Chrome process and profile, exchanges a new lo
 session handoff, then measures the existing click-to-first-100-rendered-rows boundary.
 Bootstrap, JVM startup, fixture seeding and navigation to the attempt page are outside
 that interval. The 20 child reports retain every timing and failure; no failed sample
-is replaced. The aggregate gates nearest-rank p95 and requires 20 complete samples,
+is replaced. A child report over 512 KiB keeps its largest facts in digest-bound parts.
+The runner rebuilds those parts, checks every part and reference digest against
+`report.json`, and only then reads the sample; an inconsistent report fails the sample. The aggregate gates nearest-rank p95 and requires 20 complete samples,
 zero raw inventory loading failures, matching source/archive/JAR identities, unique
 run directories and observed JVM/Chrome process identities.
-Before either structure mode launches the package, the driver verifies that every
+Before a cold sample or a profiled structure run launches the package, the driver verifies that every
 qualification script it imports or invokes, plus the packaged CI workflow that
 defines its invocation, has the same Git blob identity as the declared source commit.
 Each report retains the per-file Git blob ID and SHA-256;
@@ -292,6 +294,10 @@ ignores cleanup, and refuses to treat forced cleanup as a passing sample. On a
 sample timeout, it sends `SIGTERM`, waits for the bounded grace period, then uses
 `SIGKILL` if the launcher or any descendant remains; that sample is recorded as
 timed out and failed even when cleanup is confirmed.
+A process group counts as stopped only when the signal-zero probe finds no members or
+`/proc` shows only zombie or dead members on two polls in a row. A host PID 1 that does
+not reap orphans therefore cannot hold the remaining samples back, and an unreadable or
+malformed `/proc` record keeps cleanup unconfirmed.
 Loopback first-page p95 is limited to 500 ms. The constrained profile applies 4× CPU
 slowdown, 100 ms round-trip latency, 10 Mbit/s download and 2 Mbit/s upload and limits
 first-page p95 to 1 s. Both profiles also gate the browser heap and JVM RSS budgets.
@@ -303,6 +309,14 @@ first-page p95 to 1 s. Both profiles also gate the browser heap and JVM RSS budg
   bound. The 20 reads use fresh cache instances in one already-running test JVM;
   they are not 20 fresh-process cold loads. It prints each sample plus the median,
   p95 and max.
+- `node scripts/check-packaged-web-browser.mjs --mode structure` without a profile runs the ordinary
+  journey: 20 keyboard pages, reload, search, pinned cross-links, the module source link
+  and reflow, with the #1879 module-body observations recorded on failure. It applies
+  none of the budgets below and does not verify source or browser identity. CI runs it
+  before the Vite proxy step, and runs the cold samples and both profiled journeys after
+  that step, so a budget failure cannot skip the ordinary journey or the proxy.
+  Failures of the profiled journeys and cold samples carry the same bounded #1879
+  observations in the report's `structureFailurePhase`.
 - `node scripts/check-packaged-web-browser.mjs --mode structure --structure-profile <loopback-or-constrained>` seeds a persisted
   100,000-function revision (`scripts/packaged-browser-structure.mjs`) into the
   packaged application and drives pinned Chrome: it opens the inventory from the
@@ -313,7 +327,7 @@ first-page p95 to 1 s. Both profiles also gate the browser heap and JVM RSS budg
   most 128 MiB and at most 500 mounted table rows. It samples `JSHeapUsedSize` every
   50 ms throughout the measured journey and fails if a sample fails or the largest
   observed gap exceeds 500 ms; the reported peak is sampled, not a continuous heap
-  trace. CI runs it in the `web-packaged` job.
+  trace. CI runs it in the `web-packaged` job for both profiles.
   Its seed writes manifests directly, so `WebProgramStructureTest` keeps
   `scripts/packaged-browser-structure-profile.json` equal to the current profile.
   During that journey the driver samples the packaged JVM's Linux `VmRSS` every

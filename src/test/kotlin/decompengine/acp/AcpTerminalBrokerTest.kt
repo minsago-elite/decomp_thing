@@ -324,18 +324,29 @@ class AcpTerminalBrokerTest {
                     maximumProducedBytes = 1024,
                 )) to AcpTerminalAuditReason.OUTPUT_LIMIT,
             )
-            cases.forEach { (fixture, expectedTerminationReason) ->
+            cases.forEachIndexed { caseIndex, (fixture, expectedTerminationReason) ->
                 val audit = AcpTerminalAuditRecorder()
                 val completion = broker(fixture, audit).use { broker ->
                     broker.bindSession(SESSION)
-                    val terminalId = broker.create(
-                        SESSION,
-                        fixture.command,
-                        fixture.args,
-                        fixture.root.path.toString(),
-                        emptyList(),
-                        null,
-                    ).terminalId
+                    val terminalId = try {
+                        broker.create(
+                            SESSION,
+                            fixture.command,
+                            fixture.args,
+                            fixture.root.path.toString(),
+                            emptyList(),
+                            null,
+                        ).terminalId
+                    } catch (failure: Throwable) {
+                        // Fixed case ordinal plus the existing bounded, redacted audit projection.
+                        // Diagnostic failure must not replace the original refusal or skip cleanup.
+                        try {
+                            failure.addSuppressed(AssertionError(
+                                "terminal-create case-index=$caseIndex ${audit.launchFailureContext()}",
+                            ))
+                        } catch (_: Throwable) { }
+                        throw failure
+                    }
                     broker.observeToolCall(SESSION, terminalUpdate("tool-1", terminalId))
                     val exited = broker.waitForExit(SESSION, terminalId)
                     broker.release(SESSION, terminalId)

@@ -273,7 +273,7 @@ function Comparison({ selected, basePath, query, scorecard, focus, onRoute }: {
     {read.state === 'failed' && <p role="alert">{structureReadMessage(read.failure)}</p>}
     {contradicts && <p role="alert">{structureReadMessage(new ApiClientError('invalid_response'))}</p>}
     {data && <>
-      <p>{copy.baseline}{structureCopy.labelSeparator}<bdi>{textMessage(copy.baselineOption, { run: data.baseline.binding.runId, revision: data.baseline.binding.revisionId })}</bdi></p>
+      <p>{message(structureCopy.labeledValue, { label: copy.baseline, value: <bdi>{textMessage(copy.baselineOption, { run: data.baseline.binding.runId, revision: data.baseline.binding.revisionId })}</bdi> })}</p>
       <p role="status"><strong>{copy.compatibility[data.compatibility.state]}</strong></p>
       <div class="structure-table"><table>
         <caption>{copy.checksTitle}</caption>

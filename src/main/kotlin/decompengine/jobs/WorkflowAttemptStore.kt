@@ -178,12 +178,15 @@ class WorkflowAttemptStore private constructor(
      * callbacks must only capture bounded metadata/presentation, never mutate or publish it.
      */
     internal fun <T> inspectForListing(jobId: String, read: (String, Int) -> ByteArray,
-        present: (WorkflowJobInspection.Available) -> T): T {
+        onEpochRefusal: () -> Unit = {}, present: (WorkflowJobInspection.Available) -> T): T {
         val epoch = listingEpoch(jobId)
         val directory = root.resolve(jobId)
         if (!Files.isDirectory(directory, NOFOLLOW_LINKS)) fail("JOB_NOT_FOUND", "The job storage directory is missing or invalid.")
         val result = present(inspectRecord(jobId, directory) { path, maximum -> read("$jobId/${path.fileName}", maximum) })
-        if (epoch !== listingEpoch(jobId)) fail("JOB_RECORD_UNAVAILABLE", "The job changed during listing capture; refresh its state.")
+        if (epoch !== listingEpoch(jobId)) {
+            try { onEpochRefusal() } catch (_: Exception) { }
+            fail("JOB_RECORD_UNAVAILABLE", "The job changed during listing capture; refresh its state.")
+        }
         return result
     }
 
@@ -193,6 +196,12 @@ class WorkflowAttemptStore private constructor(
         requireJobId(jobId)
         val stripe = (jobId.hashCode() and Int.MAX_VALUE) % stripes.size
         stripes[stripe].withLock { ensureOpen(); listingEpochs[stripe] }
+    }
+
+    /** Caller holds the matching stripe through withJob. */
+    private fun invalidateListingEpoch(jobId: String) {
+        val stripe = (jobId.hashCode() and Int.MAX_VALUE) % stripes.size
+        listingEpochs[stripe] = Any()
     }
 
     /** Read-side transaction: callers may read bounded local evidence, never wait on network delivery.
@@ -687,7 +696,7 @@ class WorkflowAttemptStore private constructor(
             } finally {
                 // Invalidate even a failed/uncertain command, and conservatively include colliding
                 // jobs. Read-only status/replay calls do not invalidate concurrent listing rows.
-                if (!readOnly && invalidate) listingEpochs[stripe] = Any()
+                if (!readOnly && invalidate) invalidateListingEpoch(jobId)
             }
         }
     }
