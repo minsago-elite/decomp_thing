@@ -14,8 +14,14 @@ import kotlin.test.assertTrue
 
 class AnalysisIoHelperBuildV1Test {
     @Test fun `actual compiler builds the closed analysis source policy executable tuple`() = withAnalysisBuildDirectory { root ->
+        // Model a configurable compiler under a developer's home, not /usr/bin. The wrapper
+        // is a cooperating build principal and still invokes the real compiler for both builds.
+        val compilerExecutable = root.resolve("developer-home/toolchain/cc")
+        Files.createDirectories(compilerExecutable.parent)
+        Files.writeString(compilerExecutable, "#!/bin/sh\nexec '${analysisTestCompiler().toString().replace("'", "'\\''")}' \"\$@\"\n")
+        Files.setPosixFilePermissions(compilerExecutable, PosixFilePermissions.fromString("rwxr-xr-x"))
         val output = Files.createDirectory(root.resolve("output"))
-        val tuple = AnalysisIoHelperBuildV1.build(analysisTestCompiler(), analysisTestSource(), output)
+        val tuple = AnalysisIoHelperBuildV1.build(compilerExecutable, analysisTestSource(), output)
         val metadata = tuple.parent
         val propertiesBytes = Files.readAllBytes(tuple)
         val lines = propertiesBytes.toString(Charsets.US_ASCII).lineSequence().filter(String::isNotEmpty).toList()
@@ -48,13 +54,31 @@ class AnalysisIoHelperBuildV1Test {
         }
         assertEquals(JsonPrimitive(helper.size), record["helperBytes"])
         val compiler = record.getValue("compiler") as JsonObject
-        assertEquals(JsonPrimitive(analysisTestCompiler().toString()), compiler["path"])
+        assertEquals(JsonPrimitive(ANALYSIS_IO_RECORDED_COMPILER), compiler["path"])
+        assertEquals(JsonPrimitive(Files.size(compilerExecutable)), compiler["bytes"])
+        assertEquals(JsonPrimitive(analysisBuildSha256(Files.readAllBytes(compilerExecutable))), compiler["sha256"])
+        assertEquals(kotlinx.serialization.json.JsonArray(listOf(ANALYSIS_IO_RECORDED_COMPILER, "--version").map(::JsonPrimitive)),
+            compiler["versionCommand"])
         val compilation = record.getValue("compilation") as JsonObject
         assertEquals(JsonPrimitive(30000), compilation["timeoutMillis"])
         listOf(compiler, compilation).forEach {
             val result = it.getValue("result") as JsonObject
             assertEquals(JsonPrimitive(0), result["exitCode"])
             assertEquals(kotlinx.serialization.json.JsonNull, result["signal"])
+        }
+        // Shipped records name the private build directory by a fixed token, never by host path.
+        val recordText = recordBytes.decodeToString()
+        assertTrue(root.toString() !in recordText && "analysis-io-build" !in recordText, recordText)
+        assertEquals(analysisRecordedArguments().map(::JsonPrimitive),
+            (compilation.getValue("arguments") as kotlinx.serialization.json.JsonArray).toList())
+        val environment = compilation.getValue("environment") as JsonObject
+        assertEquals(JsonPrimitive("$ANALYSIS_IO_RECORDED_BUILD_ROOT/home"), environment["HOME"])
+        assertEquals(JsonPrimitive("$ANALYSIS_IO_RECORDED_BUILD_ROOT/tmp"), environment["TMPDIR"])
+        // Relocating identical compiler bytes must not change the shipped metadata either.
+        val relocatedCompiler = Files.copy(compilerExecutable, root.resolve("relocated-cc"))
+        val rebuilt = AnalysisIoHelperBuildV1.build(relocatedCompiler, analysisTestSource(), Files.createDirectory(root.resolve("rebuilt")))
+        for (name in listOf("source.c", "build-policy.txt", "build-v1.json", tuple.fileName.toString())) {
+            assertTrue(Files.readAllBytes(metadata.resolve(name)).contentEquals(Files.readAllBytes(rebuilt.resolveSibling(name))), name)
         }
     }
 

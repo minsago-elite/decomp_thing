@@ -318,13 +318,9 @@ private fun verifyBuildRecord(record: JsonObject, facts: RawPolicyFacts) {
     val compiler = record.requiredObject("compiler", "native sandbox helper build record")
     compiler.requireExactKeys(setOf("executable", "version"), "native sandbox helper compiler")
     val executable = compiler.requiredString("executable", "native sandbox helper compiler")
-    val executablePath = try {
-        Path.of(executable)
-    } catch (_: Exception) {
-        policyFail("native sandbox helper compiler executable is not a path")
-    }
-    if (!executablePath.isAbsolute || executablePath.normalize() != executablePath || executablePath.fileName == null) {
-        policyFail("native sandbox helper compiler executable must be an exact absolute path")
+    rejectForbiddenRuntimeText(executable, "native sandbox helper compiler executable")
+    if (executable != NATIVE_HELPER_RECORDED_COMPILER) {
+        policyFail("native sandbox helper compiler executable must use the fixed recorded build root")
     }
     val version = compiler.requiredString("version", "native sandbox helper compiler")
     if (version.isEmpty() || version.encodeToByteArray().size > MAXIMUM_COMPILER_VERSION_BYTES ||
@@ -332,7 +328,6 @@ private fun verifyBuildRecord(record: JsonObject, facts: RawPolicyFacts) {
     ) {
         policyFail("native sandbox helper compiler version is invalid")
     }
-    rejectForbiddenRuntimeText(executable, "native sandbox helper compiler executable")
     rejectForbiddenRuntimeText(version, "native sandbox helper compiler version")
     val arguments = record.requiredArray("argumentTemplate", "native sandbox helper build record")
         .mapIndexed { index, element -> element.requiredString("native sandbox build argument $index") }

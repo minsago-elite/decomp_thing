@@ -193,35 +193,30 @@ internal fun parseNativeHelperReference(bytes: ByteArray, source: ByteArray, bui
     }
     val compiler = helperObject(root["compiler"], "compiler")
     helperKeys(compiler, setOf("path", "bytes", "sha256", "version", "versionCommand", "result"))
-    val compilerPath = helperHistoricalPath(helperString(compiler, "path"))
+    val compilerPath = helperString(compiler, "path")
+    require(compilerPath == NATIVE_HELPER_RECORDED_COMPILER) { "native helper compiler location is not normalized" }
     require(helperLong(compiler, "bytes") in 1..NATIVE_HELPER_COMPILER_MAXIMUM)
     require(helperString(compiler, "sha256").matches(Regex("[0-9a-f]{64}")))
     val version = helperString(compiler, "version")
     require(version.isNotEmpty() && version.encodeToByteArray().size <= 4096 && version.none { it.code < 0x20 || it.code == 0x7f })
-    require(compiler["versionCommand"] == helperStrings(listOf(compilerPath.toString(), "--version")))
+    require(compiler["versionCommand"] == helperStrings(listOf(compilerPath, "--version")))
     verifyHelperProcessRecord(helperObject(compiler["result"], "compiler result"))
     val record = helperObject(OracleJson.parseCanonical(build, NATIVE_HELPER_JSON_LIMITS), "build record")
     helperKeys(record, setOf("schemaVersion", "kind", "compiler", "argumentTemplate", "source", "output"))
     require(record["schemaVersion"] == JsonPrimitive(2) && helperString(record, "kind") == "llvm-behavior-native-helper-build-record" &&
-        record["compiler"] == JsonObject(mapOf("executable" to JsonPrimitive(compilerPath.toString()), "version" to JsonPrimitive(version))) &&
+        record["compiler"] == JsonObject(mapOf("executable" to JsonPrimitive(compilerPath), "version" to JsonPrimitive(version))) &&
         record["argumentTemplate"] == helperStrings(NATIVE_HELPER_ARGUMENT_TEMPLATE) && record["source"] == root["source"] &&
         record["output"] == root["helper"]) { "native helper build record differs from fixed v2 recipe/provenance" }
     val compilation = helperObject(root["compilation"], "compilation")
     helperKeys(compilation, setOf("arguments", "environment", "workingDirectory", "result"))
     require(helperString(compilation, "workingDirectory") == "/")
     val arguments = (compilation["arguments"] as? JsonArray)?.map { helperScalarString(it) } ?: error("missing compilation argv")
-    require(arguments.size == NATIVE_HELPER_ARGUMENT_TEMPLATE.size + 1 && arguments.first() == compilerPath.toString())
-    val sourcePath = helperHistoricalPath(arguments[9])
-    val outputPath = helperHistoricalPath(arguments[11])
-    require(sourcePath.fileName.toString() == NATIVE_HELPER_SOURCE_NAME && outputPath.fileName.toString() == NATIVE_HELPER_NAME &&
-        sourcePath.parent == outputPath.parent)
-    val expectedArguments = listOf(compilerPath.toString()) + NATIVE_HELPER_ARGUMENT_TEMPLATE.map {
-        when (it) { "\${SOURCE}" -> sourcePath.toString(); "\${OUTPUT}" -> outputPath.toString(); else -> it }
-    }
-    require(arguments == expectedArguments) { "native helper compilation argv drifted" }
+    require(arguments.size == NATIVE_HELPER_ARGUMENT_TEMPLATE.size + 1 && arguments.first() == compilerPath)
+    // Build-tree and compiler paths are recorded relative to the fixed build-root token.
+    require(arguments == nativeHelperRecordedArguments()) { "native helper compilation argv drifted" }
     val environment = helperObject(compilation["environment"], "compilation environment")
-    val expectedEnvironment = mapOf("HOME" to sourcePath.parent.resolve("home").toString(), "LANG" to "C", "LC_ALL" to "C",
-        "PATH" to "/usr/bin:/bin", "SOURCE_DATE_EPOCH" to "1779182222", "TMPDIR" to sourcePath.parent.resolve("tmp").toString(), "TZ" to "UTC")
+    val expectedEnvironment = mapOf("HOME" to "$NATIVE_HELPER_RECORDED_BUILD_ROOT/home", "LANG" to "C", "LC_ALL" to "C",
+        "PATH" to "/usr/bin:/bin", "SOURCE_DATE_EPOCH" to "1779182222", "TMPDIR" to "$NATIVE_HELPER_RECORDED_BUILD_ROOT/tmp", "TZ" to "UTC")
     require(environment == JsonObject(expectedEnvironment.mapValues { JsonPrimitive(it.value) })) { "native helper compilation environment drifted" }
     verifyHelperProcessRecord(helperObject(compilation["result"], "compilation result"))
     return NativeHelperReference(files.toMap())
@@ -240,9 +235,6 @@ private fun parseHelperIdentity(root: JsonObject, name: String, maximum: Long, a
     require(size in (if (allowEmpty) 0L else 1L)..maximum && sha256.matches(Regex("[0-9a-f]{64}")))
     require(size != 0L || sha256 == OracleArtifacts.sha256(byteArrayOf())) { "empty compiler output has a foreign hash" }
     return NativeHelperFileIdentity(size, sha256)
-}
-private fun helperHistoricalPath(value: String): Path = Path.of(value).also {
-    require(it.isAbsolute && it.normalize() == it && it.parent != null && it.toString() == value) { "noncanonical helper provenance path" }
 }
 private fun helperObject(value: kotlinx.serialization.json.JsonElement?, label: String) = value as? JsonObject ?: error("invalid native helper $label")
 private fun helperKeys(root: JsonObject, keys: Set<String>) = require(root.keys == keys) { "native helper fields are not closed" }
