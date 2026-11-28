@@ -488,13 +488,19 @@ class WorkspaceSnapshotLimitsTest {
     fun `special socket entries are rejected without opening their content`() {
         val root = ShortSocketDirectory.create().also { Files.createDirectory(it.resolve("src")) }
         val socket = root.resolve("src/socket")
-        java.nio.channels.ServerSocketChannel.open(java.net.StandardProtocolFamily.UNIX).use { server ->
-            server.bind(java.net.UnixDomainSocketAddress.of(socket))
-            assertEquals("special-file", assertFailsWith<WorkspaceSnapshotInvalidEntry> {
-                capture(request(root), WorkspaceSnapshotLimits())
-            }.reason)
+        try {
+            java.nio.channels.ServerSocketChannel.open(java.net.StandardProtocolFamily.UNIX).use { server ->
+                server.bind(java.net.UnixDomainSocketAddress.of(socket))
+                assertEquals("special-file", assertFailsWith<WorkspaceSnapshotInvalidEntry> {
+                    capture(request(root), WorkspaceSnapshotLimits())
+                }.reason)
+            }
+            assertTrue(Files.exists(socket))
+        } finally {
+            Files.deleteIfExists(socket)
+            Files.deleteIfExists(root.resolve("src"))
+            Files.deleteIfExists(root)
         }
-        assertTrue(Files.exists(socket))
     }
 
     @Test

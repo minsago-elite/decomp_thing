@@ -13,10 +13,13 @@ import java.nio.file.attribute.PosixFileAttributes
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.UserPrincipal
 import java.io.File
+import java.io.IOException
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.file.FileVisitResult
 import java.nio.file.Files
+import java.nio.file.SimpleFileVisitor
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
@@ -1876,8 +1879,51 @@ val verifyCompiledJunitSignatures = tasks.register<Exec>("verifyCompiledJunitSig
             roots.flatMap { listOf("--class-root", it.absolutePath) })
     }
 }
+// Test fixtures may leave symlinks to system directories (for example /usr/bin) under the
+// temporary root. Delete link entries themselves and never traverse them; File.deleteRecursively
+// follows directory symlinks.
+fun deleteTreeWithoutFollowingLinks(root: Path) {
+    if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) return
+    Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
+        override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+            Files.delete(file)
+            return FileVisitResult.CONTINUE
+        }
+        override fun postVisitDirectory(dir: Path, exc: IOException?): FileVisitResult {
+            if (exc != null) throw exc
+            Files.delete(dir)
+            return FileVisitResult.CONTINUE
+        }
+    })
+}
+val verifyTestTemporaryRootCleanup = tasks.register("verifyTestTemporaryRootCleanup") {
+    group = "verification"
+    description = "Proves test temporary-root cleanup deletes symlinks without deleting their targets"
+    val work = layout.buildDirectory.dir("test-tmp-cleanup-check")
+    outputs.upToDateWhen { false }
+    doLast {
+        val base = work.get().asFile.toPath()
+        deleteTreeWithoutFollowingLinks(base)
+        val target = Files.createDirectories(base.resolve("outside/target"))
+        val kept = Files.writeString(target.resolve("kept"), "kept")
+        val root = Files.createDirectories(base.resolve("root/nested"))
+        Files.createSymbolicLink(root.resolve("directory-link"), target)
+        Files.createSymbolicLink(root.resolve("file-link"), kept)
+        Files.createSymbolicLink(base.resolve("root-link"), base.resolve("outside"))
+        deleteTreeWithoutFollowingLinks(base.resolve("root"))
+        deleteTreeWithoutFollowingLinks(base.resolve("root-link"))
+        check(!Files.exists(base.resolve("root"), LinkOption.NOFOLLOW_LINKS) &&
+            !Files.exists(base.resolve("root-link"), LinkOption.NOFOLLOW_LINKS)) { "cleanup left the root behind" }
+        check(Files.isRegularFile(kept, LinkOption.NOFOLLOW_LINKS) && Files.readString(kept) == "kept") {
+            "cleanup deleted a symlink target outside the root"
+        }
+        deleteTreeWithoutFollowingLinks(base)
+    }
+}
 tasks.withType<Test>().configureEach {
-    dependsOn(verifyCompiledJunitSignatures)
+    dependsOn(verifyCompiledJunitSignatures, verifyTestTemporaryRootCleanup)
+    // HotSpot otherwise writes /tmp/hsperfdata_<user>/<pid> for every worker regardless of java.io.tmpdir.
+    jvmArgs("-XX:-UsePerfData")
     // Keep @TempDir, Files.createTempDirectory and native temp files inside the repository.
     // Specialized tasks that already choose java.io.tmpdir keep their own roots; whichever
     // doFirst runs first, the explicit override wins. Set at execution time so the absolute
@@ -1890,7 +1936,7 @@ tasks.withType<Test>().configureEach {
         testTask.systemProperty("decompengine.test.repositoryRoot", testRepositoryRoot)
         if (!testTask.systemProperties.containsKey("java.io.tmpdir")) {
             val root = repositoryTemporaryRoot.get().asFile
-            check(!root.exists() || root.deleteRecursively()) { "stale test temporary root not removable: $root" }
+            deleteTreeWithoutFollowingLinks(root.toPath())
             check(root.mkdirs()) { "test temporary root unavailable: $root" }
             testTask.systemProperty("java.io.tmpdir", root.absolutePath)
             testTask.systemProperty("jna.tmpdir", root.absolutePath)

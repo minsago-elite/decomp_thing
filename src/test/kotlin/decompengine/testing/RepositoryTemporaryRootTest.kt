@@ -6,6 +6,7 @@ import java.net.UnixDomainSocketAddress
 import java.nio.channels.ServerSocketChannel
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.Comparator
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -55,18 +56,28 @@ class RepositoryTemporaryRootTest {
     }
 
     @Test
+    fun `test worker JVM disables HotSpot perf data so it writes no hsperfdata file`() {
+        assertTrue("-XX:-UsePerfData" in java.lang.management.ManagementFactory.getRuntimeMXBean().inputArguments)
+        val perfData = Path.of("/tmp", "hsperfdata_${System.getProperty("user.name")}", ProcessHandle.current().pid().toString())
+        assertTrue(!Files.exists(perfData, java.nio.file.LinkOption.NOFOLLOW_LINKS), "worker wrote $perfData")
+    }
+
+    @Test
     fun `short socket directories stay repository-local and fit sun_path at fixture depth`() {
         val root = ShortSocketDirectory.create()
         try {
             assertUnderBuild(root, "ShortSocketDirectory")
-            // The deepest existing fixture socket suffix is runtime/docker.sock or runtime/replacement.
-            val runtime = Files.createDirectory(root.resolve("runtime"))
-            val socket = runtime.resolve("docker.sock")
-            assertTrue(socket.toString().toByteArray().size < 108, "socket path exceeds sun_path: $socket")
-            ServerSocketChannel.open(StandardProtocolFamily.UNIX).use { it.bind(UnixDomainSocketAddress.of(socket)) }
-            assertUnderBuild(socket, "fixture socket")
+            // Every socket path the ShortSocketDirectory fixtures bind, relative to their root. The longest is
+            // runtime/docker.sock; keep this list in step with the fixtures when they add or rename sockets.
+            val sockets = listOf("runtime/bus", "runtime/new", "runtime/docker.sock", "src/socket").map(root::resolve)
+            sockets.forEach { socket ->
+                Files.createDirectories(socket.parent)
+                assertTrue(socket.toString().toByteArray().size < 108, "socket path exceeds sun_path: $socket")
+                ServerSocketChannel.open(StandardProtocolFamily.UNIX).use { it.bind(UnixDomainSocketAddress.of(socket)) }
+                assertUnderBuild(socket, "fixture socket")
+            }
         } finally {
-            root.toFile().deleteRecursively()
+            Files.walk(root).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::delete) }
         }
     }
 }

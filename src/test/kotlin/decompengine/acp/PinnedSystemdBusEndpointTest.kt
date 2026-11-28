@@ -54,7 +54,8 @@ class PinnedSystemdBusEndpointTest {
 
     @Test
     fun `socket name replacement rejects the new live socket`() = withEndpoint { _, runtime, endpoint ->
-        val replacement = runtime.resolve("replacement")
+        // Keep the leaf short: fixture sockets must fit sun_path under a repository-local tmpdir (#2001).
+        val replacement = runtime.resolve("new")
         bindSocket(replacement).use {
             assertNotEquals(
                 Files.getAttribute(runtime.resolve("bus"), "unix:ino", LinkOption.NOFOLLOW_LINKS),
