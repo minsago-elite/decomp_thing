@@ -7766,7 +7766,8 @@
             "operator.auth-inspection",
             "operator.auth-inspection-cancel",
             "support.export",
-            "git.repository-mutate"
+            "git.repository-mutate",
+            "revision.archive-verify"
           ]
         },
         "target": {
@@ -7812,6 +7813,9 @@
                   "type": "null"
                 }
               ]
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
             }
           },
           "required": [

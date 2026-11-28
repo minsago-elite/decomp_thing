@@ -753,7 +753,10 @@ private fun applicationBuildId(): String {
     return digest.digest().joinToString("") { "%02x".format(it) }
 }
 
-/** Bounded in-memory attachment: inert octet stream, encoded filename, and bodyless HEAD. */
+/**
+ * Bounded in-memory attachment: inert octet stream, encoded filename, and bodyless HEAD. It keeps the shared
+ * [WEB_INERT_CONTENT_SECURITY_POLICY] from [webApiHeaders], the same policy as digest-bound artifact content.
+ */
 private fun sendWebAttachment(exchange: HttpExchange, bytes: ByteArray, fileName: String, headers: Map<String, String>) =
     sendWebAttachment(exchange, bytes.size.toLong(), fileName, headers) { it.write(bytes) }
 
@@ -764,7 +767,6 @@ internal fun sendWebAttachment(exchange: HttpExchange, size: Long, fileName: Str
     webApiHeaders(exchange, UUID.randomUUID().toString())
     exchange.responseHeaders.set("Content-Type", "application/octet-stream")
     exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"source.bin\"; filename*=UTF-8''$name")
-    exchange.responseHeaders.set("Content-Security-Policy", "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'")
     exchange.responseHeaders.set("Content-Length", size.toString())
     headers.forEach { (key, value) -> exchange.responseHeaders.set(key, value) }
     var aborted = false

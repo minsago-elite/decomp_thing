@@ -146,6 +146,9 @@ class WebRevisionSourceRoutesTest {
         assertEquals("application/octet-stream", patch.headers().firstValue("Content-Type").orElseThrow())
         assertTrue(patch.headers().firstValue("Content-Disposition").orElseThrow().startsWith("attachment;"))
         assertEquals("nosniff", patch.headers().firstValue("X-Content-Type-Options").orElseThrow())
+        // Source attachments share the digest-bound artifact content policy (#491).
+        assertEquals(WEB_INERT_CONTENT_SECURITY_POLICY, patch.headers().firstValue("Content-Security-Policy").orElseThrow())
+        assertEquals("no-store", patch.headers().firstValue("Cache-Control").orElseThrow())
         assertEquals(summary.getValue("baseSourceSha256").jsonPrimitive.content, patch.headers().firstValue("X-Decomp-Base-Source-SHA256").orElseThrow())
         assertTrue(String(patch.body()).startsWith("--- a/$path\t\n+++ b/$path\t\n@@ "))
         val headOnly = get(fixture, "${fixture.revision(fixture.second)}/source-diff/patch?$fileQuery", "application/octet-stream", "HEAD")
@@ -163,6 +166,11 @@ class WebRevisionSourceRoutesTest {
         val before = get(fixture, "${fixture.revision(fixture.first)}/source-files/$removedId/content", "application/octet-stream")
         assertEquals(200, before.statusCode())
         assertContentEquals(Files.readAllBytes(fixture.first.tree.resolve(removedPath)), before.body())
+        assertEquals("application/octet-stream", before.headers().firstValue("Content-Type").orElseThrow())
+        assertTrue(before.headers().firstValue("Content-Disposition").orElseThrow().startsWith("attachment; filename=\"source.bin\""))
+        assertEquals(WEB_INERT_CONTENT_SECURITY_POLICY, before.headers().firstValue("Content-Security-Policy").orElseThrow())
+        assertEquals("no-store", before.headers().firstValue("Cache-Control").orElseThrow())
+        assertEquals("nosniff", before.headers().firstValue("X-Content-Type-Options").orElseThrow())
         // Publish the later candidate as the accepted revision of the job; file identities survive the restart.
         fixture.restart { owner ->
             val snapshot = (owner.inspect(fixture.jobId) as WorkflowJobInspection.Available).snapshot
