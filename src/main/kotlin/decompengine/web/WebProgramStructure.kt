@@ -463,6 +463,9 @@ internal object WebProgramStructureBuilder {
             val cycles = HashMap<String, List<String>>()
             plan.dependencyCycles.forEach { cycle -> cycle.forEach { cycles[it] = cycle } }
             val filesByPath = manifest.files.associateBy(GeneratedFileEvidence::path)
+            // The manifest also allows acceptedImplementation on files of other declarations, so only a file of
+            // the profile's module-implementation declaration classifies a planned module, as before the path map.
+            val implementation = declaredTemplate(profile, "module-implementation")
             // Canonical bytes are accepted only when parsed modules match appendCanonicalJson's
             // sorted-by-ID output; validatePlan has already enforced uniqueness and module limits.
             // Iterate that order directly instead of allocating another ID set and sorting a list.
@@ -485,13 +488,10 @@ internal object WebProgramStructureBuilder {
                             }
                         }
                     }
-                    val implementationFile = filesByPath[planned.sourcePath]
+                    val implementationFile = filesByPath[planned.sourcePath]?.takeIf { implementation?.matches(it.path) != false }
                     modules += WebStructureModule(planned.id, planned.sourcePath, planned.headerPath,
                         owned(WebStructureKind.FUNCTION, planned.functionIds),
                         owned(WebStructureKind.GLOBAL, planned.globalIds), owned(WebStructureKind.TYPE, planned.typeIds), planned.boundaryEvidence,
-                        // The source-tree manifest was already checked against this profile by
-                        // SourceTreeManifestReader; repeating the declaration's regex match for
-                        // every planned module adds substantial cold-path cost at scale.
                         when (implementationFile?.acceptedImplementation) {
                             true -> "accepted"; false -> "unaccepted"; null -> "not-classified"
                         }, cycles[planned.id].orEmpty())

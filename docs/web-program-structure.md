@@ -293,7 +293,10 @@ ordinary descendant to exit, escalates to a group kill when a surviving child
 ignores cleanup, and refuses to treat forced cleanup as a passing sample. On a
 sample timeout, it sends `SIGTERM`, waits for the bounded grace period, then uses
 `SIGKILL` if the launcher or any descendant remains; that sample is recorded as
-timed out and failed even when cleanup is confirmed.
+timed out and failed even when cleanup is confirmed. A sample, or a profiled journey,
+also fails when the driver itself had to send `SIGKILL` to Chrome or the JVM while
+stopping them; its report keeps `forcedShutdown`, the forced processes and the cleanup
+outcome.
 A process group counts as stopped only when the signal-zero probe finds no members or
 `/proc` shows only zombie or dead members on two polls in a row. A host PID 1 that does
 not reap orphans therefore cannot hold the remaining samples back, and an unreadable or
@@ -314,7 +317,10 @@ first-page p95 to 1 s. Both profiles also gate the browser heap and JVM RSS budg
   and reflow, with the #1879 module-body observations recorded on failure. It applies
   none of the budgets below and does not verify source or browser identity. CI runs it
   before the Vite proxy step, and runs the cold samples and both profiled journeys after
-  that step, so a budget failure cannot skip the ordinary journey or the proxy.
+  that step, so a budget failure cannot skip the ordinary journey or the proxy. Each of
+  those four gates runs once the archives are built, even when an earlier step or gate
+  failed, so every profile records evidence; a final step fails the job if any gate did
+  not pass.
   Failures of the profiled journeys and cold samples carry the same bounded #1879
   observations in the report's `structureFailurePhase`.
 - `node scripts/check-packaged-web-browser.mjs --mode structure --structure-profile <loopback-or-constrained>` seeds a persisted

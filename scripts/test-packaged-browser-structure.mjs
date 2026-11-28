@@ -6,7 +6,8 @@ import { appendStructureFeedbackSample, assertStructureQualification, assertStru
   classifyFailedInventoryRequests, createStructureResponseRecorder, createStructureTimingRecorder, evaluateStructureBudgets,
   isModuleDetailUrl, moduleDetailFetchPattern, nearestRankP95, recordBrowserHeapSample, recordJvmRssSample,
   startBrowserHeapSampler, structureFeedbackInstrumentation, summarizeBrowserHeap, summarizeJvmRss } from './packaged-browser-structure.mjs';
-import { moduleBodyObserver, qualifyStructureBudgets, qualifyStructureColdSample, structureFailureEvidence } from './packaged-browser-structure.mjs';
+import { moduleBodyObserver, qualifyStructureBudgets, qualifyStructureColdSample, structureColdSampleFailure, structureFailureEvidence } from './packaged-browser-structure.mjs';
+import { publishReport } from './packaged-browser-restart.mjs';
 import { TargetProtocol } from './packaged-browser-target-lifecycle.mjs';
 import { spawn } from 'node:child_process';
 import { readFileSync, promises as fsp } from 'node:fs';
@@ -238,6 +239,49 @@ test('a byte-identical continued refetch is benign, as on master (R3)', async ()
   assert.equal(later.consumedResponse(modulePath, rendered('module_0041')).evidence.networkId, 'net-2');
 });
 
+test('captured bytes, not replacement-decoded strings, decide identical refetches (R3)', async () => {
+  // Both bodies decode to the same string with U+FFFD replacement, but their bytes differ (0xff versus 0xfe).
+  const json = moduleBody('module_0041');
+  const variant = (byte) => Buffer.concat([Buffer.from(json.slice(0, -1) + ',"note":"'), Buffer.from([byte]), Buffer.from('"}')]);
+  assert.equal(variant(0xff).toString('utf8'), variant(0xfe).toString('utf8'), 'the control needs bodies that collide after decoding');
+  assert.notDeepEqual(variant(0xff), variant(0xfe));
+  const base64Cdp = (bodies) => ({ calls: [], call: async (method, params) =>
+    method === 'Fetch.getResponseBody' ? { body: bodies[params.requestId].toString('base64'), base64Encoded: true } : {} });
+  const collided = createStructureResponseRecorder();
+  const cdp = base64Cdp({ 'interception-1': variant(0xff), 'interception-2': variant(0xfe) });
+  const intercept = createModuleResponseInterceptor({ call: cdp.call, recorder: collided, browserOrigin });
+  await intercept(paused());
+  await intercept(paused({ requestId: 'interception-2', networkId: 'net-2' }));
+  deliver(collided, 'net-1');
+  deliver(collided, 'net-2');
+  assert.throws(() => collided.consumedResponse(modulePath, rendered('module_0041')),
+    /No captured module response matches the rendered identity.*id=net-1.*capture=invalid-utf8.*id=net-2.*capture=invalid-utf8/);
+
+  // A plain-text body that cannot be UTF-8 (a lone surrogate) is refused the same way.
+  const lone = createStructureResponseRecorder();
+  lone.bodyCaptured('net-1', modulePath, { status: 200, body: `${json.slice(0, -1)},"note":"\ud800"}`, base64Encoded: false });
+  assert.throws(() => lone.consumedResponse(modulePath, rendered('module_0041')), /capture=invalid-utf8/);
+
+  // The same bytes delivered once as base64 and once as text are one response: digests, not encodings, compare.
+  const mixed = createStructureResponseRecorder();
+  mixed.bodyCaptured('net-1', modulePath, { status: 200, body: Buffer.from(json).toString('base64'), base64Encoded: true });
+  mixed.bodyCaptured('net-2', modulePath, { status: 200, body: json, base64Encoded: false });
+  for (const id of ['net-1', 'net-2']) { mixed.continued(id, true); deliver(mixed, id); }
+  assert.equal(mixed.consumedResponse(modulePath, rendered('module_0041')).evidence.identicalRefetches, 1);
+
+  // Valid bodies that differ by one byte still conflict.
+  const differing = createStructureResponseRecorder();
+  differing.bodyCaptured('net-1', modulePath, { status: 200, body: json, base64Encoded: false });
+  differing.bodyCaptured('net-2', modulePath, { status: 200, body: `${json.slice(0, -1)} }`, base64Encoded: false });
+  for (const id of ['net-1', 'net-2']) { differing.continued(id, true); deliver(differing, id); }
+  assert.throws(() => differing.consumedResponse(modulePath, rendered('module_0041')), /Conflicting module responses/);
+
+  // An over-long encoded body is refused before it is decoded.
+  const bounded = createStructureResponseRecorder({ bodyLimitBytes: 30 });
+  bounded.bodyCaptured('net-1', modulePath, { status: 200, body: Buffer.alloc(31, 0x61).toString('base64'), base64Encoded: true });
+  assert.throws(() => bounded.consumedResponse(modulePath, () => true), /capture=oversize/);
+});
+
 test('conflicting or undelivered matching captures still fail (R3)', async () => {
   // Both bodies show the rendered identity but their bytes differ: nothing proves which one the page consumed.
   const conflicting = createStructureResponseRecorder();
@@ -368,6 +412,51 @@ test('budgeted and cold journeys attach bounded identifier-free observations to 
   const early = await qualifyStructureBudgets({ applicationPid: -1 }).then(() => null, (value) => value);
   assert.match(early.message, /process identity is unavailable/);
   assert.equal(structureFailureEvidence(early).stage, 'before-lookup');
+});
+
+test('a cold sample that fails its first page returns a snapshot the driver publishes as structureFailurePhase (R2)', async (t) => {
+  const applicationPid = await jvmLikeProcess(t);
+  const fault = new Error('first-page readiness canary');
+  const tab = { sessionId: R2_SESSION, exceptions: [], requests: [], initialize: async () => ({}) };
+  const cdp = { on() {}, call: async (method) => (method === 'Performance.getMetrics' ? { metrics: [] } : {}) };
+  const ready = async (_tab, _expression, label) => { if (label === 'first page of 100000 recorded functions') throw fault; };
+  const fixture = { jobId: 'a'.repeat(32), runId: 'run', revisionId: 'rev', functions: 100000, modules: 4167,
+    functionAddress: (index) => 0x400000 + index * 16, functionId: (index) => `fn_${(0x400000 + index * 16).toString(16).padStart(16, '0')}`,
+    moduleId: (index) => `module_${String(index).padStart(4, '0')}` };
+  const result = await qualifyStructureColdSample({ fixture, makeTarget: async () => tab, cdp, evaluate: async () => true, ready,
+    browserOrigin, applicationPid, profile: 'loopback' });
+  assert.equal(result.passed, false, 'the cold qualifier returns, rather than throws, a first-page failure');
+  assert.match(result.failures[0], /First-page action failed: first-page readiness canary/);
+  const phase = result.structureFailurePhase;
+  assert.ok(phase && Object.isFrozen(phase));
+  assert.equal(phase.stage, 'before-lookup');
+  assert.equal(phase.selected, null);
+  assert.deepEqual(observationLeaks(phase), []);
+
+  // The driver's actual throw, catch assignments and publication, run with this result.
+  const driver = readFileSync(new URL('./check-packaged-web-browser.mjs', import.meta.url), 'utf8');
+  const throwLine = '      if (!report.structureCold.passed) throw structureColdSampleFailure(report.structureCold);';
+  assert.equal(driver.split(throwLine).length, 2, 'the driver throws the cold failure through structureColdSampleFailure');
+  const start = driver.indexOf('  report.logsFailurePhase = logsFailureEvidence(error);');
+  const end = driver.indexOf('  report.applicationError =', start);
+  assert.ok(start > 0 && end > start);
+  const report = { status: 'running', mode: 'structure-cold', structureCold: result };
+  const error = (() => { try { new Function('report', 'structureColdSampleFailure', throwLine)(report, structureColdSampleFailure); } catch (thrown) { return thrown; } return null; })();
+  assert.match(error?.message ?? '', /^Cold structure sample failed: \["First-page action failed/);
+  new Function('report', 'error', 'logsFailureEvidence', 'structureFailureEvidence', driver.slice(start, end))(
+    report, error, () => null, structureFailureEvidence);
+  assert.equal(report.structureFailurePhase, phase);
+  await fsp.mkdir(new URL('../build/', import.meta.url), { recursive: true });
+  const directory = await fsp.mkdtemp(new URL('../build/cold-failure-phase-', import.meta.url).pathname);
+  t.after(() => fsp.rm(directory, { recursive: true, force: true }));
+  await publishReport(directory, report, []);
+  const published = JSON.parse(await fsp.readFile(`${directory}/report.json`, 'utf8'));
+  assert.deepEqual(published.structureFailurePhase, JSON.parse(JSON.stringify(phase)));
+  assert.notEqual(published.structureFailurePhase, null);
+
+  // A passed sample carries no snapshot, and an unfrozen or missing one is never attached.
+  assert.equal(structureFailureEvidence(structureColdSampleFailure({ failures: ['x'], structureFailurePhase: { stage: 'lookup' } })), null);
+  assert.equal(structureFailureEvidence(structureColdSampleFailure({ failures: ['x'] })), null);
 });
 
 test('the budgeted journey wires the observer, selects the module response and labels its stages (R2)', () => {

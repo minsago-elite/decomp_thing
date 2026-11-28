@@ -11,6 +11,7 @@ import { structureServerTimingSummary, COLD_PROFILES, STRUCTURE_QUALIFICATION_SO
   verifyStructureQualificationSource, verifyStructureSourceRevision, verifyStructureBrowser } from './packaged-browser-structure-cold.mjs';
 import { liveProcessGroupMembers, readChildReport, waitForProcessGroupExit } from './packaged-browser-structure-cold.mjs';
 import { publishReport } from './packaged-browser-restart.mjs';
+import { createContext, runInContext } from 'node:vm';
 
 function gitBlob(bytes) { return createHash('sha1').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex'); }
 const approvedBrowserIdentity = Object.freeze({verified:true,product:'chrome',platform:'linux64',version:'149.0.7827.55',archiveSha256:'b'.repeat(64),
@@ -131,6 +132,7 @@ test('source revision binding honors an ambient GitHub event path when one is pr
 });
 
 test('browser identity requires the reviewed installed lock, binary hash, and exact version', async () => {
+  await mkdir(resolve(repoRoot,'build'),{recursive:true});
   const root=await mkdtemp(resolve(repoRoot,'build/structure-browser-pin-test-'));
   try {
     const install=resolve(root,'web-test-browser'); await mkdir(install);
@@ -374,6 +376,93 @@ test('runner retains the latency of a sample whose structureCold was published i
   }
   assert.equal(result.timedSamples, 20);
   assert.equal(result.nearestRankP95FirstPageMs, 432);
+});
+
+// R4: the driver's own stop() may escalate Chrome or the JVM to SIGKILL; a qualification verdict must not pass then.
+async function ownedChild(t, ignoreTermination) {
+  const code = `${ignoreTermination ? "process.on('SIGTERM', () => {});" : ''} process.stdout.write('ready'); setInterval(() => {}, 1000);`;
+  const child = spawn(process.execPath, ['-e', code], { stdio: ['ignore', 'pipe', 'ignore'] });
+  t.after(() => { try { child.kill('SIGKILL'); } catch {} });
+  await new Promise((resolveReady, rejectReady) => {
+    child.stdout.once('data', resolveReady);
+    child.once('error', rejectReady);
+    child.once('exit', code => rejectReady(new Error(`owned control child exited before it was ready (${code})`)));
+  });
+  return child;
+}
+
+/** Runs the driver's actual stop() and finalizer in a VM with real children and fake browser/report boundaries. */
+async function runDriverFinalizer(t, { mode, structureQualification, forceBrowser = false, forceApplication = false }) {
+  const source = await readFile(resolve(repoRoot, 'scripts/check-packaged-web-browser.mjs'), 'utf8');
+  const stopStart = source.indexOf('const forcedKill = new WeakSet();');
+  const stopEnd = source.indexOf('async function connectDevTools(');
+  const finalStart = source.lastIndexOf('\n} finally {\n');
+  assert.ok(stopStart > 0 && stopEnd > stopStart && finalStart > stopEnd && source.trimEnd().endsWith('}'));
+  await mkdir(resolve(repoRoot, 'build'), { recursive: true });
+  const root = await mkdtemp(resolve(repoRoot, 'build', 'driver-forced-shutdown-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const [browser, application] = await Promise.all([ownedChild(t, forceBrowser), ownedChild(t, forceApplication)]);
+  const report = { status: 'passed', mode, requests: {} };
+  const processFake = { exitCode: undefined };
+  const context = createContext({ report, root, sensitiveValues: [], values: { mode, 'keep-workdir': false }, structureQualification,
+    process: processFake, join: (...parts) => parts.join('/'), publishReport, setTimeout, Date, launchErrors: new WeakMap(),
+    delay: ms => new Promise(resolveDelay => setTimeout(resolveDelay, ms)), cdp: { call: async () => {} }, browser, application,
+    vite: null, profile: resolve(root, 'profile'), browserTmp: null, safeDiagnostic: String, cdpDiagnostics: { snapshot: () => ({}) },
+    removeOwnedWork: async () => {}, fs: { rm: async () => {} }, applicationError: '',
+    structureServerTimingSummary: () => ({ timings: [], limit: 512, overflow: 0 }), console: { log: () => {} } });
+  const body = `${source.slice(stopStart, stopEnd)}\n${source.slice(finalStart + '\n} finally {\n'.length, source.trimEnd().length - 1)}`;
+  await runInContext(`(async () => {${body}\n})()`, context);
+  return { report, exitCode: processFake.exitCode, published: JSON.parse(await readFile(resolve(root, 'report.json'), 'utf8')),
+    exited: [browser, application].map(child => child.exitCode !== null || child.signalCode !== null) };
+}
+
+test('a cold sample whose Chrome needed SIGKILL fails while its confirmed cleanup is kept (R4)', { skip: process.platform !== 'linux' }, async (t) => {
+  const forced = await runDriverFinalizer(t, { mode: 'structure-cold', structureQualification: true, forceBrowser: true });
+  assert.deepEqual(forced.exited, [true, true]);
+  for (const report of [forced.report, forced.published]) {
+    assert.equal(report.status, 'failed');
+    assert.equal(report.forcedShutdown, true);
+    assert.deepEqual([...report.forcedShutdownProcesses], ['browser']); // The VM's report holds a VM-realm array.
+    assert.equal(report.shutdownConfirmed, true, 'the cleanup outcome is kept');
+    assert.equal(report.workCleanupConfirmed, true);
+  }
+  assert.equal(forced.exitCode, 1);
+  const jvm = await runDriverFinalizer(t, { mode: 'structure', structureQualification: true, forceApplication: true });
+  assert.equal(jvm.published.status, 'failed');
+  assert.deepEqual(jvm.published.forcedShutdownProcesses, ['application']);
+  const clean = await runDriverFinalizer(t, { mode: 'structure-cold', structureQualification: true });
+  assert.equal(clean.published.status, 'passed');
+  assert.equal(clean.published.forcedShutdown, undefined);
+  assert.equal(clean.exitCode, undefined);
+});
+
+test('runner refuses a sample whose driver had to force Chrome or the JVM to stop (R4)', async () => {
+  let launches = 0;
+  const result = await runColdSamples({ driver:'/unused/driver.mjs', driverArgs:[], profile:'loopback', expectedHeadCommit:null, expectedBaseCommit:null,
+    spawnImpl:() => {
+      ++launches;
+      const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.pid = 999999999;
+      child.kill = () => true;
+      setImmediate(() => { child.stdout.end('Report: /tmp/child/report.json\n'); child.stderr.end(); child.emit('close', 0); });
+      return child;
+    },
+    reportReader:async () => {
+      const sample = launches;
+      return {path:`/tmp/report-${sample}.json`,sha256:String(sample),report:{status:'passed',forcedShutdown:true,driverCommit:'a'.repeat(40),
+        tools:{chromeSha256:approvedBrowserIdentity.executableSha256},
+        sourceIdentity:{verified:true,commit:'a'.repeat(40),sourceSha256:'e'.repeat(64),files:[{path:'scripts/web-test-browser.json',sha256:'d'.repeat(64)}],revisionBinding:revisionBinding('a'.repeat(40))},browserIdentity:approvedBrowserIdentity,archiveSha256:'b'.repeat(64),
+        applicationJarSha256:'c'.repeat(64),testDirectory:`/tmp/run-${sample}`,browserProfileDirectory:`/tmp/run-${sample}/profile`,
+        runtimeProcesses:{applicationPid:94_000+sample,applicationStartTimeTicks:95_000+sample,browserPid:96_000+sample,browserStartTimeTicks:97_000+sample},
+        structureCold:{passed:true,firstPageMs:10,failedInventoryRequestCount:0,profileApplied:'loopback'}}};
+    }});
+  assert.equal(launches, 20);
+  for (const sample of result.samples) {
+    assert.equal(sample.status, 'failed', 'even a report that still says passed cannot pass after a forced stop');
+    assert.equal(sample.driverForcedShutdown, true);
+    assert.equal(sample.error, 'The packaged driver had to force Chrome or the JVM to stop');
+    assert.equal(sample.shutdownConfirmed, true);
+  }
+  assert.equal(result.passed, false);
 });
 
 // R4: kill(-group, 0) succeeds for zombie-only groups under a non-reaping PID 1; only live members may block cleanup.

@@ -1008,7 +1008,7 @@ export function createStructureResponseRecorder({ candidateLimit = MODULE_CANDID
     if (byNetworkId.size >= candidateLimit) { overflow++; return null; }
     value = { networkId: id, path, resourceType: 'other', initiator: 'other', mainFrame: false, currentMainLoader: false,
       pausedStatus: null, networkStatus: null, fromDiskCache: false, fromServiceWorker: false, responseRequestId: null,
-      body: null, bodyBytes: 0, capture: 'pending', continuation: 'pending', terminal: 'pending', failure: null };
+      body: null, bodyBytes: 0, bodySha256: null, capture: 'pending', continuation: 'pending', terminal: 'pending', failure: null };
     byNetworkId.set(id, value);
     order.push(value);
     return value;
@@ -1037,11 +1037,19 @@ export function createStructureResponseRecorder({ candidateLimit = MODULE_CANDID
       if (!value) return;
       value.pausedStatus = Number.isInteger(status) ? status : null;
       value.responseRequestId = safeId(responseRequestId);
-      const text = typeof body === 'string' ? (base64Encoded === true ? Buffer.from(body, 'base64').toString('utf8') : body) : null;
-      const bytes = text === null ? 0 : Buffer.byteLength(text, 'utf8');
-      if (text === null) { value.capture = 'unavailable'; return; }
+      if (typeof body !== 'string') { value.capture = 'unavailable'; return; }
+      // Keep the captured bytes, never only a decoded string: replacement decoding can make different bodies equal
+      // (R3). Invalid UTF-8, or a string that cannot be UTF-8, is refused rather than decoded.
+      if (body.length > (base64Encoded === true ? Math.ceil(bodyLimitBytes / 3) * 4 : bodyLimitBytes)) {
+        value.capture = 'oversize'; value.bodyBytes = null; return;
+      }
+      if (base64Encoded !== true && !body.isWellFormed()) { value.capture = 'invalid-utf8'; return; }
+      const raw = base64Encoded === true ? Buffer.from(body, 'base64') : Buffer.from(body, 'utf8');
+      const bytes = raw.length;
       if (bytes > bodyLimitBytes) { value.capture = 'oversize'; value.bodyBytes = bytes; return; }
-      value.body = text;
+      if (!isUtf8(raw)) { value.capture = 'invalid-utf8'; value.bodyBytes = bytes; return; }
+      value.body = raw.toString('utf8');
+      value.bodySha256 = sha(raw);
       value.bodyBytes = bytes;
       value.capture = 'captured';
       retainedBytes += bytes;
@@ -1109,9 +1117,9 @@ export function createStructureResponseRecorder({ candidateLimit = MODULE_CANDID
         if (matched) matches.push({ value, snapshot });
       }
       if (matches.length === 0) fail('No captured module response matches the rendered identity');
-      // As on master (#1879), matching captures with byte-identical bodies are one response fetched again: a
-      // benign refetch. Matching captures whose bytes differ conflict, and nothing else excuses them.
-      if (matches.some(({ value }) => value.body !== matches[0].value.body)) {
+      // As on master (#1879), matching captures with byte-identical bodies (equal SHA-256 of the captured bytes)
+      // are one response fetched again: a benign refetch. Matching captures whose bytes differ conflict.
+      if (matches.some(({ value }) => value.bodySha256 !== matches[0].value.bodySha256)) {
         for (const { value } of matches) value.role = 'conflicting-match';
         fail('Conflicting module responses match the rendered identity');
       }
@@ -1874,6 +1882,17 @@ export function assessArchivedConsumption(measurements) {
   return valid ? { validatedConsumption: true } : { validatedConsumption: false, status: 'FAIL', reason: 'unproven: report lacks response-body and document-nonce consumption evidence' };
 }
 
+/**
+ * The driver's error for a cold sample that returned failed. It is created outside the qualifier's observer, so it
+ * takes the bounded snapshot the sample carried and structureFailureEvidence reports it like any other failure (R2).
+ */
+export function structureColdSampleFailure(result) {
+  const error = new Error(`Cold structure sample failed: ${JSON.stringify(result?.failures ?? null)}`);
+  const phase = result?.structureFailurePhase;
+  if (phase !== null && typeof phase === 'object' && Object.isFrozen(phase)) structureFailures.set(error, phase);
+  return error;
+}
+
 /** Attaches the #1879 observer's bounded snapshot to a budgeted or cold failure, as qualifyStructure does (R2). */
 async function observeStructureFailure(run) {
   const observer = moduleBodyObserver();
@@ -2158,7 +2177,9 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
         pendingEvidenceRequests: coldEvidenceSummary.pendingEvidenceRequests },
       browserHeapMemory, jvmMemory, exceptions: tab.exceptions, requestMethods: firstPageRequestMethods,
       recordedFunctions: fixture.functions, profileApplied: profile.name, failures,
-      latencyWithinBudget: Number.isFinite(firstPageMs) && firstPageMs <= profile.firstPageLimitMs, passed: failures.length === 0 };
+      latencyWithinBudget: Number.isFinite(firstPageMs) && firstPageMs <= profile.firstPageLimitMs, passed: failures.length === 0,
+      // A failed sample returns rather than throws, so it carries the #1879 snapshot for the driver's error (R2).
+      structureFailurePhase: failures.length === 0 ? null : observer.snapshot() };
     return result;
   }
   assert.ok(Number.isFinite(firstPageMs));

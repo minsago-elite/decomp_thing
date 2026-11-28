@@ -384,7 +384,7 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
       const shutdownConfirmed = processTreeConfirmed;
       const diagnostic = stderr.length ? { byteLength: Buffer.byteLength(stderr), sha256: createHash('sha256').update(stderr).digest('hex') } : null;
       const passed = sourceHeadMatches && sourceBaseMatches && revisionBindingMatches && browserIdentityVerified
-        && !interrupted && !timedOut && !processTreeForced
+        && !interrupted && !timedOut && !processTreeForced && report?.forcedShutdown !== true
         && exitCode === 0 && report?.status === 'passed' && evidence?.passed === true
         && evidence?.profileApplied === profile.name && rawFailedRequests === 0 && firstPageMs !== null && shutdownConfirmed
         && report?.sourceIdentity?.verified === true && report.sourceIdentity.commit === report.driverCommit;
@@ -392,7 +392,8 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
         browserHeapBytes: evidence?.browserHeapMemory?.sampledPeakBytes ?? null,
         jvmRssIncrementBytes: evidence?.jvmMemory?.incrementalPeakBytes ?? null,
         profileApplied: evidence?.profileApplied ?? null,
-        reportPath: childReport?.path ?? null, reportSha256: childReport?.sha256 ?? null, reportFullSha256: childReport?.fullSha256 ?? null, driverCommit: report?.driverCommit ?? null,
+        reportPath: childReport?.path ?? null, reportSha256: childReport?.sha256 ?? null, reportFullSha256: childReport?.fullSha256 ?? null,
+        driverForcedShutdown: report?.forcedShutdown === true, driverCommit: report?.driverCommit ?? null,
         driverPullRequestHeadCommit: report?.driverPullRequestHeadCommit ?? null,
         driverPullRequestBaseCommit: report?.driverPullRequestBaseCommit ?? null,
         sourceIdentity: report?.sourceIdentity ?? null,
@@ -410,6 +411,7 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
           : !sourceBaseMatches ? 'Child report did not match the declared pull-request base SHA'
           : !revisionBindingMatches ? 'Child report did not bind the source commit to the declared pull-request revisions'
           : !browserIdentityVerified ? 'Child report did not verify the reviewed browser installation'
+          : report?.forcedShutdown === true ? 'The packaged driver had to force Chrome or the JVM to stop'
           : evidence?.failures?.[0] ?? (report.status !== 'passed' ? firstDiagnosticLine(report.error) : null) ?? (processTreeForced ? 'Forced process-group kill was required after the packaged driver exited'
             : evidence?.profileApplied !== profile.name ? 'Child report did not confirm the requested profile' : null),
         failureClass: passed ? null : outcome.timeout ? 'timeout' : outcome.error ? 'launch' : !report ? 'report-unavailable'
