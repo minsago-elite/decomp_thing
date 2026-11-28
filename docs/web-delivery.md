@@ -105,6 +105,52 @@ round-trip latency. Record 20 cold loads and 50 interactions per workload; repor
 median/p95 and failures. Empty browser cache/storage and a fresh process define
 cold load; warm data is measured separately. Do not hide failing runs as outliers.
 
+The packaged D0 dashboard gate currently enforces four measures: ready-dashboard
+p95, first data-page response p95, peak browser heap, and incremental server RSS
+above a warmed idle baseline. It runs twenty cold loads against distinct server
+processes, using the checked-in 10,000-job fixture and the selected loopback or
+constrained profile. The constrained profile applies four-times CPU throttling,
+100 ms network latency, 10 Mbit/s download and 2 Mbit/s upload. Both profiles
+retain the complete report on success or failure. The 50-page keyboard traversal
+reports its own p95; this network-dependent measure does not stand in for local
+interaction-feedback latency. Request-head bytes are
+reconstructed from CDP's method, URL and header metadata, not captured from the
+wire; response bytes use CDP transfer accounting. For the recorded D0 job API
+requests, the driver also enforces an 8 KiB request-head ceiling, a 1 MiB
+response-transfer ceiling and a 6 s end-to-end request ceiling; the cancellation
+control reads the paused response body to measure its complete size. Other
+request timings, startup latency and forced-scan latency are diagnostics. The
+broader local interaction-feedback p95 and non-job API limits still require
+their own measured gate before they can be reported as qualified.
+
+Each D0 fresh-process sample also retains the service's one-line startup-seed
+observation. Its version 1 JSON contains only `seedStatus`, retained `seedRows`,
+retained `seedBytes`, and `initializationMs`; it excludes job identities, labels,
+paths, digests, exception text, and credentials. `seedStatus` is `seeded`,
+`disabled`, `ineligible`, or `no-data`. The row and byte counts describe only a
+retained dashboard image; `seedBytes` includes its retained storage-stamp charge
+and is not disk usage or JVM heap. `initializationMs` measures successful
+`WebJobService` initialization through recovery and retention-worker startup,
+captured before diagnostic output; it excludes later listener, bootstrap, and
+session readiness. A `seeded` observation proves image creation at startup, not
+that the first request later adopts it: request-time validation may discard a
+stale image. The packaged scale gate requires all 20 ordinary cold samples and
+the separate memory-baseline process to report the complete fixture image, and
+requires all three induced-deadline controls to report seeding disabled.
+Dashboard search fields accept at most 256 characters. A direct URL with an
+overlong or otherwise invalid saved filter is rejected before the jobs API read
+and shows the bounded “The saved filters are invalid. Reset filters to load
+jobs.” recovery message; the packaged scale control verifies both the response
+and the absence of a job-list request.
+Forced-scan controls verify that an over-deadline library returns no partial rows,
+shows a bounded listing-limit error, and recommends narrowing filters.
+The packaged forced-scan browser control induces this existing refusal path with
+a diagnostic-only 1 ms collection deadline in a fresh, unseeded JVM; the override
+is rejected unless startup seeding is disabled and can never exceed the production
+5 s default. All three samples must capture the same request's 503/LISTING_LIMIT
+response body and rendered refusal UI. This proves the error contract, not natural
+exhaustion of the production deadline.
+
 | Metric | Initial acceptance budget and measurement | Fixture / owner |
 | --- | --- | --- |
 | Entry payload | ≤150 KiB gzip-9 combined HTML + initial JS/CSS; ≤500 KiB gzip-9 all UI resources excluding private maps; sum exact shipped bytes and identify lazy chunks | Asset manifest; #151 #157 #219 |

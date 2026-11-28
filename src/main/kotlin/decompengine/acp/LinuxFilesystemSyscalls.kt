@@ -452,6 +452,75 @@ internal object LinuxFilesystemSyscalls {
         "open workspace root",
     )
 
+    /** One-call pathname metadata query for bounded inventory stamps; storage belongs to the probe. */
+    internal fun pathMetadataProbe(): PathMetadataProbe = PathMetadataProbe()
+
+    internal class PathMetadataProbe : AutoCloseable {
+        private val statistics = Memory(STATX_BYTES)
+        private val decoded = ByteArray(STATX_BYTES.toInt())
+        private val view = ByteBuffer.wrap(decoded).order(ByteOrder.nativeOrder())
+        private var closed = false
+
+        /** Returns null only for ENOENT. An unsupported statx implementation selects caller fallback. */
+        fun stat(path: Path): LinuxPathEntryMetadata? {
+            check(!closed) { "path metadata probe is closed" }
+            val encoded = path.toString().toByteArray(Charsets.UTF_8)
+            val operand = encoded.copyOf(encoded.size + 1) // final NUL remains explicit
+            val result = try {
+                var successfulResult = -1
+                while (true) {
+                    statistics.clear()
+                    val observed = if (ownedStatxDirectReady) LinuxOwnedStatxDirect.statx(
+                        AT_FDCWD, operand, AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS, statistics,
+                    ) else libc.statx(AT_FDCWD, operand, AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS, statistics)
+                    if (observed >= 0) {
+                        successfulResult = observed
+                        break
+                    }
+                    // Missing optional listing sidecars are normal. Avoid constructing and
+                    // capturing a stack trace for every absent state/pending file on large stores.
+                    when (val error = Native.getLastError()) {
+                        EINTR -> continue
+                        ENOENT -> return null
+                        ENOSYS, EOPNOTSUPP -> throw UnsupportedOperationException(
+                            "statx path metadata is unavailable",
+                            LinuxSyscallException("inspect collection entry metadata", error),
+                        )
+                        else -> throw LinuxSyscallException("inspect collection entry metadata", error)
+                    }
+                }
+                successfulResult
+            } catch (failure: UnsatisfiedLinkError) {
+                throw UnsupportedOperationException("statx path metadata is unavailable", failure)
+            }
+            if (result != 0) throw IOException("statx returned an invalid success result")
+            statistics.read(0, decoded, 0, decoded.size)
+            val mask = view.getInt(0)
+            val major = view.getInt(0x88).toLong() and 0xffffffffL
+            val minor = view.getInt(0x8c).toLong() and 0xffffffffL
+            val device = ((major and 0xfffL) shl 8) or ((major and 0xfffff000L) shl 32) or
+                (minor and 0xffL) or ((minor and 0xffffff00L) shl 12)
+            return LinuxPathEntryMetadata(
+                device = device,
+                inode = view.getLong(0x20),
+                mode = view.getShort(0x1c).toInt() and 0xffff,
+                linkCount = view.getInt(0x10),
+                size = view.getLong(0x28),
+                modifiedSeconds = view.getLong(0x70),
+                modifiedNanoseconds = view.getInt(0x78),
+                changedSeconds = view.getLong(0x60),
+                changedNanoseconds = view.getInt(0x68),
+                complete = mask and STATX_BASIC_STATS == STATX_BASIC_STATS,
+            )
+        }
+
+        override fun close() {
+            if (closed) return
+            closed = true
+            statistics.close()
+        }
+    }
+
     /** Null means unsupported ABI/kernel only; pathname and permission failures never select fallback. */
     internal fun openConstrainedPathAt(parent: LinuxDescriptor, relative: String): LinuxDescriptor? {
         if (!supportsConstrainedPathAbi(System.getProperty("os.name", ""),
@@ -1520,6 +1589,19 @@ internal object LinuxFilesystemSyscalls {
 }
 
 internal data class LinuxFileKey(val device: Long, val inode: Long)
+
+internal data class LinuxPathEntryMetadata(
+    val device: Long,
+    val inode: Long,
+    val mode: Int,
+    val linkCount: Int,
+    val size: Long,
+    val modifiedSeconds: Long,
+    val modifiedNanoseconds: Int,
+    val changedSeconds: Long,
+    val changedNanoseconds: Int,
+    val complete: Boolean,
+)
 
 internal data class LinuxFilesystemCapacity(
     val fragmentBytes: Long,

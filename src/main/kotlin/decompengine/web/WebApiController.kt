@@ -80,7 +80,11 @@ internal class WebApiController(
     private val eventStream = WebEventStream(access, streamResources, progressPages, read = { jobId, runId ->
         readWebProgress(jobs, jobId, runId).second
     }, clock = clock, deleted = { jobId -> jobs.deletedJob(jobId) != null })
-    private val jobPages = WebJobPages(jobs::collectionRecords, checkpointedSource = jobs::collectionRecordsWithProgress)
+    private val jobPages = WebJobPages(jobs::collectionRecords,
+        checkpointedSource = jobs::collectionRecordsWithProgress,
+        collectionVersion = jobs::dashboardCollectionVersion,
+        collectionStamp = jobs::dashboardStorageStamp,
+        collectionSeed = jobs::takeDashboardCollectionSeed)
     private val lifecycle = WebJobLifecycleController(access, jobs, jobMutations, assets.basePath, jobPages::invalidate)
 
     // One private resource pattern per line, so independent route additions merge cleanly.
@@ -573,7 +577,7 @@ internal class WebApiController(
             } else if (failure.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND") && deletedJobResource(resource)) {
                 access.sendDenied(exchange, WebAccessDenied(410, "RESOURCE_GONE", "This job was deleted. Only its deletion record is retained."))
             } else {
-                val status = if (failure.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else if (failure.code == "ARTIFACT_CHANGED") 409 else 503
+                val status = if (failure.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else if (failure.code in setOf("ARTIFACT_CHANGED", "JOB_LIBRARY_FULL")) 409 else 503
                 access.sendDenied(exchange, WebAccessDenied(status, if (status == 404) "NOT_FOUND" else publicWebDiagnosticCode(failure.code),
                     publicWebDiagnosticMessage(failure.code)))
             }

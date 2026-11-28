@@ -15,6 +15,20 @@ import decompengine.jobs.WorkflowStoreException
 import decompengine.jobs.WorkflowTerminalReason
 import decompengine.jobs.WorkflowTransition
 import decompengine.jobs.recoveryDisposition
+import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.acp.LinuxPathEntryMetadata
+import decompengine.oracle.core.OracleJson
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.charset.StandardCharsets
+import java.nio.file.NoSuchFileException
+import java.nio.file.attribute.FileTime
+import java.security.MessageDigest
+import java.util.HexFormat
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
@@ -114,6 +128,18 @@ internal fun snapshotWebWorkflowQueue(queue: BlockingQueue<Runnable>): Array<Run
 
 internal data class WebDashboardRows(val jobs: List<Job>, val unavailable: List<WebJobDiagnostic>)
 
+/** Reuse the authenticated legacy-record bytes between workflow inspection and row projection. */
+internal fun memoizeJobJsonListingRead(jobId: String, source: (String, Int) -> ByteArray): (String, Int) -> ByteArray {
+    val path = "$jobId/job.json"
+    var cached: ByteArray? = null
+    return { relative, maximum ->
+        val prior = cached
+        if (relative != path || prior == null || prior.size > maximum) {
+            source(relative, maximum).also { if (relative == path) cached = it }
+        } else prior
+    }
+}
+
 internal data class WebDashboardReadLimits(
     val maximumEntries: Int = 4096,
     val maximumReadBytes: Long = 64L * 1024 * 1024,
@@ -185,6 +211,10 @@ internal data class WebJobLibraryEntryLimits(val maximumEntries: Int = 10_512, v
         require(maximumEntries in 1..10_512 && maximumJobs in 1..10_000 && maximumJobs <= maximumEntries)
     }
 }
+
+/** Upload refusal at library capacity; deleting jobs is the only recovery, so it is not retryable as-is. */
+internal const val JOB_LIBRARY_FULL_MESSAGE =
+    "The job library is at its 10,000-job capacity. Delete jobs you no longer need, then upload again."
 
 /** The API retains its ten-thousand-job profile while counting every root entry before metadata reads. */
 internal fun collectWebJobLibraryIds(
@@ -327,6 +357,10 @@ class WebJobService(
     // Conservatively invalidate in-flight rows on any legacy admission; retain no per-job history.
     private var legacyListingEpoch = Any()
     private val uploads = mutableMapOf<Thread, CountDownLatch>()
+    private val dashboardGeneration = AtomicLong()
+    private var startupCollectionSeed: WebJobCollectionSeed? = null
+    /** Sidecars whose per-file metadata must be checked; absent sidecars rely on job-directory ctime/mtime. */
+    @Volatile private var dashboardOrganizationIds: Set<String>? = null
     /** Excludes other writers inside the store root (the listener's audit log) during upload accounting. */
     @Volatile internal var storageWriterExclusion: (() -> Long) -> Long = { measure -> measure() }
     @Volatile private var uploadStorage = newUploadStorage(maximumRetainedStorageBytes)
@@ -367,6 +401,8 @@ class WebJobService(
     @Volatile private var initialized = false
     @Volatile private var stopping = false
     @Volatile private var closed = false
+    /** Deterministic freshness boundary for startup-seed qualification. */
+    internal var dashboardFreshnessClock: () -> Long = System::currentTimeMillis
     private val completionPublication = WebCompletionPublicationFence(maximumInFlight) { stopping = true }
     private val retentionJobs = java.util.ArrayDeque<String>()
     private val retentionRuns = java.util.ArrayDeque<Pair<String, String>>()
@@ -500,14 +536,17 @@ class WebJobService(
     internal fun initializeExistingStorage(limits: decompengine.jobs.WorkflowStartupRecoveryLimits, cancellation: () -> Boolean) {
         check(!closed && active.isEmpty()) { "Storage initialization requires an idle service" }
         if (initialized) return
+        val initializationStarted = System.nanoTime()
+        val dashboardSeedDisabled = java.lang.Boolean.getBoolean("decomp.web.dashboardSeedDisabled")
+        val storageRootPresent = Files.exists(store.storageRoot, NOFOLLOW_LINKS)
         startupRecoveryLimits = limits
         fun checkCancellation() {
             if (stopping || Thread.currentThread().isInterrupted || cancellation()) throw decompengine.jobs.WorkflowStoreException(
                 "RECOVERY_CANCELLED", "Startup recovery was cancelled; preserve any already reconciled storage.", attempts != null)
         }
         checkCancellation()
-        if (Files.exists(store.storageRoot, NOFOLLOW_LINKS)) {
-            acquireAndRecover(cancellation)
+        if (storageRootPresent) {
+            acquireAndRecover(cancellation, dashboardSeedDisabled)
             // Interrupted purges resume before any request is admitted; a rename that never
             // happened is recorded as failed and its job is retained unchanged.
             deletions?.let { journal ->
@@ -523,17 +562,88 @@ class WebJobService(
         checkCancellation()
         initialized = true
         if (!stopping) retentionWorker?.start()
+        emitStartupCollectionObservation(dashboardSeedDisabled, storageRootPresent,
+            TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - initializationStarted))
     }
 
-    private fun acquireAndRecover(cancellation: () -> Boolean = { false }): WorkflowAttemptStore {
+    /** Emits only bounded startup-seed facts; it never inspects or consumes the retained seed. */
+    private fun emitStartupCollectionObservation(dashboardSeedDisabled: Boolean, storageRootPresent: Boolean, initializationMs: Long) {
+        val retainedSeed = startupCollectionSeed
+        val status = when {
+            !storageRootPresent -> "no-data"
+            dashboardSeedDisabled -> "disabled"
+            retainedSeed != null -> "seeded"
+            else -> "ineligible"
+        }
+        val observation = JsonObject(mapOf(
+            "schemaVersion" to JsonPrimitive(1),
+            "seedStatus" to JsonPrimitive(status),
+            "seedRows" to JsonPrimitive(if (status == "seeded") retainedSeed!!.rows.size else 0),
+            "seedBytes" to JsonPrimitive(if (status == "seeded") retainedSeed!!.bytes else 0L),
+            "initializationMs" to JsonPrimitive(initializationMs.coerceAtLeast(0L)),
+        ))
+        System.err.println("Web job-library startup observation: $observation")
+    }
+
+    private fun acquireAndRecover(cancellation: () -> Boolean = { false },
+        dashboardSeedDisabled: Boolean = java.lang.Boolean.getBoolean("decomp.web.dashboardSeedDisabled")): WorkflowAttemptStore {
         attempts?.let { return it }
         if (stopping || Thread.currentThread().isInterrupted || cancellation()) throw decompengine.jobs.WorkflowStoreException(
             "RECOVERY_CANCELLED", "Startup recovery was cancelled before acquiring storage.")
         val acquired = attemptStoreFactory(store.storageRoot)
         val budget = decompengine.jobs.WorkflowStartupRecoveryBudget(startupRecoveryLimits) { stopping || cancellation() }
+        // Cache seeding is optional work. Give it an independent byte allowance so parsing rich
+        // organization sidecars cannot consume or latch the budget required for recovery.
+        val seedBudget = decompengine.jobs.WorkflowStartupRecoveryBudget(startupRecoveryLimits) { stopping || cancellation() }
         var recoveryCompleted = false
+        val freshSince = dashboardFreshnessClock()
+        fun seedCheckpoint() { seedBudget.checkpoint() }
+        val seedBefore = if (dashboardSeedDisabled) null else try {
+            dashboardStorageStamp(freshSince, ::seedCheckpoint).takeIf { it.cacheable }
+        } catch (_: Exception) { null }
+        val seedRows = ArrayList<WebJobCollectionRow>()
+        var seedBytes = 0L
+        var seedEligible = seedBefore != null
         try {
-            val admittedIds = acquired.recoverForStartup(limits = startupRecoveryLimits, budget = budget) { check ->
+            val admittedIds = acquired.recoverForStartup(limits = startupRecoveryLimits, budget = budget,
+                observe = { jobId, inspected, jobJson, mutationPlanned ->
+                    if (seedEligible) {
+                        if (mutationPlanned) { seedEligible = false; seedRows.clear() }
+                        else try {
+                            val raw = store.decodeJobRecord(jobId, OracleJson.parse(jobJson).jsonObject)
+                            val latest = inspected.snapshot.latestRun
+                            val legacyInterrupted = latest == null && inspected.snapshot.legacy.recoveredInterrupted &&
+                                raw.status in setOf("queued", "analyzing")
+                            val projected = when {
+                                latest != null -> raw.copy(status = legacyStatus(latest.state),
+                                    updatedAt = (latest.endedAt ?: latest.startedAt ?: latest.createdAt).toString(),
+                                    statusMessage = "Workflow ${latest.workflow.wireName}: ${latest.state.wireName}. Completion does not establish acceptance.")
+                                legacyInterrupted -> raw.copy(status = "failed",
+                                    statusMessage = "Historical legacy work was interrupted; its workflow identity is unknown.")
+                                else -> raw
+                            }
+                            val organization = decompengine.jobs.JobOrganizationStore(store.storageRoot, organizationWriter)
+                                .read(jobId) { relative, maximum ->
+                                    seedCheckpoint()
+                                    val bytes = decompengine.repair.readStableRegularFile(store.storageRoot, relative,
+                                        seedBudget.readAllowance(maximum), cancellationCheck = ::seedCheckpoint).bytes
+                                    seedBudget.chargeRead(bytes.size.toLong())
+                                    bytes
+                                }
+                            val reports = latest?.let { context(jobId, it.runId) }
+                                ?: WebReportContext(store.storageRoot.resolve(jobId).resolve("reports"))
+                            val item = webJob(WebJobPresentation(projected, inspected.snapshot, reports,
+                                inspected.diagnostics.map { publicWorkflowDiagnostic(it.code) }, legacyInterrupted, organization))
+                            val bytes = item.toString().toByteArray(StandardCharsets.UTF_8).size
+                            if (bytes > 4096 || seedBytes + bytes + seedBefore!!.retainedBytes > 16L * 1024 * 1024) {
+                                seedEligible = false; seedRows.clear()
+                            } else {
+                                seedRows += WebJobCollectionRow(item, java.time.Instant.parse(item.getValue("createdAt").jsonPrimitive.content), jobId, bytes)
+                                seedBytes += bytes
+                            }
+                        } catch (_: Exception) { seedEligible = false; seedRows.clear() }
+                    }
+                }, beforeChanges = { check ->
                 check()
                 try {
                     store.prepareStorageDirectories()
@@ -543,8 +653,17 @@ class WebJobService(
                 }
                 check()
                 decompengine.jobs.UploadStagingRecovery.recover(store.storageRoot, check)
-            }
+            })
             recoveryCompleted = true
+            if (seedEligible && seedBefore != null) try {
+                val after = dashboardStorageStamp(freshSince, ::seedCheckpoint)
+                val idsDigest = MessageDigest.getInstance("SHA-256").also { hash -> seedRows.map { it.jobId }.sorted().forEach { hash.update(it.toByteArray(StandardCharsets.UTF_8)); hash.update(0.toByte()) } }
+                    .digest().let { HexFormat.of().formatHex(it) }
+                if (after.cacheable && after == seedBefore && after.jobIdsDigest == idsDigest && seedBytes + after.retainedBytes <= 16L * 1024 * 1024) {
+                    startupCollectionSeed = WebJobCollectionSeed(dashboardGeneration.get(), after,
+                        seedRows.sortedWith(compareBy<WebJobCollectionRow> { it.createdAt }.thenBy { it.jobId }), seedBytes + after.retainedBytes)
+                }
+            } catch (_: Exception) { /* Startup seed is an optional optimization. */ }
             deletions = decompengine.jobs.JobDeletionStore(store.storageRoot, faults = { point -> deletionFaults.hit(point) }).also { journal ->
                 try { journal.load() } catch (failure: WorkflowStoreException) {
                     throw WebJobServiceException(failure.code, "The job deletion journal is invalid. Preserve it before reopening storage.", failure)
@@ -602,6 +721,228 @@ class WebJobService(
     }
 
     /** Bounded display-only inspection; never acquires ownership, replays work or removes files. */
+    /** A cached row image is reusable only while owned writes are quiescent and certain. */
+    @Synchronized
+    internal fun dashboardCollectionVersion(): Long? {
+        if (!initialized || closed || stopping || uploads.isNotEmpty() || active.isNotEmpty() ||
+            deletionWorkers.isNotEmpty() || purgingOperations.isNotEmpty() || publicationFailures.isNotEmpty() ||
+            dashboardOrganizationIds == null) return null
+        return dashboardGeneration.get()
+    }
+
+    /** Consume the recovery-seeded image once; request-time storage stamping remains mandatory. */
+    @Synchronized
+    internal fun takeDashboardCollectionSeed(): WebJobCollectionSeed? {
+        val seed = startupCollectionSeed
+        startupCollectionSeed = null
+        if (java.lang.Boolean.getBoolean("decomp.web.dashboardSeedDisabled")) return null
+        if (seed == null || dashboardCollectionVersion() != seed.version) return null
+        return seed
+    }
+
+    /** Test hook run after job enumeration and stamping, before the final root metadata check. */
+    @Volatile internal var dashboardStampBeforeRootRecheck: (() -> Unit)? = null
+
+    /** Test hook: maps the real before/after root-metadata equality to the value the stamp uses. */
+    @Volatile internal var dashboardRootStampsEqual: ((Boolean) -> Boolean)? = null
+
+    /**
+     * Revalidate the persisted inputs used by the dashboard image, including writes performed
+     * through another JobStore instance or by a cooperating external process. This is metadata
+     * only: no job JSON or organization JSON is opened or parsed on a cache hit. A recent ctime/mtime disables reuse
+     * briefly to avoid caching across filesystems with coarse timestamp resolution.
+     *
+     * The storage root contributes only its identity and its job-id entry names. Service-owned
+     * siblings such as the lazily created `.web-audit` directory or `.web-owner.lock` change the
+     * root's timestamps and link count without changing any job, so they must not invalidate the
+     * image. The root's full metadata is still compared before and after stamping, so a root
+     * change during stamping marks the stamp uncacheable. Job additions and removals still change
+     * the hashed job-id names, and replacements or edits still change the per-job directory and
+     * file stamps.
+     */
+    internal fun dashboardStorageStamp(freshSinceMillis: Long, checkpoint: () -> Unit): WebJobCollectionStamp {
+        val digest = MessageDigest.getInstance("SHA-256")
+        digest.update("web-job-library-stamp-v4".toByteArray(StandardCharsets.US_ASCII))
+        var cacheable = true
+        var inventoryComplete = true
+        val knownOrganizations = dashboardOrganizationIds
+        val observedOrganizations = linkedSetOf<String>()
+        var probe = try { LinuxFilesystemSyscalls.pathMetadataProbe() } catch (_: Exception) { null }
+        data class EntryStamp(
+            val device: Long, val inode: Long, val mode: Int, val links: Int, val size: Long,
+            val modifiedSeconds: Long, val modifiedNanoseconds: Int,
+            val changedSeconds: Long, val changedNanoseconds: Int, val complete: Boolean,
+        )
+        val record = ByteBuffer.allocate(64).order(ByteOrder.BIG_ENDIAN)
+        fun addRecord(tag: Int, state: Int, entry: EntryStamp? = null) {
+            record.clear()
+            record.putInt(tag)
+            record.put(state.toByte())
+            record.put((if (entry?.complete == true) 1 else 0).toByte())
+            record.putLong(entry?.device ?: 0L)
+            record.putLong(entry?.inode ?: 0L)
+            record.putInt(entry?.mode ?: 0)
+            record.putInt(entry?.links ?: 0)
+            record.putLong(entry?.size ?: 0L)
+            record.putLong(entry?.modifiedSeconds ?: 0L)
+            record.putInt(entry?.modifiedNanoseconds ?: 0)
+            record.putLong(entry?.changedSeconds ?: 0L)
+            record.putInt(entry?.changedNanoseconds ?: 0)
+            digest.update(record.array(), 0, record.position())
+        }
+        fun addName(tag: Int, name: String) {
+            val encoded = name.toByteArray(StandardCharsets.UTF_8)
+            record.clear()
+            record.putInt(tag)
+            record.putInt(encoded.size)
+            digest.update(record.array(), 0, record.position())
+            digest.update(encoded)
+        }
+        fun atOrAfter(seconds: Long, nanoseconds: Int, epochMillis: Long): Boolean {
+            val thresholdSeconds = Math.floorDiv(epochMillis, 1_000L)
+            val thresholdNanoseconds = Math.floorMod(epochMillis, 1_000L) * 1_000_000
+            return seconds > thresholdSeconds || seconds == thresholdSeconds && nanoseconds >= thresholdNanoseconds
+        }
+        fun stampFile(path: Path, tag: Int, expectedKind: Int, missingAllowed: Boolean, identityOnly: Boolean = false): EntryStamp? {
+            checkpoint()
+            var entry: LinuxPathEntryMetadata? = null
+            if (probe != null) try {
+                entry = probe!!.stat(path)
+            } catch (_: UnsupportedOperationException) {
+                probe?.close()
+                probe = null
+            } catch (_: Exception) {
+                addRecord(tag, 3)
+                cacheable = false
+                inventoryComplete = false
+                return null
+            }
+            var stamp: EntryStamp?
+            if (probe == null) {
+                val attributes = try {
+                    Files.readAttributes(path, "unix:dev,ino,mode,nlink,size,lastModifiedTime,ctime", NOFOLLOW_LINKS)
+                } catch (_: NoSuchFileException) {
+                    addRecord(tag, 1)
+                    if (!missingAllowed) cacheable = false
+                    null
+                } catch (_: Exception) {
+                    addRecord(tag, 3)
+                    cacheable = false
+                    inventoryComplete = false
+                    return null
+                }
+                if (attributes == null) return null
+                val modified = (attributes["lastModifiedTime"] as? FileTime)?.toInstant()
+                val changed = (attributes["ctime"] as? FileTime)?.toInstant()
+                val device = attributes["dev"] as? Number
+                val inode = attributes["ino"] as? Number
+                val mode = attributes["mode"] as? Number
+                val links = attributes["nlink"] as? Number
+                val size = attributes["size"] as? Number
+                stamp = EntryStamp(device?.toLong() ?: 0L, inode?.toLong() ?: 0L,
+                    mode?.toInt() ?: 0, links?.toInt() ?: 0, size?.toLong() ?: 0L,
+                    modified?.epochSecond ?: 0L, modified?.nano ?: 0,
+                    changed?.epochSecond ?: 0L, changed?.nano ?: 0,
+                    device != null && inode != null && mode != null && links != null && size != null && modified != null && changed != null)
+            } else {
+                if (entry == null) {
+                    addRecord(tag, 1)
+                    if (!missingAllowed) cacheable = false
+                    return null
+                }
+                stamp = EntryStamp(entry.device, entry.inode, entry.mode, entry.linkCount, entry.size,
+                    entry.modifiedSeconds, entry.modifiedNanoseconds, entry.changedSeconds, entry.changedNanoseconds, entry.complete)
+            }
+            val observed = checkNotNull(stamp)
+            val current = if (identityOnly) EntryStamp(observed.device, observed.inode, observed.mode, 0, 0L, 0L, 0, 0L, 0, observed.complete)
+                else observed
+            addRecord(tag, 2, current)
+            if (!current.complete || current.mode and 0xf000 != expectedKind) cacheable = false
+            if (!identityOnly && (atOrAfter(current.modifiedSeconds, current.modifiedNanoseconds, freshSinceMillis - 2_000L) ||
+                atOrAfter(current.changedSeconds, current.changedNanoseconds, freshSinceMillis - 2_000L))) cacheable = false
+            // Callers compare full metadata; identity-only entries limit only what enters the digest.
+            return observed
+        }
+
+        try {
+        val root = store.storageRoot
+        val rootBefore = stampFile(root, 1, 0x4000, missingAllowed = true, identityOnly = true)
+        if (rootBefore == null) {
+            if (inventoryComplete) dashboardOrganizationIds = emptySet()
+            val emptyIds = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest())
+            return WebJobCollectionStamp(HexFormat.of().formatHex(digest.digest()), emptyIds, cacheable)
+        }
+        // Bounded by the root-entry limit; only published job-id names (never `.upload-*`
+        // staging or service-owned siblings) are returned.
+        fun publishedJobIds(): List<String> {
+            val allNames = try {
+                Files.newDirectoryStream(root).use { entries ->
+                    val names = ArrayList<String>()
+                    for (entry in entries) {
+                        checkpoint()
+                        if (names.size >= WebJobLibraryEntryLimits().maximumEntries) {
+                            cacheable = false
+                            break
+                        }
+                        names += entry.fileName.toString()
+                    }
+                    names.sorted()
+                }
+            } catch (_: Exception) {
+                cacheable = false
+                inventoryComplete = false
+                emptyList()
+            }
+            return try { collectWebJobLibraryIds(allNames.asSequence(), checkpoint) }
+            catch (_: Exception) { cacheable = false; inventoryComplete = false; emptyList() }
+        }
+        val ids = publishedJobIds()
+        for (id in ids) addName(2, id)
+        val jobIdsDigest = MessageDigest.getInstance("SHA-256").also { hash ->
+            ids.forEach { id -> hash.update(id.toByteArray(StandardCharsets.UTF_8)); hash.update(0.toByte()) }
+        }.digest().let { HexFormat.of().formatHex(it) }
+        for (id in ids) {
+            val directory = root.resolve(id)
+            val directoryState = stampFile(directory, 3, 0x4000, missingAllowed = false)
+            if (directoryState == null) {
+                cacheable = false
+                inventoryComplete = false
+                continue
+            }
+            stampFile(directory.resolve("job.json"), 4, 0x8000, missingAllowed = false)
+            stampFile(directory.resolve(decompengine.jobs.WorkflowAttemptStore.LISTING_STATE_FILE), 5, 0x8000, missingAllowed = true)
+            stampFile(directory.resolve(decompengine.jobs.WorkflowAttemptStore.LISTING_PENDING_FILE), 6, 0x8000, missingAllowed = true)
+            if (knownOrganizations == null || id in knownOrganizations) {
+                if (stampFile(directory.resolve(decompengine.jobs.JobOrganization.FILE_NAME), 7, 0x8000, missingAllowed = true) != null) {
+                    observedOrganizations += id
+                }
+            } else {
+                // Creating or removing a sidecar changes the already-stamped containing directory.
+                addRecord(7, 1)
+            }
+        }
+        dashboardStampBeforeRootRecheck?.invoke()
+        // Any root change while stamping (a job published after enumeration, or a service-owned
+        // sibling appearing) makes this stamp unusable; the caller rescans instead of reusing it.
+        val rootAfter = stampFile(root, 8, 0x4000, missingAllowed = false, identityOnly = true)
+        val rootUnchanged = rootAfter != null && rootBefore == rootAfter
+        if (!(dashboardRootStampsEqual?.invoke(rootUnchanged) ?: rootUnchanged)) { cacheable = false; inventoryComplete = false }
+        // Root metadata cannot detect every publication: renaming a staging directory that is
+        // already inside the root can leave its link count and size unchanged, and its times may
+        // fall in the same filesystem tick. Accept the stamp only if the published job-id
+        // inventory is unchanged since enumeration (O(entry budget), names only).
+        if (cacheable && publishedJobIds() != ids) { cacheable = false; inventoryComplete = false }
+        if (knownOrganizations == null && inventoryComplete) dashboardOrganizationIds = observedOrganizations.toSet()
+        return WebJobCollectionStamp(HexFormat.of().formatHex(digest.digest()), jobIdsDigest, cacheable)
+        } finally { probe?.close() }
+    }
+
+    private fun invalidateDashboardCollection() {
+        dashboardGeneration.incrementAndGet()
+    }
+
+    /** Bounded display-only inspection; never acquires ownership, replays work or removes files. */
+
     @Synchronized
     fun recoveryInventory(): decompengine.jobs.JobRecoveryInventory {
         requireInitializedRead()
@@ -625,13 +966,14 @@ class WebJobService(
      * The store validates its command epoch after the complete row capture; service ownership
      * and legacy admission are separately rechecked before publication.
      */
-    private fun inspectListedJob(jobId: String, read: (String, Int) -> ByteArray): WebJobInspection {
+    private fun inspectListedJob(jobId: String, read: (String, Int) -> ByteArray,
+        organizationObserved: ((String, Boolean) -> Unit)? = null): WebJobInspection {
         val (state, epoch) = synchronized(this) {
             requireInitializedRead()
             Triple(publicationFailures[jobId], attempts, active[jobId]) to legacyListingEpoch
         }
         val (failure, owner, task) = state
-        val inspection = inspectRecord(jobId, failure, owner, { task is LegacyTask }, read)
+        val inspection = inspectRecord(jobId, failure, owner, { task is LegacyTask }, read, organizationObserved)
         return synchronized(this) {
             requireInitializedRead() // A row read across shutdown is never published.
             publicationFailures[jobId]?.let { return@synchronized WebJobInspection.Unavailable(it) }
@@ -645,7 +987,8 @@ class WebJobService(
     }
 
     private fun inspectRecord(jobId: String, failure: WebJobDiagnostic?, owner: WorkflowAttemptStore?,
-        legacyActive: () -> Boolean, read: ((String, Int) -> ByteArray)?): WebJobInspection {
+        legacyActive: () -> Boolean, read: ((String, Int) -> ByteArray)?,
+        organizationObserved: ((String, Boolean) -> Unit)? = null): WebJobInspection {
         failure?.let { return WebJobInspection.Unavailable(it) }
         if (!jobId.matches(Regex("[0-9a-f]{32}")) || owner == null) return WebJobInspection.Unavailable(
             WebJobDiagnostic(jobId, "JOB_NOT_FOUND", "The requested job is unavailable."))
@@ -660,7 +1003,9 @@ class WebJobService(
             requirePublicElfCategories(raw.metadata)
             boundary = WebListingRefusalBoundary.ORGANIZATION
             val organizations = decompengine.jobs.JobOrganizationStore(store.storageRoot, organizationWriter)
-            val organization = if (read == null) organizations.read(jobId) else organizations.read(jobId, read)
+            val organizationRead = if (read == null) organizations.readObserved(jobId) else organizations.readObserved(jobId, read)
+            organizationObserved?.invoke(jobId, organizationRead.present)
+            val organization = organizationRead.organization
             if (snapshot != null && snapshot.attempts.isNotEmpty()) {
                 boundary = WebListingRefusalBoundary.WORKFLOW_VERSION
                 require(snapshot.version.matches(Regex("version_[a-f0-9]{32}"))) { "Invalid stored workflow version" }
@@ -768,9 +1113,12 @@ class WebJobService(
             catch (failure: Exception) { progress(); budget.incomplete(failure) }
         }
         return sequence {
+            val organizationIds = linkedSetOf<String>()
             for (id in ids) {
                 checkpoint()
-                val inspection = inspectListedJob(id, read)
+                val inspection = inspectListedJob(id, read) { observedJob, present ->
+                    if (present) organizationIds += observedJob
+                }
                 checkpoint()
                 val record = when (inspection) {
                     is WebJobInspection.Available -> webJob(inspection.presentation)
@@ -785,6 +1133,7 @@ class WebJobService(
                 if (record != null) yield(record)
             }
             checkpoint()
+            dashboardOrganizationIds = organizationIds.toSet()
         }
     }
 
@@ -1142,7 +1491,35 @@ class WebJobService(
     fun upload(filename: String, content: ByteArray): Job {
         writableStore()
         if (uploads.isNotEmpty()) throw WebJobServiceException("UPLOAD_CAPACITY", "Upload storage is reserved by another transfer.")
-        return publishUpload { store.createFromUpload(filename, content) }
+        requireJobAdmissionCapacity(reservedUploads = 0)
+        return publishUpload { store.createFromUpload(filename, content) }.also { invalidateDashboardCollection() }
+    }
+
+    /**
+     * Listing and startup recovery refuse a library beyond [WebJobLibraryEntryLimits]; never admit
+     * the upload that would cross it. Other registered uploads may each publish one more job and
+     * one more root entry, so they are counted as already admitted. Caller holds the monitor.
+     */
+    private fun requireJobAdmissionCapacity(reservedUploads: Int) {
+        val limits = WebJobLibraryEntryLimits()
+        val jobName = Regex("[0-9a-f]{32}")
+        var entries = 0
+        var jobs = 0
+        try {
+            Files.newDirectoryStream(store.storageRoot).use { stream ->
+                for (entry in stream) {
+                    entries++
+                    if (jobName.matches(entry.fileName.toString())) jobs++
+                    if (entries >= limits.maximumEntries) break
+                }
+            }
+        } catch (_: NoSuchFileException) {
+        } catch (failure: Exception) {
+            throw WebJobServiceException("JOB_STORAGE_UNAVAILABLE", "The job library could not be counted before upload. Inspect storage before retrying.", failure)
+        }
+        if (jobs + reservedUploads >= limits.maximumJobs || entries + reservedUploads >= limits.maximumEntries) {
+            throw WebJobServiceException("JOB_LIBRARY_FULL", JOB_LIBRARY_FULL_MESSAGE)
+        }
     }
 
     private fun <T> publishUpload(publish: () -> T): T = withWebUploadPublicationOutcome(
@@ -1166,6 +1543,11 @@ class WebJobService(
             // Deletion is refused while this upload is registered, so the check holds through publication.
             if (idempotencyKey != null && deletedJob(decompengine.jobs.StagedJobUpload.keyedJobId(idempotencyKey)) != null) {
                 throw WebJobServiceException("UPLOAD_KEY_RETIRED", "The job created with this upload key was deleted. Upload again with a new key.")
+            }
+            // A keyed retry of an already-published job replays its receipt and adds no job.
+            val replayJobId = idempotencyKey?.let(decompengine.jobs.StagedJobUpload::keyedJobId)
+            if (replayJobId == null || !Files.exists(store.storageRoot.resolve(replayJobId), NOFOLLOW_LINKS)) {
+                requireJobAdmissionCapacity(reservedUploads = uploads.size)
             }
             CountDownLatch(1).also { uploads[worker] = it }
         }
@@ -1198,6 +1580,7 @@ class WebJobService(
         store.get(jobId)
         val task = LegacyTask(jobId, workflow)
         legacyListingEpoch = Any()
+        invalidateDashboardCollection()
         active[jobId] = task
         try {
             store.updateStatus(jobId, "queued", "Waiting for a legacy workflow worker; attempt provenance is unavailable")
@@ -1232,6 +1615,7 @@ class WebJobService(
             NewWorkflowAttempt(request.workflow, registration.limits, request.inputRevisionId,
                 harnessCapabilityId = registration.harnessCapabilityId, previousRunId = request.previousRunId))
         val task = DurableTask(job, queued.attempt, registration.adapter, inputSourceTree = inputSourceTree)
+        invalidateDashboardCollection()
         active[jobId] = task
         try { workflowExecutor.execute(task) }
         catch (_: RejectedExecutionException) {
@@ -1674,6 +2058,7 @@ class WebJobService(
         val result = recordCancellation(jobId, task) {
             checkNotNull(attempts).requestCancellation(jobId, runId, expectedRunVersion, actor, requestKey)
         }
+        invalidateDashboardCollection()
         if (task != null) {
             task.attempt = result.attempt
             if (!task.attempt.state.terminal) signalCancellation(task)
@@ -2009,6 +2394,7 @@ class WebJobService(
         abstract fun stopPending()
         fun release() {
             active.remove(jobId, this)
+            invalidateDashboardCollection()
             finished.countDown()
             releaseIfQuiescent()
         }
