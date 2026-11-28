@@ -84,7 +84,11 @@ export function JobOrganization({ job, client, basePath, session, onChanged, rea
         }
       }
     } finally {
-      if (active.current === controller) { active.current = null; setBusy(false); }
+      if (active.current === controller) {
+        active.current = null; setBusy(false);
+        // Lost availability ended the request without an answer; the change may or may not have been written.
+        if (controller.signal.aborted) setNotice(copy.unconfirmed);
+      }
     }
   }
   return <section aria-labelledby="job-organize-title">
