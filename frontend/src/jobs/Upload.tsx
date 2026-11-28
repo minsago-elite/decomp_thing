@@ -4,7 +4,7 @@ import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
 import { ApiClientError, withApiFailureReference } from '../api/client';
-import { jobPath } from '../app/paths';
+import { appPath, jobPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import type { UploadProgress } from '../api/generated';
 import { createUploadRecovery } from './uploadRecovery';
@@ -27,6 +27,7 @@ function failureMessage(error: unknown): string {
     case 'IDEMPOTENCY_CONFLICT': return copy.thisRetryIdentityBelongsToDifferentContentCheckTheJob;
     case 'UPLOAD_RECEIPT_UNAVAILABLE': case 'RECOVERY_REQUIRED':
       return copy.uploadStorageNeedsAttentionKeepThisPageOpenAndRetry;
+    case 'JOB_LIBRARY_FULL': return copy.theJobLibraryIsAtItsCapacityDeleteJobsYouNoLonger;
     case 'UPLOAD_CAPACITY': case 'UPLOAD_STORAGE':
       return copy.theServerHasNoUploadCapacityWaitOrFreeStorage;
     default:
@@ -46,12 +47,14 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
   const [phase, setPhase] = useState<'idle' | 'pending' | 'retry'>(retained.kind === 'empty' ? 'idle' : 'retry');
   const [observation, setProgress] = useState<Received<UploadProgress> | null>(null);
   const progress = observation?.value;
-  const [feedback, setFeedback] = useState<{ message: string; kind: 'status' | 'error' | 'input-error' }>({ message: '', kind: 'status' });
+  // 'refused' is a definite server refusal: nothing was published and retrying the same request cannot succeed.
+  const [feedback, setFeedback] = useState<{ message: string; kind: 'status' | 'error' | 'input-error' | 'refused' }>({ message: '', kind: 'status' });
   const [rejectedFileMessage, setRejectedFileMessage] = useState<string | null>(null);
   const active = useRef<AbortController | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const live = useRef(true);
   const focusPicker = useRef(false);
+  const notice = useRef<HTMLParagraphElement>(null);
   const { client } = usePrivateTransport(basePath, 120_000);
   const limits = state?.status === 'authenticated' ? state.runtime.limits : null;
   const maxBytes = limits ? BigInt(limits.maxUploadBytes) : 0n;
@@ -60,6 +63,9 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
   useLayoutEffect(() => {
     if (phase === 'idle' && focusPicker.current) { focusPicker.current = false; input.current?.focus(); }
   }, [phase]);
+  useLayoutEffect(() => {
+    if (feedback.kind === 'refused') notice.current?.focus();
+  }, [feedback]);
   useEffect(() => {
     live.current = true;
     return () => { live.current = false; active.current?.abort(); };
@@ -130,8 +136,17 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
       location.route(jobPath(basePath, result.data.jobId));
     } catch (error) {
       if (!live.current || active.current !== controller) return;
-      const invalidInput = error instanceof ApiClientError && ['INVALID_ELF', 'UPLOAD_TOO_LARGE'].includes(error.serverCode ?? '');
       const message = withApiFailureReference(failureMessage(error), error);
+      if (error instanceof ApiClientError && error.serverCode === 'JOB_LIBRARY_FULL') {
+        // A definite refusal before staging: drop the retry identity so nothing suggests the upload may be pending.
+        let cleared = true;
+        try { recovery.clear(); } catch { cleared = false; }
+        setRetained(recovery.read()); setAttempt(null); setRejectedFileMessage(null); setPhase('idle');
+        setFeedback({ message: cleared ? message : [message, copy.retryContextCouldNotBeClearedCheckTabStorageBefore].join(' '), kind: 'refused' });
+        if (input.current) input.current.value = '';
+        return;
+      }
+      const invalidInput = error instanceof ApiClientError && ['INVALID_ELF', 'UPLOAD_TOO_LARGE'].includes(error.serverCode ?? '');
       if (invalidInput) setRejectedFileMessage(message);
       setPhase('retry'); setFeedback({ message, kind: invalidInput ? 'input-error' : 'error' });
     } finally { clearTimeout(pollTimer); controller.abort(); if (active.current === controller) active.current = null; }
@@ -174,8 +189,9 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
           : progress?.state === 'unconfirmed' ? copy.publicationIsUnconfirmedWaitingForTheUploadResponse
           : copy.transferringTheFileReceivedBytesDoNotConfirmJobPublication}</p></div>}
       {phase === 'pending' && progress && <MetadataReceipt kind="upload" receipt={observation?.receipt} />}
-      <p id="upload-feedback" role={errorFeedback ? 'alert' : 'status'}
-        class={errorFeedback ? 'notice notice-error' : undefined}>{feedbackMessage}</p>
+      <p id="upload-feedback" ref={notice} role={errorFeedback ? 'alert' : 'status'} tabIndex={feedback.kind === 'refused' ? -1 : undefined}
+        class={errorFeedback ? 'notice notice-error' : undefined}>{feedbackMessage}
+        {feedback.kind === 'refused' && <> <a href={appPath(basePath, '/')}>{copy.openTheJobLibrary}</a></>}</p>
       {phase === 'retry' && <p>{copy.retryKeepsTheSameJobIdentityChoosingAnotherFileDiscards}</p>}
       <div class="job-actions">
         <button type="submit" disabled={!connected || !attempt || phase === 'pending'}>{phase === 'retry' ? copy.retryThisUpload : copy.uploadBinary}</button>

@@ -111,6 +111,36 @@ it.each([
   expect(transport.upload.mock.calls[1]?.[1].idempotencyKey).toBe(transport.upload.mock.calls[0]?.[1].idempotencyKey);
 });
 
+it('explains a full job library as a definite refusal without retry or unconfirmed state', async () => {
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  transport.upload.mockRejectedValue(new ApiClientError('http_error', { serverCode: 'JOB_LIBRARY_FULL', status: 409, requestId }));
+  await mount(); select();
+  fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
+  const notice = await screen.findByRole('alert');
+  expect(notice.textContent).toContain('The job library is at its 10,000-job capacity. Delete jobs you no longer need, then upload again.');
+  expect(notice.textContent).toContain(`Reference ID: ${requestId}.`);
+  expect(notice.id).toBe('upload-feedback');
+  expect(document.activeElement).toBe(notice);
+  const link = screen.getByRole('link', { name: 'Open the job library' });
+  expect(notice.contains(link)).toBe(true);
+  expect(link.getAttribute('href')).toBe('/nested/');
+  expect(sessionStorage.getItem('decomp.upload.v1:/nested')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Retry this upload' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Choose another file' })).toBeNull();
+  expect(notice.textContent).not.toMatch(/not confirmed|unconfirmed|retry/i);
+  expect(screen.queryByText(/Upload was not confirmed|An unconfirmed upload is retained|Retry keeps the same job identity/)).toBeNull();
+  expect(screen.queryByText(/Selected: binary.elf/)).toBeNull();
+  expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Upload binary' }).disabled).toBe(true);
+  const picker = screen.getByLabelText<HTMLInputElement>('Binary file');
+  expect(picker.disabled).toBe(false);
+  expect(picker.getAttribute('aria-invalid')).toBeNull();
+  expect(transport.upload).toHaveBeenCalledOnce();
+  expect(transport.route).not.toHaveBeenCalled();
+  select(); fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
+  await waitFor(() => expect(transport.upload).toHaveBeenCalledTimes(2));
+  expect(transport.upload.mock.calls[1]?.[1].idempotencyKey).not.toBe(transport.upload.mock.calls[0]?.[1].idempotencyKey);
+});
+
 it('accepts one dropped file and rejects multiple files without implicit admission', async () => {
   await mount();
   const drop = screen.getByLabelText('Binary file').parentElement!;
