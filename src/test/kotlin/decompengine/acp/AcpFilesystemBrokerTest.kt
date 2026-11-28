@@ -1,5 +1,6 @@
 package decompengine.acp
 
+import decompengine.testing.ChildJvm
 import com.agentclientprotocol.protocol.AcpExpectedError
 import decompengine.agent.AgentAccessPolicy
 import decompengine.agent.AgentCancellation
@@ -801,7 +802,7 @@ class AcpFilesystemBrokerTest {
 
     @Test
     fun `bind mounts beneath a root are rejected for reads and writes`() {
-        val java = Path.of(System.getProperty("java.home"), "bin", "java").toString()
+        val java = ChildJvm.command().toTypedArray()
         val process = ProcessBuilder(
             "unshare",
             "--user",
@@ -809,7 +810,7 @@ class AcpFilesystemBrokerTest {
             "--mount",
             "--fork",
             "--",
-            java,
+            *java,
             "-cp",
             System.getProperty("java.class.path"),
             "decompengine.acp.AcpFilesystemMountProbe",
@@ -821,12 +822,12 @@ class AcpFilesystemBrokerTest {
 
     @Test
     fun `reserved descriptors recover from native EMFILE immediately after each commit rename`() {
-        val java = Path.of(System.getProperty("java.home"), "bin", "java").toString()
+        val java = ChildJvm.command().toTypedArray()
         val process = ProcessBuilder(
             "prlimit",
             "--nofile=64:64",
             "--",
-            java,
+            *java,
             "-cp",
             System.getProperty("java.class.path"),
             "decompengine.acp.AcpFilesystemDescriptorPressureProbe",
@@ -839,9 +840,9 @@ class AcpFilesystemBrokerTest {
     @Test
     fun `platform support detection cannot rename a prepared working-directory entry`() {
         val workingDirectory = createTempDirectory("acp-fs-support-probe-").toAbsolutePath().normalize()
-        val java = Path.of(System.getProperty("java.home"), "bin", "java").toString()
+        val java = ChildJvm.command().toTypedArray()
         val process = ProcessBuilder(
-            java,
+            *java,
             "-cp",
             System.getProperty("java.class.path"),
             "decompengine.acp.AcpFilesystemSupportProbe",

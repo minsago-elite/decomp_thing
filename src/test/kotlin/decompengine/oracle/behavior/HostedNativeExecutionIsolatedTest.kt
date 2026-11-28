@@ -1,5 +1,6 @@
 package decompengine.oracle.behavior
 
+import decompengine.testing.ChildJvm
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -41,9 +42,8 @@ class HostedNativeExecutionIsolatedTest {
         val resultMarker = root.resolve("result.txt")
         val spawnMarker = root.resolve("spawned.txt")
         val processOutput = root.resolve("process-output.txt")
-        val java = Path.of(System.getProperty("java.home"), "bin", "java").toAbsolutePath().normalize()
         val process = ProcessBuilder(
-            java.toString(),
+            *ChildJvm.command().toTypedArray(),
             "-cp",
             System.getProperty("java.class.path"),
             HostedNativeExecutionIsolatedMain::class.java.name,

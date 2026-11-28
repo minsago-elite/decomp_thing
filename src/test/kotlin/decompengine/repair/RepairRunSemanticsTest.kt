@@ -1,5 +1,6 @@
 package decompengine.repair
 
+import decompengine.testing.ChildJvm
 import decompengine.agent.*
 import decompengine.project.sha256
 import decompengine.jobs.AgentProgressJournal
@@ -251,7 +252,7 @@ class RepairRunSemanticsTest {
             assertEquals(result.runState.provisionalHeadId, graph.snapshot.provisionalHeadId)
             assertEquals(inputs, graph.retainedRegressionCorpus().inputs)
         }
-        val process = ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+        val process = ProcessBuilder(*ChildJvm.command().toTypedArray(),
             "-cp", System.getProperty("java.class.path"), RepairRunReopenProbe::class.java.name, fixture.root.toString())
             .redirectErrorStream(true).start()
         val output = process.inputStream.readAllBytes().toString(Charsets.UTF_8)
@@ -728,7 +729,7 @@ class RepairRunSemanticsTest {
             val events = AgentProgressJournal.read(root.resolve("reports"))!!.getValue("events").jsonArray
             assertEquals("failed", events.last().jsonObject.getValue("phase").jsonPrimitive.content)
         }
-        val process = ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+        val process = ProcessBuilder(*ChildJvm.command().toTypedArray(),
             "-Djava.io.tmpdir=${root}", "-cp", System.getProperty("java.class.path"),
             RepairRunReopenProbe::class.java.name, root.toString()).redirectErrorStream(true).start()
         try {

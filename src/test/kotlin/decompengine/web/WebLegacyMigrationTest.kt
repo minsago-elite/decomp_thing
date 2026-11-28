@@ -1,5 +1,7 @@
 package decompengine.web
 
+import decompengine.testing.ChildJvm.withRepositoryTemporary
+import decompengine.testing.ChildJvm
 import decompengine.jobs.JobStore
 import decompengine.jobs.elfFixture
 import decompengine.project.GeneratedCMakeReconstructionProfile
@@ -369,12 +371,11 @@ class WebLegacyMigrationTest {
                 // A second JVM cannot see the local owners map: this exercises the actual file lock and
                 // Main's refusal boundary, including the fixed stderr message and exit status.
                 val process = ProcessBuilder(
-                    Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-                    "-XX:-UsePerfData", "-Djava.io.tmpdir=${System.getProperty("java.io.tmpdir")}",
+                    *ChildJvm.command().toTypedArray(),
                     "-cp", System.getProperty("java.class.path"), "decompengine.MainKt", "web",
                     "--host", "127.0.0.1", "--port", "0", "--ui", mode.name.lowercase(),
                     "--data-dir", root.toAbsolutePath().toString(),
-                ).apply { environment().clear() }.start()
+                ).apply { environment().clear() }.withRepositoryTemporary().start()
                 try {
                     assertTrue(process.waitFor(60, TimeUnit.SECONDS), "$mode contender did not exit")
                     val stdout = process.inputStream.readNBytes(16 * 1024).decodeToString()

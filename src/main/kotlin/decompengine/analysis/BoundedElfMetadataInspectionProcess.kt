@@ -529,7 +529,7 @@ private fun metadataWorkerCommand(path: Path, limits: BoundedElfMetadataLimits):
     }
     return listOf(
         java.toString(), "-Xmx256m", "-XX:MaxMetaspaceSize=128m", "-XX:+DisableAttachMechanism",
-        "-Dfile.encoding=UTF-8", "-Duser.language=en", "-Duser.country=US",
+        "-XX:-UsePerfData", "-Dfile.encoding=UTF-8", "-Duser.language=en", "-Duser.country=US",
         "-cp", entries.joinToString(File.pathSeparator), BoundedElfMetadataInspectionWorker::class.java.name,
         path.toString(), limits.maximumInputBytes.toString(), limits.maximumSectionHeaders.toString(),
         limits.maximumScannedSymbols.toString(), limits.maximumRetainedSymbols.toString(),

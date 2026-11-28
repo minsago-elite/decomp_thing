@@ -1,5 +1,6 @@
 package decompengine.oracle.gcc
 
+import decompengine.testing.ChildJvm
 import decompengine.analysis.BundledGhidra
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
@@ -398,7 +399,7 @@ class GccBundledGhidraDeploymentReferenceTest {
             Files.writeString(exporter, GccBundledGhidraInstalledReferenceProbe.SHADOW_EXPORTER)
             Files.writeString(shadow.resolve("ghidra_scripts/ExportNativeCallsV1.java"), GccBundledGhidraInstalledReferenceProbe.SHADOW_NATIVE_COLLECTOR)
             val command = listOf(
-                Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                Path.of(System.getProperty("java.home"), "bin", "java").toString(), ChildJvm.NO_PERF_DATA,
                 "-Djava.io.tmpdir=$temporary",
                 "-Ddecompengine.oracle.nativeLibraryDirectory=${installed.resolve("libexec/oracle-native")}",
                 "-cp", (listOf(tests, shadow) + jars).joinToString(File.pathSeparator),

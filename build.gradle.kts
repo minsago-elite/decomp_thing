@@ -1884,6 +1884,8 @@ val verifyCompiledJunitSignatures = tasks.register<Exec>("verifyCompiledJunitSig
 // `./gradlew clean` removes them. A counter rather than a random name keeps the root to one or two
 // characters, because Unix socket fixtures under it must fit Linux's 108-byte sun_path even in nested
 // worktrees (RepositoryTemporaryRootTest binds the longest fixture socket path).
+// Assumes build/ and build/t are not attacker-planted links: createDirectories follows them, the same trust
+// boundary as every other Gradle output under build/.
 fun createTestTemporaryRoot(parent: Path): Path {
     Files.createDirectories(parent)
     val ownerOnly = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------"))

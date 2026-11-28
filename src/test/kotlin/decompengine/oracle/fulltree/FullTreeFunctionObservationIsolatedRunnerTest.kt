@@ -1,5 +1,6 @@
 package decompengine.oracle.fulltree
 
+import decompengine.testing.ChildJvm
 import decompengine.acp.AcpRuntimeClosureLimits
 import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFilesystemSyscalls
@@ -261,7 +262,7 @@ class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
                     arguments,
                 )
                 val child = ProcessBuilder(
-                    listOf(javaExecutable.toString(), "-Duser.home=$run") + arguments +
+                    listOf(javaExecutable.toString(), ChildJvm.NO_PERF_DATA, "-Duser.home=$run") + arguments +
                         listOf("-classpath", jnaJar.toString(), "com.sun.jna.Native"),
                 ).directory(run.toFile()).redirectErrorStream(true).also { builder ->
                     builder.environment().clear()

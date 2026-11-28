@@ -1,5 +1,6 @@
 package decompengine.oracle.gcc
 
+import decompengine.testing.ChildJvm
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.project.DeterministicModulePlanner
@@ -50,7 +51,7 @@ class GccBundledPlannerWorkerTest {
                 reference.entries.joinToString(File.pathSeparator) { bootRoot.resolve(it.logicalName).toString() }
             }
             val log = root.resolve("worker.log")
-            val process = ProcessBuilder(Path.of(System.getProperty("java.home"), "bin/java").toString(), "-Xmx256m",
+            val process = ProcessBuilder(*ChildJvm.command().toTypedArray(), "-Xmx256m",
                 "-XX:+DisableAttachMechanism", "-cp", classpath, GccBundledPlannerWorker::class.java.name,
                 requestPath.toString(), OracleArtifacts.sha256(request.canonicalBytes))
                 .redirectErrorStream(true).redirectOutput(log.toFile()).start()
