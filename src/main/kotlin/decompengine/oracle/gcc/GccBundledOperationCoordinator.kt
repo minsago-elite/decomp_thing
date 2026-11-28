@@ -257,6 +257,7 @@ internal class GccBundledPreparedOperation internal constructor(
     private var plannerAttempted = false
     private var completedPlan: GccBundledPlannedOperation? = null
     private var cliPublicationAttempted = false
+    private val hostWork = GccBundledHostWorkTracker()
 
     val definitionBytes: ByteArray
         get() = definition.copyOf()
@@ -602,9 +603,11 @@ internal class GccBundledPreparedOperation internal constructor(
                 deadline.requireCurrent()
                 val capturedModel = exported.programModelBytes
                 deadline.requireCurrent()
+                // Host capture/assessment shares the planner's memory ceiling; it starts only after cgroup absence.
                 val captured = borrowed.withPinnedDescriptor { descriptor ->
-                    GccBundledPlannerOutputCapture.capture(descriptor, controlName, checkNotNull(execution.controlDirectoryIdentity),
-                        request, capturedModel, logLimit, logLimit) { deadline.requireCurrent() }
+                    GccBundledPlannerOutputCapture.captureOwned(hostWork, descriptor, controlName,
+                        checkNotNull(execution.controlDirectoryIdentity), request, capturedModel, logLimit, logLimit,
+                        intent.budgets.maximumResidentBytes, deadline)
                 }
                 inputs.verify("after GCC planner output capture")
                 lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
@@ -651,16 +654,14 @@ internal class GccBundledPreparedOperation internal constructor(
             )))
             LinuxFilesystemSyscalls.openRoot(cli.options.output).use { output ->
                 cli.requireCurrent()
-                decompengine.oracle.core.DescriptorBoundAtomicStateFile.publishNoReplace(
-                    output, "result.json", document, 256 * 1024,
-                    beforePublication = deadline::requireCurrent,
-                )
-                cli.requireCurrent()
+                // Any failure, including expiry before acceptance, revokes the committed result.
+                GccBundledDeadlineBoundPublication.publish(hostWork, output, "result.json", document, 256 * 1024, deadline) {
+                    cli.requireCurrent()
+                    inputs.verify("after CLI result publication")
+                    journal.verify("after CLI result publication")
+                    lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+                }
             }
-            inputs.verify("after CLI result publication")
-            journal.verify("after CLI result publication")
-            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
-            deadline.requireCurrent()
             return cli.options.output.resolve("result.json")
         } catch (failure: Throwable) {
             poisoned = true
@@ -1305,6 +1306,7 @@ internal class GccBundledPreparedOperation internal constructor(
             check(cleanup.absenceProved) { "GCC bundled command absence remains unproved; retaining disk and input ownership" }
             pendingCleanup = null
         }
+        hostWork.requireRetired(GccBundledDeadlineBoundPublication.CLEANUP_ALLOWANCE_MILLIS)
         closed = true
         var failure: Throwable? = null
         fun record(next: Throwable) {

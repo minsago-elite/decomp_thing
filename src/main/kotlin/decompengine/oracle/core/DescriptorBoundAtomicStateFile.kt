@@ -22,6 +22,18 @@ internal fun interface DescriptorBoundStateFaultInjector {
     fun hit(point: DescriptorBoundStateFaultPoint)
 }
 
+/** Owner admission for one staged no-replace commit; implementations must be thread safe. */
+internal interface DescriptorBoundCommitGate {
+    /** Throws to stop before the next staging step. */
+    fun requireStaging(stage: String)
+
+    /** Atomically claims the single rename, or throws so that nothing is renamed. */
+    fun beginCommit()
+
+    /** Called once after the rename returns; false revokes the committed name. */
+    fun completeCommit(): Boolean
+}
+
 internal class DescriptorBoundStateSnapshot(
     bytes: ByteArray,
     val identity: LinuxFileIdentity,
@@ -92,6 +104,93 @@ internal object DescriptorBoundAtomicStateFile {
         faultInjector,
         beforePublication,
     )
+
+    /**
+     * Stages and commits one new immutable file under [gate]. Unlike [publishNoReplace], it never
+     * adopts an existing target or temporary, and no failure leaves this call's inode named: a
+     * refused, failed or unconfirmed commit removes the staged temporary and any committed target
+     * that still names this call's inode, then syncs the directory before rethrowing.
+     */
+    fun commitNoReplace(
+        parent: LinuxDescriptor,
+        name: String,
+        bytes: ByteArray,
+        maximumBytes: Int,
+        gate: DescriptorBoundCommitGate,
+        faultInjector: DescriptorBoundStateFaultInjector? = null,
+    ): DescriptorBoundStateSnapshot {
+        requireName(name)
+        require(maximumBytes in 1..MAXIMUM_STATE_FILE_BYTES)
+        require(bytes.isNotEmpty() && bytes.size <= maximumBytes) { "immutable state bytes exceed their configured bound" }
+        val expectedBytes = bytes.copyOf()
+        requireParent(parent)
+        val temporaryName = temporaryName(name)
+        for (existing in listOf(name, temporaryName)) {
+            LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, existing)?.use {
+                stateFail("immutable commit target or temporary already exists")
+            }
+        }
+        var prepared: LinuxDescriptor? = null
+        var staged: LinuxFileIdentity? = null
+        var committed: LinuxFileIdentity? = null
+        try {
+            gate.requireStaging("before preparing $name")
+            prepared = LinuxFilesystemSyscalls.createTemporaryAt(parent.fd)
+            LinuxFilesystemSyscalls.write(prepared, expectedBytes) { gate.requireStaging("writing $name") }
+            LinuxFilesystemSyscalls.chmod(prepared, OWNER_READ_ONLY_MODE)
+            LinuxFilesystemSyscalls.synchronize(prepared)
+            val unnamedIdentity = LinuxFilesystemSyscalls.identity(prepared.fd)
+            requireUnnamedFile(unnamedIdentity, parent.identity, OWNER_READ_ONLY_MODE)
+            faultInjector?.hit(DescriptorBoundStateFaultPoint.AFTER_UNNAMED_FILE_SYNC)
+            gate.requireStaging("before naming $name")
+            LinuxFilesystemSyscalls.linkTemporaryAt(prepared, parent.fd, temporaryName)
+            staged = unnamedIdentity
+            val materialized = readRequiredWithMode(parent, temporaryName, maximumBytes, OWNER_READ_ONLY_MODE)
+            requireExactBytes(materialized.bytes, expectedBytes, "immutable state temporary")
+            if (!sameFile(materialized.identity, unnamedIdentity)) stateFail("immutable state temporary differs from its unnamed inode")
+            LinuxFilesystemSyscalls.synchronize(parent)
+            faultInjector?.hit(DescriptorBoundStateFaultPoint.AFTER_TEMPORARY_DIRECTORY_SYNC)
+            gate.requireStaging("before committing $name")
+            requireNamedIdentity(parent, temporaryName, materialized.identity, "immutable state temporary")
+            gate.beginCommit()
+            LinuxFilesystemSyscalls.renameNoReplace(parent.fd, temporaryName, name)
+            staged = null
+            committed = unnamedIdentity
+            faultInjector?.hit(DescriptorBoundStateFaultPoint.AFTER_PUBLICATION_RENAME)
+            if (!gate.completeCommit()) stateFail("immutable commit completed outside its admission and is revoked")
+            LinuxFilesystemSyscalls.synchronize(parent)
+            faultInjector?.hit(DescriptorBoundStateFaultPoint.AFTER_PUBLICATION_DIRECTORY_SYNC)
+            return readRequiredWithMode(parent, name, maximumBytes, OWNER_READ_ONLY_MODE).also { published ->
+                requireExactBytes(published.bytes, expectedBytes, "immutable state target")
+                if (!sameFile(published.identity, unnamedIdentity)) stateFail("immutable state target differs from its prepared inode")
+            }
+        } catch (failure: Throwable) {
+            val owned = listOfNotNull(committed?.let { name to it }, staged?.let { temporaryName to it })
+            runCatching { removeOwned(parent, owned) }.exceptionOrNull()?.let(failure::addSuppressed)
+            throw failure
+        } finally {
+            prepared?.close()
+        }
+    }
+
+    /** Removes a committed target, and its temporary name, only while they name [identity]. */
+    fun revokeCommitted(parent: LinuxDescriptor, name: String, identity: LinuxFileIdentity) {
+        requireParent(parent)
+        removeOwned(parent, listOf(name to identity, temporaryName(name) to identity))
+    }
+
+    private fun removeOwned(parent: LinuxDescriptor, entries: List<Pair<String, LinuxFileIdentity>>) {
+        var removed = false
+        var foreign = false
+        for ((entry, identity) in entries) {
+            val current = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, entry) ?: continue
+            if (current.use { !sameFile(it.identity, identity) }) { foreign = true; continue }
+            LinuxFilesystemSyscalls.unlink(parent.fd, entry)
+            removed = true
+        }
+        if (removed) LinuxFilesystemSyscalls.synchronize(parent)
+        if (foreign) stateFail("immutable commit cleanup found a foreign entry and left it in place")
+    }
 
     /** Larger immutable inventory manifests; ordinary journal records retain their one-MiB limit. */
     fun publishManifestNoReplace(

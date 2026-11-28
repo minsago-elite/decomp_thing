@@ -10,6 +10,8 @@ import decompengine.project.RecoveredProgramModel
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -160,6 +162,90 @@ class GccBundledPlannerOutputCaptureTest {
             assertEquals(3, checked)
             assertTrue(failure.message.orEmpty().contains("deadline expired or clock regressed"))
             assertContentEquals(bytes, Files.readAllBytes(path))
+        }
+    }
+
+    @Test
+    fun `planner capture over its host memory budget is refused with a bounded failure`() = fixture { root, request, model ->
+        val names = listOf("module_plan.json", "planner-output.json", "contained-command.stdout", "contained-command.stderr")
+        val before = names.associateWith { Files.readAllBytes(request.outputDirectory.resolve(it)) }
+        val reserved = GccBundledHostMemoryBudget.WORKING_RESERVATION_BYTES
+        val planBytes = before.getValue("module_plan.json").size.toLong()
+        val metadataBytes = before.getValue("planner-output.json").size.toLong()
+        val reads = planBytes + metadataBytes + 2 * 64 * 1024
+        val assessment = GccBundledPlannerOutputCapture.ASSESSMENT_ALLOCATION_PER_INPUT_BYTE * (model.size + planBytes + metadataBytes)
+        LinuxFilesystemSyscalls.openAbsolutePathOrNull(root)!!.use { run ->
+            LinuxFilesystemSyscalls.openDirectoryAt(run.fd, CONTROL).use { control ->
+                fun capture(maximum: Long, allocated: () -> Long) = GccBundledPlannerOutputCapture.capture(run, CONTROL,
+                    control.identity, request, model, 4, 0, GccBundledHostMemoryBudget(maximum, allocated)) {}
+                val baseline = GccBundledPlannerOutputCapture.capture(run, CONTROL, control.identity, request, model, 4, 0)
+                val exact = capture(reserved + reads + assessment, ::currentThreadAllocatedBytes)
+                assertContentEquals(baseline.canonicalBytes, exact.canonicalBytes)
+                val read = assertFailsWith<GccBundledHostMemoryBudgetException> { capture(reserved + planBytes - 1) { 0L } }
+                assertTrue(read.message.orEmpty().contains("planner output file read"), read.toString())
+                val assessed = assertFailsWith<GccBundledHostMemoryBudgetException> { capture(reserved + reads + assessment - 1) { 0L } }
+                assertTrue(assessed.message.orEmpty().contains("planner assessment"), assessed.toString())
+                var allocated = 0L
+                var checks = 0
+                val measured = assertFailsWith<GccBundledHostMemoryBudgetException> {
+                    capture(Long.MAX_VALUE / 2) { if (++checks == 4) allocated = reserved + 1; allocated }
+                }
+                assertTrue(measured.message.orEmpty().contains("beyond its"), measured.toString())
+            }
+        }
+        for (name in names) assertContentEquals(before.getValue(name), Files.readAllBytes(request.outputDirectory.resolve(name)))
+    }
+
+    @Test
+    fun `planner logs are digested through a bounded buffer instead of retained`() = fixture { root, request, model ->
+        val stdout = ByteArray(24 * 1024 * 1024) { (it % 251).toByte() }
+        Files.write(request.outputDirectory.resolve("contained-command.stdout"), stdout)
+        LinuxFilesystemSyscalls.openAbsolutePathOrNull(root)!!.use { run ->
+            LinuxFilesystemSyscalls.openDirectoryAt(run.fd, CONTROL).use { control ->
+                val result = GccBundledPlannerOutputCapture.capture(run, CONTROL, control.identity, request, model, stdout.size, 0,
+                    GccBundledHostMemoryBudget(32L * 1024 * 1024)) {}
+                val document = OracleJson.parseCanonical(result.canonicalBytes).jsonObject
+                assertEquals(stdout.size.toString(), document.getValue("stdoutBytes").jsonPrimitive.content)
+                assertEquals(OracleArtifacts.sha256(stdout), document.getValue("stdoutSha256").jsonPrimitive.content)
+                assertEquals(OracleArtifacts.sha256(byteArrayOf()), document.getValue("stderrSha256").jsonPrimitive.content)
+            }
+        }
+    }
+
+    @Test
+    fun `owned planner capture matches direct capture and bounds a blocked read while keeping ownership`() = fixture { root, request, model ->
+        LinuxFilesystemSyscalls.openAbsolutePathOrNull(root)!!.use { run ->
+            LinuxFilesystemSyscalls.openDirectoryAt(run.fd, CONTROL).use { control ->
+                val direct = GccBundledPlannerOutputCapture.capture(run, CONTROL, control.identity, request, model, 4, 0)
+                val tracker = GccBundledHostWorkTracker()
+                val owned = GccBundledPlannerOutputCapture.captureOwned(tracker, run, CONTROL, control.identity, request, model,
+                    4, 0, 1024L * 1024 * 1024, ContainedCommandOperationDeadline(2_000))
+                assertContentEquals(direct.planBytes, owned.planBytes)
+                assertContentEquals(direct.canonicalBytes, owned.canonicalBytes)
+                tracker.requireRetired(5_000)
+
+                val blocked = CountDownLatch(1)
+                val release = CountDownLatch(1)
+                val stages = java.util.Collections.synchronizedList(mutableListOf<String>())
+                val started = System.nanoTime()
+                assertFailsWith<GccBundledHostWorkTimeoutException> {
+                    GccBundledPlannerOutputCapture.captureOwned(tracker, run, CONTROL, control.identity, request, model,
+                        4, 0, 1024L * 1024 * 1024, ContainedCommandOperationDeadline(2_000) { 0L }) { stage ->
+                        stages += stage
+                        if (stage == "reading planner output file" && blocked.count != 0L) {
+                            blocked.countDown()
+                            while (true) try { if (release.await(10, TimeUnit.SECONDS)) break } catch (_: InterruptedException) { }
+                        }
+                    }
+                }
+                val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+                assertTrue(blocked.count == 0L && elapsedMillis in 2_000..12_000, "elapsed $elapsedMillis ms")
+                assertEquals(listOf("planner output capture"), tracker.inFlightStages)
+                assertFailsWith<IllegalStateException> { tracker.requireRetired(50) }
+                release.countDown()
+                tracker.requireRetired(10_000)
+                assertTrue("before planner assessment" !in stages, "an abandoned capture stops at its next checkpoint")
+            }
         }
     }
 
