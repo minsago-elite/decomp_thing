@@ -548,15 +548,12 @@ class WebProductionWorkflowsTest {
     }
 
     @Test
-    fun `opt in real bundled Ghidra imports the owner snapshot while the upload path is replaced`() {
-        if (System.getenv("RUN_REAL_GHIDRA") != "true") return
-        // Ghidra refuses a project path with a dot-prefixed element, so like the other real imports this uses
-        // java.io.tmpdir rather than the repository scratch root, and removes it afterwards.
-        val root = kotlin.io.path.createTempDirectory("snapshot-real-")
-        try { realSnapshotImport(root) } finally { root.toFile().deleteRecursively() }
-    }
-
-    private fun realSnapshotImport(root: Path) {
+    fun `opt in real bundled Ghidra imports the owner snapshot while the upload path is replaced`() = withRoot { root ->
+        if (System.getenv("RUN_REAL_GHIDRA") != "true") return@withRoot
+        // Ghidra refuses a project path with a dot-prefixed element, as in a local `.t3` worktree. Skip there.
+        val hidden = root.toRealPath().firstOrNull { it.toString().startsWith(".") }
+        org.junit.jupiter.api.Assumptions.assumeTrue(hidden == null,
+            "Ghidra refuses project paths with a dot-prefixed element ($hidden in $root); run from a checkout without one")
         fun compile(name: String, result: Int): ByteArray {
             val source = root.resolve("$name.c").also { it.writeText("int main(void) { return $result; }\n") }
             val binary = root.resolve(name)
@@ -606,6 +603,54 @@ class WebProductionWorkflowsTest {
         assertEquals(sha256(original), committed.inputSha256)
         assertEquals(published.sha256, committed.modelSha256)
         assertEquals(sha256(replacement), sha256(Files.readAllBytes(job.binaryPath)))
+    }
+
+    @Test
+    fun `a model candidate replaced after the worker attested it is never committed`() = withRoot { root ->
+        val job = JobStore(root).createFromUpload("replaced-candidate.elf", elfFixture())
+        fun model(name: String) = root.resolve("$name.json").also {
+            it.writeText(decompengine.project.RecoveredProgramModel(inputSha256 = sha256(elfFixture()), functions = listOf(
+                decompengine.project.RecoveredFunction(id = "fn_0000000000001000", name = name, address = 0x1000UL,
+                    prototype = "int $name(void)"))).toJson())
+        }
+        val written = model("written")
+        val replacement = model("replacement")
+        val replace = root.resolve("replace-after-attestation")
+        // The worker attests the digest of the bytes it wrote; another writer then replaces the published candidate.
+        val worker = root.resolve("fake-worker").also {
+            it.writeText("""
+                #!/bin/sh
+                for last do :; done
+                cp '$written' "${'$'}last"
+                imported=${'$'}(sha256sum "${'$'}4" | cut -d' ' -f1)
+                printf '\n${decompengine.project.IMPORTED_PROGRAM_FRAME} %s %s %s\n' "${'$'}{last##*/}" "${'$'}imported" '${sha256(Files.readAllBytes(written))}'
+                if [ -e '$replace' ]; then cp '$replacement' "${'$'}last.next" && mv -f "${'$'}last.next" "${'$'}last"; fi
+            """.trimIndent() + "\n")
+            it.toFile().setExecutable(true)
+        }
+        val engines = FakeEngines().apply {
+            importer = { binary, reports, published ->
+                decompengine.project.GhidraHeadlessProgramModelAnalyzer(decompengine.analysis.fakeGhidraCommand(worker))
+                    .analyzeWithPublishedModel(binary, reports.resolve("analysis")) { input, imported, bytes ->
+                        published(PublishedEvidenceModel(input, imported, bytes, "f".repeat(64)))
+                    }
+            }
+        }
+        val adapter = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY, EVIDENCE_ONLY_CAPABILITY, emptyList())
+        fun execute(name: String): DurableWebWorkflowOutcome.Completed {
+            val fixture = context(root, root.resolve(name), adapter.limits)
+            return assertIs(adapter.execute(fixture.copy(job = job, attempt = fixture.attempt.copy(
+                jobId = job.id, workflow = WorkflowKind.RECONSTRUCT, harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY))))
+        }
+
+        val committed = assertNotNull(execute("attested").evidenceModel, "the unreplaced candidate is committed")
+        assertEquals(sha256(elfFixture()), committed.inputSha256)
+        assertEquals(sha256(Files.readAllBytes(written)), committed.modelSha256)
+
+        Files.createFile(replace)
+        assertNull(execute("replaced").evidenceModel, "a candidate replaced after attestation is refused")
+        assertContentEquals(Files.readAllBytes(replacement), Files.readAllBytes(root.resolve("replaced/analysis/reports/program_model.json")),
+            "the replacement was what the owner read")
     }
 
     @Test

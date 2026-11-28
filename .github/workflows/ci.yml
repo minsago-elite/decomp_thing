@@ -748,7 +748,8 @@ jobs:
             --tests decompengine.oracle.gcc.GccBundledNativeCallCaptureTest \
             --tests decompengine.mvp.GhidraDecompilerTest \
             --tests decompengine.project.ReconstructionPipelineTest \
-            --tests decompengine.web.SourceTreeJobReconstructorTest
+            --tests decompengine.web.SourceTreeJobReconstructorTest \
+            --tests 'decompengine.web.WebProductionWorkflowsTest.opt in real bundled Ghidra imports the owner snapshot*'
       - name: Verify ZIP and TAR bundle contents and native executable modes
         run: ./gradlew --no-daemon --offline verifyGhidraDistributionArchives
       - name: Verify atomic bundle publication and refusal controls

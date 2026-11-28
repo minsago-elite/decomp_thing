@@ -122,6 +122,10 @@ class GhidraProgramModelExporterTest {
         val exporter = work.resolve("scripts/ExportProgramModelOwned.java").readText()
         assertTrue(exporter.contains("program-model export complete"))
         assertTrue(exporter.contains("writeIfAbsentAtomic"))
+        // The attested model digest comes from the assembly stream, never from re-reading the published candidate.
+        assertTrue(exporter.contains("new java.security.DigestOutputStream("))
+        assertTrue(exporter.contains("attestImportedProgram(modelAssemblyPath, modelSha256)"))
+        assertFalse(exporter.contains("sha256(modelCandidate)"))
         assertTrue(exporter.contains("return isAcceptedRecord(record)"))
         assertTrue(exporter.contains("copyBoundFragment"))
         assertTrue(exporter.contains("DECOMPILE_TIMEOUT_SECONDS = 60"))

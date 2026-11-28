@@ -226,6 +226,7 @@ internal class ReconstructWorkflowAdapter(
                 val progress = MeteredWorkflowProgress(journal, meter)
                 // Only a route that executes nothing from the upload and contacts no agent commits a model, so no
                 // untrusted execution shares this attempt. It imports an owner-private snapshot, never the live upload.
+                // When no snapshot can be made, the attempt still imports the live upload but can never commit a model.
                 val snapshot = if (agent || launch.executesBinary || launch.contactsAgent) null
                     else WebInputSnapshot.create(context.job, context.reportsDirectory)
                 try {
