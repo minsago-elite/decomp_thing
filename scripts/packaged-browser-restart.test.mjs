@@ -448,13 +448,15 @@ test('actual driver finalizer preserves unconfirmed cleanup and passes small rep
   });
   await scratch(async parent => {
     const root = join(parent, 'missing');
-    const { calls, logs, failure, process, stderr } = await runDriverFinalizer({ report: sourceShapedReport('passed', 10), root, sensitiveValues: [token] });
+    const { calls, logs, failure, process, stderr } = await runDriverFinalizer({
+      report: { ...sourceShapedReport('passed', 10), installationUnchanged: true }, root, sensitiveValues: [token] });
     assert.equal(failure, null);
     assert.equal(process.exitCode, 1, 'A failed publication forces a failing exit');
     assert.equal(stderr.length, 1);
     assert.match(stderr[0], /Report publication failed \(failure record NOT written\)/);
     for (const line of [...stderr, ...logs]) assertSecretFree(line);
     assert.equal(JSON.parse(logs[0]).status, 'failed', 'Only the bounded failure record is printed');
+    assert.equal(JSON.parse(logs[0]).installationUnchanged, true, 'The observed installation fact survives publication failure');
     assert.equal(calls.filter(call => call.startsWith('cdp ')).length, 1);
   });
 });
