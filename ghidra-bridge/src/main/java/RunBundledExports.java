@@ -6,6 +6,7 @@ import java.util.Set;
 public final class RunBundledExports extends GhidraScript {
     @Override
     protected void run() throws Exception {
+        BundledGhidraWorker.postScriptEntry();
         BundledGhidraWorker.diagnosticsGuard();
         String[] arguments = getScriptArgs();
         if (arguments.length == 0) throw new IllegalArgumentException("No bundled exporters requested");
@@ -23,6 +24,8 @@ public final class RunBundledExports extends GhidraScript {
                 throw new IllegalArgumentException("Invalid bundled exporter arguments");
             }
             BundledGhidraWorker.diagnosticsExporter(name);
+            String timingPhase = "exporter:" + name;
+            BundledGhidraWorker.beginTimingPhase(timingPhase);
             try {
                 String[] exporterArguments = Arrays.copyOfRange(arguments, index, index + count);
                 if (name.equals("ExportNativeCallsV1.class")) {
@@ -36,6 +39,7 @@ public final class RunBundledExports extends GhidraScript {
                     runScript(name, exporterArguments);
                 }
             } finally {
+                BundledGhidraWorker.endTimingPhase(timingPhase);
                 BundledGhidraWorker.diagnosticsGuard();
             }
             index += count;

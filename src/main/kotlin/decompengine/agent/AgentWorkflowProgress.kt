@@ -2,6 +2,9 @@ package decompengine.agent
 
 /** Display-only workflow observations. A progress event never authorizes a revision. */
 interface AgentWorkflowProgress {
+    /** Stable correlation to the owning workflow journal; diagnostic consumers never use it as authority. */
+    val workflowRunId: String? get() = null
+
     fun beginTask(taskId: String, request: AgentExecutionRequest): AgentTaskProgress
     fun beginTask(taskId: String, request: AgentExecutionRequest, workflowRunId: String): AgentTaskProgress =
         beginTask(taskId, request)

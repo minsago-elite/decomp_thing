@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "driver": {
+    "id": "gcc_driver",
+    "path": "16.2.0/artifacts/gcc-driver.stripped",
+    "sha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4",
+    "identityName": "gcc-16.2.0-driver-stripped",
+    "identityManifest": "reconstruction-neutrality-identities.json"
+  }
+}
