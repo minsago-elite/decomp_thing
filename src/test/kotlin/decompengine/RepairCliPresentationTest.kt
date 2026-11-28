@@ -1,5 +1,7 @@
 package decompengine
 
+import decompengine.testing.ChildJvm.withRepositoryTemporary
+import decompengine.testing.ChildJvm
 import decompengine.repair.*
 import decompengine.validation.*
 import decompengine.jobs.ProgressRedactor
@@ -353,10 +355,9 @@ class RepairCliPresentationTest {
     @Test
     fun `repair CLI reports unavailable validation without exposing an exception stack`() {
         val root = createTempDirectory("repair-cli-unavailable-")
-        val process = ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-            "-Djava.io.tmpdir=${System.getProperty("java.io.tmpdir")}", "-cp", System.getProperty("java.class.path"),
-            "decompengine.MainKt", "repair", root.resolve("original").toString(), root.resolve("project").toString())
-            .apply { environment().clear() }.start()
+        val process = ProcessBuilder(ChildJvm.command("-cp", System.getProperty("java.class.path"),
+            "decompengine.MainKt", "repair", root.resolve("original").toString(), root.resolve("project").toString()))
+            .apply { environment().clear() }.withRepositoryTemporary().start()
         try {
             assertTrue(process.waitFor(10, TimeUnit.SECONDS))
             val stderr = process.errorStream.readNBytes(32 * 1024).decodeToString()

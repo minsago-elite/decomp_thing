@@ -1,5 +1,6 @@
 package decompengine.jobs
 
+import decompengine.testing.ChildJvm
 import kotlinx.serialization.json.*
 import java.nio.channels.FileChannel
 import java.nio.file.Files
@@ -182,7 +183,7 @@ class AgentProgressJournalMaintenanceTest {
         AgentProgressJournal(f.directory, "explore").use {
             assertFailsWith<IllegalArgumentException> { AgentProgressJournal(f.directory, "explore") }
             assertEquals(ProgressRetentionResult.WRITER_ACTIVE, f.expire())
-            val process = ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+            val process = ProcessBuilder(*ChildJvm.command().toTypedArray(),
                 "-cp", System.getProperty("java.class.path"), AgentProgressJournalLockProbe::class.java.name,
                 f.directory.resolve("agent-progress.lock").toString()).redirectErrorStream(true).start()
             try {

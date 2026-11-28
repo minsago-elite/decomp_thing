@@ -1,5 +1,6 @@
 package decompengine.oracle.behavior
 
+import decompengine.testing.ShortSocketDirectory
 import decompengine.oracle.core.OracleArtifacts
 import java.net.StandardProtocolFamily
 import java.net.UnixDomainSocketAddress
@@ -175,7 +176,7 @@ class LlvmBehaviorHostedContainerV1DockerSessionTest {
 }
 
 private class DockerSessionFixture : AutoCloseable {
-    val root: Path = Files.createTempDirectory("hosted-docker-session-").toAbsolutePath().normalize()
+    val root: Path = ShortSocketDirectory.create()
     val dockerConfig: Path = root.resolve("docker-config")
     private val controlClient = root.resolve("fake-docker-client")
     private val source = root.resolve("fake-docker-client.c")

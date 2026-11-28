@@ -1,5 +1,6 @@
 package decompengine.jobs
 
+import decompengine.testing.ChildJvm
 import decompengine.testing.RecoveryMatrixEvidence
 import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
 import org.junit.jupiter.api.extension.ExtendWith
@@ -625,7 +626,7 @@ class WorkflowAttemptStoreTest {
         val owner = WorkflowAttemptStore.open(root, CLOCK)
         assertCode("OWNERSHIP_CONFLICT") { WorkflowAttemptStore.open(root, CLOCK) }
         val process = ProcessBuilder(
-            Path.of(System.getProperty("java.home"), "bin", "java").toString(), "-cp", System.getProperty("java.class.path"),
+            *ChildJvm.command().toTypedArray(), "-cp", System.getProperty("java.class.path"),
             WorkflowAttemptStoreLockProbe::class.java.name, root.toString(),
         ).redirectErrorStream(true).start()
         try {

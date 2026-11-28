@@ -1,5 +1,6 @@
 package decompengine.acp
 
+import decompengine.testing.ShortSocketDirectory
 import decompengine.agent.*
 import java.nio.file.Files
 import java.nio.file.Path
@@ -490,16 +491,21 @@ class WorkspaceSnapshotLimitsTest {
 
     @Test
     fun `special socket entries are rejected without opening their content`() {
-        val root = workspace()
+        val root = ShortSocketDirectory.create().also { Files.createDirectory(it.resolve("src")) }
         val socket = root.resolve("src/socket")
-        java.nio.channels.ServerSocketChannel.open(java.net.StandardProtocolFamily.UNIX).use { server ->
-            // Bind relative to the working directory: the repository-local fixture path can exceed the AF_UNIX path limit.
-            server.bind(java.net.UnixDomainSocketAddress.of(Path.of("").toAbsolutePath().relativize(socket)))
-            assertEquals("special-file", assertFailsWith<WorkspaceSnapshotInvalidEntry> {
-                capture(request(root), WorkspaceSnapshotLimits())
-            }.reason)
+        try {
+            java.nio.channels.ServerSocketChannel.open(java.net.StandardProtocolFamily.UNIX).use { server ->
+                server.bind(java.net.UnixDomainSocketAddress.of(socket))
+                assertEquals("special-file", assertFailsWith<WorkspaceSnapshotInvalidEntry> {
+                    capture(request(root), WorkspaceSnapshotLimits())
+                }.reason)
+            }
+            assertTrue(Files.exists(socket))
+        } finally {
+            Files.deleteIfExists(socket)
+            Files.deleteIfExists(root.resolve("src"))
+            Files.deleteIfExists(root)
         }
-        assertTrue(Files.exists(socket))
     }
 
     @Test

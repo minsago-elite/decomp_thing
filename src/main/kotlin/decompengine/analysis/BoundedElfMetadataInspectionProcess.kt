@@ -529,6 +529,8 @@ private fun metadataWorkerCommand(path: Path, limits: BoundedElfMetadataLimits):
     }
     return listOf(
         java.toString(), "-Xmx256m", "-XX:MaxMetaspaceSize=128m", "-XX:+DisableAttachMechanism",
+        "-XX:-UsePerfData",
+    ) + metadataWorkerTemporaryOptions() + listOf(
         "-Dfile.encoding=UTF-8", "-Duser.language=en", "-Duser.country=US",
         "-cp", entries.joinToString(File.pathSeparator), BoundedElfMetadataInspectionWorker::class.java.name,
         path.toString(), limits.maximumInputBytes.toString(), limits.maximumSectionHeaders.toString(),
@@ -540,7 +542,23 @@ private fun metadataWorkerCommand(path: Path, limits: BoundedElfMetadataLimits):
     )
 }
 
-private fun startMetadataWorker(command: List<String>, directory: Path): Process {
+/**
+ * The worker starts with a cleared environment, so it would otherwise fall back to JVM and JNA defaults
+ * (`/tmp`, and `~/.cache/JNA/temp` for the extracted JNA dispatch library). Forward the temporary directories this
+ * process is already configured with; never choose new ones. The worker runs in the input's directory, so a
+ * relative setting is prefixed with this process's working directory, keeping its configured components (no
+ * lexical normalization); an absolute setting is forwarded unchanged.
+ */
+private fun metadataWorkerTemporaryOptions(): List<String> {
+    val workingDirectory = Path.of("").toAbsolutePath()
+    return listOf("java.io.tmpdir", "jna.tmpdir").mapNotNull { name ->
+        System.getProperty(name)?.takeIf(String::isNotEmpty)?.let { configured ->
+            "-D$name=" + if (Path.of(configured).isAbsolute) configured else "$workingDirectory${File.separator}$configured"
+        }
+    }
+}
+
+internal fun startMetadataWorker(command: List<String>, directory: Path): Process {
     val builder = ProcessBuilder(command).directory(directory.toFile())
     builder.environment().clear()
     return builder.start()

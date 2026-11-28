@@ -2,6 +2,7 @@ package decompengine.binary
 
 import decompengine.analysis.BoundedElfMetadataInspectionProcess
 import decompengine.analysis.GhidraAnalysisException
+import decompengine.analysis.startMetadataWorker
 import decompengine.jobs.elfFixture
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.fulltree.FullTreeElfTestBytes
@@ -160,6 +161,56 @@ class BoundedElfMetadataReaderTest {
             (isolated.symbolInventory.functions as MutableList<UnresolvedSymbol>).clear()
         }
     }
+
+    @Test
+    fun `isolated metadata worker inherits configured temporary roots and writes no JNA cache under its home`(): Unit =
+        inControlTemporaryDirectory { root ->
+            val input = writeElf(root.resolve("temporary-roots.elf"), dynamicFixture(variants.first()))
+            // The worker's environment is cleared, so JNA's fallback is user.home/.cache/JNA; point that at a fixture.
+            val home = java.nio.file.Files.createDirectory(root.resolve("worker-home"))
+            var launched: List<String>? = null
+            val process = BoundedElfMetadataInspectionProcess(processStarter = { command, directory ->
+                launched = command
+                startMetadataWorker(listOf(command.first(), "-Duser.home=$home") + command.drop(1), directory)
+            })
+
+            assertEquals(BoundedElfMetadataReader.read(input), process.inspect(input, BoundedElfMetadataLimits()) {})
+
+            val homeEntries = java.nio.file.Files.walk(home).use { paths -> paths.filter { it != home }.map(home::relativize).toList() }
+            assertEquals(emptyList(), homeEntries, "the worker fell back to a home-relative JNA temporary directory")
+            val command = checkNotNull(launched)
+            for (name in listOf("java.io.tmpdir", "jna.tmpdir")) {
+                val configured = kotlin.test.assertNotNull(System.getProperty(name), "Gradle configures $name for tests")
+                assertEquals(listOf("-D$name=$configured"), command.filter { it.startsWith("-D$name=") })
+            }
+        }
+
+    @Test
+    fun `isolated metadata worker resolves a relative jna tmpdir against the parent working directory`(): Unit =
+        inControlTemporaryDirectory { root ->
+            val inputDirectory = java.nio.file.Files.createDirectory(root.resolve("input-tree"))
+            val input = writeElf(inputDirectory.resolve("relative-jna.elf"), dynamicFixture(variants.first()))
+            // Relative to the test JVM's working directory (the project directory), never to the worker's.
+            // The "./" component is configuration and must reach the worker unchanged, only prefixed.
+            val relative = "build/./elf-worker-relative-jna-${System.nanoTime()}"
+            val expected = "${java.nio.file.Path.of("").toAbsolutePath()}/$relative"
+            val previous = System.getProperty("jna.tmpdir")
+            var launched: List<String>? = null
+            System.setProperty("jna.tmpdir", relative)
+            try {
+                BoundedElfMetadataInspectionProcess(processStarter = { command, directory ->
+                    launched = command
+                    startMetadataWorker(command, directory)
+                }).inspect(input, BoundedElfMetadataLimits()) {}
+            } finally {
+                if (previous == null) System.clearProperty("jna.tmpdir") else System.setProperty("jna.tmpdir", previous)
+            }
+            assertEquals(listOf("-Djna.tmpdir=$expected"), checkNotNull(launched).filter { it.startsWith("-Djna.tmpdir=") })
+            assertEquals(listOf("relative-jna.elf"), java.nio.file.Files.list(inputDirectory).use { paths ->
+                paths.map { it.fileName.toString() }.toList()
+            }, "the worker resolved jna.tmpdir under its own working directory")
+            java.nio.file.Files.deleteIfExists(java.nio.file.Path.of(expected))
+        }
 
     @Test
     fun `isolated metadata result decoding continues to observe analysis checkpoints`() = inControlTemporaryDirectory { root ->

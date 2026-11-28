@@ -1,5 +1,6 @@
 package decompengine.oracle.fulltree
 
+import decompengine.testing.ChildJvm
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -89,7 +90,7 @@ class FullTreeWorkerFailureOwnershipTest {
             }
             val runtimeIdentity = Files.getAttribute(parentRuntime, "unix:ino")
             val native = Path.of(System.getProperty("decompengine.oracle.nativeLibraryDirectory"))
-            val command = listOf(Path.of(System.getProperty("java.home"), "bin", "java").toString(), "-Xmx128m") +
+            val command = listOf(Path.of(System.getProperty("java.home"), "bin", "java").toString(), "-Xmx128m", ChildJvm.NO_PERF_DATA) +
                 isolatedObservationJvmTemporaryArguments(run, native) + listOf(
                     "-classpath", System.getProperty("java.class.path"),
                     FullTreeFunctionObservationIsolatedWorker::class.java.name,

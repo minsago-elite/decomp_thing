@@ -1,5 +1,6 @@
 package decompengine.acp
 
+import decompengine.testing.ShortSocketDirectory
 import java.io.IOException
 import java.net.StandardProtocolFamily
 import java.net.UnixDomainSocketAddress
@@ -13,7 +14,6 @@ import java.nio.file.attribute.FileTime
 import java.nio.file.attribute.PosixFilePermissions
 import java.nio.file.attribute.UserDefinedFileAttributeView
 import java.util.Comparator
-import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -54,7 +54,8 @@ class PinnedSystemdBusEndpointTest {
 
     @Test
     fun `socket name replacement rejects the new live socket`() = withEndpoint { _, runtime, endpoint ->
-        val replacement = runtime.resolve("replacement")
+        // Keep the leaf short: fixture sockets must fit sun_path under a repository-local tmpdir (#2001).
+        val replacement = runtime.resolve("new")
         bindSocket(replacement).use {
             assertNotEquals(
                 Files.getAttribute(runtime.resolve("bus"), "unix:ino", LinkOption.NOFOLLOW_LINKS),
@@ -91,7 +92,7 @@ class PinnedSystemdBusEndpointTest {
 
     private fun withEndpoint(action: (Path, Path, PinnedSystemdBusEndpoint) -> Unit) {
         AcpLiveContractHost.requireCapability(System.getProperty("os.name") == "Linux", { "systemd endpoint tests require Linux" })
-        val root = createTempDirectory("bus-pin-")
+        val root = ShortSocketDirectory.create()
         try {
             val runtime = Files.createDirectory(
                 root.resolve("runtime"), PosixFilePermissions.asFileAttribute(OWNER_DIRECTORY),

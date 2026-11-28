@@ -1,5 +1,7 @@
 package decompengine.jobs
 
+import decompengine.testing.ChildJvm.withRepositoryTemporary
+import decompengine.testing.ChildJvm
 import decompengine.testing.RecoveryMatrixEvidence
 import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
 import org.junit.jupiter.api.extension.ExtendWith
@@ -51,11 +53,11 @@ class JobStoreDirectoriesCrashTest {
     private fun runChild(root: Path, mode: String, exit: Int) {
         val log = root.resolve("child-$mode.log")
         val process = ProcessBuilder(
-            Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-            "-Djava.io.tmpdir=${System.getProperty("java.io.tmpdir")}",
+            *ChildJvm.command().toTypedArray(),
             "-cp", System.getProperty("java.class.path"),
             JobStoreDirectoriesCrashFixture::class.java.name, root.toString(), mode,
-        ).redirectErrorStream(true).redirectOutput(log.toFile()).apply { environment().clear() }.start()
+        ).redirectErrorStream(true).redirectOutput(log.toFile()).apply { environment().clear() }
+            .withRepositoryTemporary().start()
         try {
             assertTrue(process.waitFor(20, TimeUnit.SECONDS), "directory fixture did not terminate: $mode")
             assertEquals(exit, process.exitValue(), log.readText())

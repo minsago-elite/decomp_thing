@@ -1,5 +1,7 @@
 package decompengine.jobs
 
+import decompengine.testing.ChildJvm.withRepositoryTemporary
+import decompengine.testing.ChildJvm
 import decompengine.testing.RecoveryMatrixEvidence
 import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
 import org.junit.jupiter.api.extension.ExtendWith
@@ -34,11 +36,11 @@ class JobMetadataCrashTest {
         val previous = record.readBytes()
         val log = root.resolve("child.log")
         val process = ProcessBuilder(
-            Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-            "-Djava.io.tmpdir=${System.getProperty("java.io.tmpdir")}",
+            *ChildJvm.command().toTypedArray(),
             "-cp", System.getProperty("java.class.path"),
             JobMetadataCrashFixture::class.java.name, root.toString(), initial.id, point.name,
-        ).redirectErrorStream(true).redirectOutput(log.toFile()).apply { environment().clear() }.start()
+        ).redirectErrorStream(true).redirectOutput(log.toFile()).apply { environment().clear() }
+            .withRepositoryTemporary().start()
         try {
             assertTrue(process.waitFor(20, TimeUnit.SECONDS), "child JVM did not terminate at $point")
             assertEquals(86, process.exitValue(), log.readText())

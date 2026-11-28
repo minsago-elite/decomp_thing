@@ -1,5 +1,7 @@
 package decompengine.oracle.gcc
 
+import decompengine.testing.ChildJvm
+import decompengine.testing.ChildJvm.withLauncherJavaOpts
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.validation.terminateProcessTree
@@ -12,6 +14,10 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.longOrNull
+
+// The installed launcher's JVM must not write /tmp/hsperfdata_* and keeps temporary files under the test root (#2001).
+private val INSTALLED_CLI_JAVA_OPTIONS: List<String> get() = listOf("-Xmx8g") + ChildJvm.options()
+private val INSTALLED_CLI_JAVA_OPTS: String get() = ChildJvm.launcherJavaOpts(INSTALLED_CLI_JAVA_OPTIONS)
 
 private val INSTALLED_GCC_CLI_COMMANDS = setOf(
     "gcc-engine-plan", "gcc-engine-full-export", "gcc-engine-runtime-diagnostic", "gcc-engine-native-calls",
@@ -35,7 +41,7 @@ internal fun invokeInstalledGccCli(arguments: List<String>, evidence: Path, time
         "provider" to JsonPrimitive("installed-gcc-cli-test-invocation-v1"),
         "argv" to JsonArray(selectedCommand.map(::JsonPrimitive)),
         "launcherSha256" to JsonPrimitive(OracleArtifacts.sha256(launcherBytes)),
-        "javaHome" to JsonPrimitive(javaHome), "javaOpts" to JsonPrimitive("-Xmx8g"),
+        "javaHome" to JsonPrimitive(javaHome), "javaOpts" to JsonPrimitive(INSTALLED_CLI_JAVA_OPTS),
         "outerTimeoutSeconds" to JsonPrimitive(timeoutSeconds),
         "maximumStreamBytes" to JsonPrimitive(65536), "productionVerified" to JsonPrimitive(false),
     )))
@@ -44,8 +50,9 @@ internal fun invokeInstalledGccCli(arguments: List<String>, evidence: Path, time
     builder.environment().apply {
         remove("JAVA_TOOL_OPTIONS"); remove("JDK_JAVA_OPTIONS"); remove("_JAVA_OPTIONS")
         remove("LLM_BIN_PATCH_OPTS")
-        put("JAVA_HOME", javaHome); put("JAVA_OPTS", "-Xmx8g")
+        put("JAVA_HOME", javaHome)
     }
+    builder.withLauncherJavaOpts(INSTALLED_CLI_JAVA_OPTIONS)
     val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds)
     val process = builder.start()
     val readers = Executors.newFixedThreadPool(2)
@@ -105,7 +112,7 @@ internal fun verifyInstalledCliEvidence(
         "outerTimeoutSeconds", "maximumStreamBytes", "productionVerified"))
     require(request["provider"] == JsonPrimitive("installed-gcc-cli-test-invocation-v1") &&
         request["productionVerified"] == JsonPrimitive(false) && request["maximumStreamBytes"] == JsonPrimitive(65536))
-    require(request["javaOpts"] == JsonPrimitive("-Xmx8g") &&
+    require(request["javaOpts"] == JsonPrimitive(INSTALLED_CLI_JAVA_OPTS) &&
         request["javaHome"] == JsonPrimitive(Path.of(System.getProperty("java.home")).toRealPath().toString()))
     val timeout = request["outerTimeoutSeconds"] as? JsonPrimitive
     require(timeout != null && !timeout.isString && timeout.longOrNull in 1L..9900L)

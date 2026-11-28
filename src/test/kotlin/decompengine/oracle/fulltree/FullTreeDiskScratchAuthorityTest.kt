@@ -1,5 +1,6 @@
 package decompengine.oracle.fulltree
 
+import decompengine.testing.ChildJvm
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFileKey
 import decompengine.acp.LinuxFilesystemCapacity
@@ -1173,9 +1174,8 @@ class FullTreeDiskScratchAuthorityTest {
         operation: FullTreeDiskScratchOperation,
         activeRun: Boolean,
     ): FullTreeDiskScratchEvidence {
-        val java = Path.of(System.getProperty("java.home"), "bin", "java")
         val process = ProcessBuilder(
-            java.toString(),
+            *ChildJvm.command().toTypedArray(),
             "-classpath",
             System.getProperty("java.class.path"),
             FullTreeDiskScratchCrashProbe::class.java.name,

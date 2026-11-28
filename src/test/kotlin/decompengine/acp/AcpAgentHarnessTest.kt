@@ -1,5 +1,6 @@
 package decompengine.acp
 
+import decompengine.testing.ChildJvm
 import org.junit.jupiter.api.extension.ExtendWith
 import com.agentclientprotocol.model.LATEST_PROTOCOL_VERSION
 import decompengine.agent.AgentAccessPolicy
@@ -3529,10 +3530,9 @@ class AcpAgentHarnessTest {
     }
 
     private fun javap(type: Class<*>): String {
-        val executable = Path.of(System.getProperty("java.home"), "bin", "javap")
         val classPath = Path.of(requireNotNull(type.protectionDomain.codeSource).location.toURI()).toString()
         val process = ProcessBuilder(
-            executable.toString(),
+            *ChildJvm.toolCommand("javap").toTypedArray(),
             "-p",
             "-classpath",
             classPath,

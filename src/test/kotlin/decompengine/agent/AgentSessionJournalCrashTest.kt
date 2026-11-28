@@ -1,5 +1,7 @@
 package decompengine.agent
 
+import decompengine.testing.ChildJvm.withRepositoryTemporary
+import decompengine.testing.ChildJvm
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -21,11 +23,11 @@ class AgentSessionJournalCrashTest {
         Files.writeString(root.path.resolve("artifact.txt"), "initial")
         val log = directory.resolve("child.log")
         val process = ProcessBuilder(
-            Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-            "-Djava.io.tmpdir=${System.getProperty("java.io.tmpdir")}",
+            *ChildJvm.command().toTypedArray(),
             "-cp", System.getProperty("java.class.path"),
             AgentSessionJournalCrashFixture::class.java.name, directory.toString(), point,
-        ).redirectErrorStream(true).redirectOutput(log.toFile()).apply { environment().clear() }.start()
+        ).redirectErrorStream(true).redirectOutput(log.toFile()).apply { environment().clear() }
+            .withRepositoryTemporary().start()
         try {
             assertTrue(process.waitFor(20, TimeUnit.SECONDS), "child JVM did not terminate")
             assertEquals(86, process.exitValue(), Files.readString(log))
@@ -72,11 +74,11 @@ class AgentSessionJournalCrashTest {
         val continuation = crashContinuation(directory)
         val log = directory.resolve("child.log")
         val process = ProcessBuilder(
-            Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-            "-Djava.io.tmpdir=${System.getProperty("java.io.tmpdir")}",
+            *ChildJvm.command().toTypedArray(),
             "-cp", System.getProperty("java.class.path"),
             AgentSessionJournalCrashFixture::class.java.name, directory.toString(), point,
-        ).redirectErrorStream(true).redirectOutput(log.toFile()).apply { environment().clear() }.start()
+        ).redirectErrorStream(true).redirectOutput(log.toFile()).apply { environment().clear() }
+            .withRepositoryTemporary().start()
         try {
             assertTrue(process.waitFor(20, TimeUnit.SECONDS), "child JVM did not terminate")
             assertEquals(86, process.exitValue(), Files.readString(log))

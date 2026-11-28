@@ -1,5 +1,7 @@
 package decompengine.web
 
+import decompengine.testing.ChildJvm.withRepositoryTemporary
+import decompengine.testing.ChildJvm
 import org.junit.jupiter.api.io.TempDir
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -56,10 +58,9 @@ class WebBindingPolicyTest {
     }
 
     private fun runCli(vararg arguments: String): Process = ProcessBuilder(
-        Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-        "-Djava.io.tmpdir=${System.getProperty("java.io.tmpdir")}", "-cp", System.getProperty("java.class.path"),
+        *ChildJvm.command().toTypedArray(), "-cp", System.getProperty("java.class.path"),
         "decompengine.MainKt", "web", *arguments,
-    ).apply { environment().clear() }.start()
+    ).apply { environment().clear() }.withRepositoryTemporary().start()
 
     @Test
     fun `the web command serves on 127_0_0_1 unless a host is explicitly given`() {

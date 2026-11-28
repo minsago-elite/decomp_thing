@@ -1,5 +1,6 @@
 package decompengine.oracle.behavior
 
+import decompengine.testing.ShortSocketDirectory
 import decompengine.oracle.core.OracleArtifacts
 import java.io.ByteArrayOutputStream
 import java.lang.reflect.InvocationTargetException
@@ -215,7 +216,7 @@ private class FakeUnixEngine(
     private val behavior: EngineBehavior,
     private val rawResponse: ByteArray = GOOD_RESPONSE.encodeToByteArray(),
 ) : AutoCloseable {
-    private val root = Files.createTempDirectory("fixed-docker-engine-").toAbsolutePath().normalize()
+    private val root = ShortSocketDirectory.create()
     private val controlClient = root.resolve("docker-client")
     private val dockerConfig = root.resolve("docker-config")
     private val socketParent = root.resolve("runtime")
