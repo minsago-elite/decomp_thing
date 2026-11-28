@@ -2563,19 +2563,27 @@ public class ExportProgramModelOwned extends GhidraScript {
     }
 
     /**
-     * The owned-candidate protocol also reports the digest Ghidra recorded for the bytes it imported. The
-     * model's inputSha256 is a second read of the executable path, which need not be those bytes. A Program
-     * without a well-formed digest writes no report, and the owner then treats the import as unattested.
-     * EXPORTER_VERSION is unchanged: resumable export state binds this script's SHA-256, so the source
-     * change already invalidates state written by the previous script.
+     * The owned-candidate protocol also reports the digest Ghidra recorded for the bytes it imported, and the
+     * digest of the model candidate this script assembled. The model's inputSha256 is a second read of the
+     * executable path, which need not be those bytes. The report is one frame on this worker's stdout, a pipe
+     * only the owner's child holds, never a file that another writer to the candidate directory could forge.
+     * The frame names its candidate and is written once, even when the Program has no well-formed digest
+     * ("none"), so a second frame (for example, imported text that Ghidra logs) makes the owner refuse the
+     * attestation. EXPORTER_VERSION is unchanged: resumable export state binds this script's SHA-256, so the
+     * source change already invalidates state written by the previous script.
      */
-    private void attestImportedProgram(Path modelCandidate) throws IOException {
+    private void attestImportedProgram(Path modelCandidate) throws Exception {
         String imported = currentProgram.getExecutableSHA256();
-        if (imported == null) return;
-        String normalized = imported.toLowerCase(java.util.Locale.ROOT);
-        if (!normalized.matches("[0-9a-f]{64}")) return;
-        Files.write(modelCandidate.resolveSibling(modelCandidate.getFileName() + ".program-sha256"),
-            (normalized + "\n").getBytes(StandardCharsets.US_ASCII), StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+        String normalized = imported == null ? "" : imported.toLowerCase(java.util.Locale.ROOT);
+        if (!normalized.matches("[0-9a-f]{64}")) normalized = "none";
+        String frame = "\nDECOMP_IMPORTED_PROGRAM_V1 " + modelCandidate.getFileName() + " " + normalized + " " +
+            sha256(modelCandidate) + "\n";
+        // Flush buffered output first; the leading newline starts the frame on its own line regardless.
+        System.out.flush();
+        java.io.FileOutputStream stdout = new java.io.FileOutputStream(java.io.FileDescriptor.out);
+        // One write below PIPE_BUF is atomic on the pipe. Never close this stream: it would close fd 1.
+        stdout.write(frame.getBytes(StandardCharsets.US_ASCII));
+        stdout.flush();
     }
 
     private static boolean isRetryableDecompileTimeout(FunctionExport exported) {

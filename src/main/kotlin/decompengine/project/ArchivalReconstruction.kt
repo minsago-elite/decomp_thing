@@ -184,7 +184,9 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
 
     /**
      * Receives, only after publication of the model, its inputSha256, the isolated worker's report of the digest
-     * Ghidra recorded for the bytes it imported (null when absent or malformed), and the validated model bytes.
+     * Ghidra recorded for the bytes it imported, and the validated model bytes. The report arrives over the
+     * worker's stdout pipe and binds the model candidate's digest; it is null unless exactly one well-formed
+     * frame names this candidate and matches the model bytes read here.
      */
     internal fun analyzeWithPublishedModel(binaryPath: Path, workDir: Path,
         published: (String, String?, ByteArray) -> Unit): RecoveredProgramModel =
@@ -222,8 +224,6 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             val exporterSha256 = sha256(scriptBytes)
             val output = reports.resolve("program_model.json")
             val modelCandidate = uniqueExportCandidate(output, "model")
-            val importedProgramReport = modelCandidate.resolveSibling("${modelCandidate.fileName}.program-sha256")
-            require(!Files.exists(importedProgramReport, LinkOption.NOFOLLOW_LINKS)) { "export candidate path already exists" }
             val callOutput = reports.resolve("program_model_calls.json")
             val callScriptBytes = if (includeCallSites) {
                 require(!Files.exists(callOutput, LinkOption.NOFOLLOW_LINKS)) { "call-site output already exists" }
@@ -248,8 +248,9 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             deadline.checkpoint("before constructing export command")
             val command = commandFactory(GhidraInvocation(project, "archival_reconstruction", binaryPath, scripts, postScripts), deadline::checkpoint)
             deadline.checkpoint("after constructing export command")
+            var workerStdout = ByteArray(0)
             val exitCode = executeExport(command, workDir, reports, deadline,
-                listOfNotNull(modelCandidate, importedProgramReport, callCandidate))
+                listOfNotNull(modelCandidate, callCandidate)) { workerStdout = it }
             deadline.checkpoint("before export result validation")
             require(exitCode == 0) {
                 "Ghidra program recovery failed with exit code $exitCode; see ${reports.resolve("ghidra_stderr.log")}"
@@ -257,7 +258,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             val modelBytes = readStableProgramModel(modelCandidate, deadline)
             val model = ProgramModelJson.readCanonical(modelBytes, deadline::checkpoint)
             deadline.checkpoint("after canonical model validation")
-            val importedProgramSha256 = readImportedProgramReport(importedProgramReport)
+            val importedProgramSha256 = importedProgramAttestation(workerStdout, modelCandidate.fileName.toString(), sha256(modelBytes))
             val calls = callScriptBytes?.let { script ->
                 val callLimits = RecoveredCallSiteLimits()
                 val callCandidatePath = checkNotNull(callCandidate)
@@ -305,6 +306,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         reports: Path,
         deadline: AnalysisDeadline,
         outputCandidates: List<Path>,
+        capturedStdout: (ByteArray) -> Unit = {},
     ): Int {
         val remainingNanosAtLaunch = deadline.remainingNanos("before worker launch")
         val process = processLaunch.start(
@@ -418,6 +420,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             val stderrBytes = await(stderrTask)
             await(memoryMonitor)
             publishDiagnostics(stdoutBytes, stderrBytes)
+            capturedStdout(stdoutBytes)
             if (memoryExceeded.get()) throw GhidraAnalysisException(
                 "Ghidra program recovery exceeded ${limits.maximumResidentBytes} resident bytes; " +
                     "rerun with the same output directory to resume durable function checkpoints",
@@ -677,16 +680,19 @@ private fun uniqueExportCandidate(target: Path, kind: String): Path {
     return candidate
 }
 
-/** Reads and removes the worker's imported-Program digest report; anything but one exact line is unattested. */
-private fun readImportedProgramReport(path: Path): String? = try {
-    val attributes = Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
-    if (!attributes.isRegularFile || attributes.size() != 65L) null
-    else Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS).use { it.readNBytes(66) }.toString(Charsets.US_ASCII)
-        .takeIf { it.matches(Regex("[0-9a-f]{64}\n")) }?.substring(0, 64)
-} catch (_: java.io.IOException) {
-    null
-} finally {
-    try { Files.deleteIfExists(path) } catch (_: java.io.IOException) { }
+internal const val IMPORTED_PROGRAM_FRAME = "DECOMP_IMPORTED_PROGRAM_V1"
+
+/**
+ * The worker's imported-Program digest, from its stdout pipe: only the worker holds that pipe's write end, so a
+ * writer to the candidate directory cannot forge it. The worker writes one frame naming its candidate and the
+ * digest of the model it assembled. Any other count of frames, another candidate, "none", or a model digest
+ * that differs from the bytes the owner read (a replaced candidate) leaves the import unattested.
+ */
+internal fun importedProgramAttestation(stdout: ByteArray, candidateName: String, modelSha256: String): String? {
+    val frames = stdout.toString(Charsets.ISO_8859_1).split('\n').filter { it.startsWith(IMPORTED_PROGRAM_FRAME) }
+    val fields = frames.singleOrNull()?.split(' ') ?: return null
+    if (fields.size != 4 || fields[0] != IMPORTED_PROGRAM_FRAME || fields[1] != candidateName || fields[3] != modelSha256) return null
+    return fields[2].takeIf { it.matches(Regex("[0-9a-f]{64}")) }
 }
 
 private fun moveExportCandidate(candidate: Path, target: Path) {

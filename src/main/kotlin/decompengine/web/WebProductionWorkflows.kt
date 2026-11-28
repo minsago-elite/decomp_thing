@@ -42,7 +42,10 @@ import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.nio.file.SimpleFileVisitor
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.attribute.PosixFileAttributes
+import java.nio.file.attribute.PosixFilePermissions
 
 internal data class WebRepairResult(val status: RepairRunStatus, val publication: RepairPublicationCommitment? = null) {
     init { require(publication == null || status == RepairRunStatus.FULLY_ACCEPTED) }
@@ -56,6 +59,7 @@ internal data class WebRepairResult(val status: RepairRunStatus, val publication
 internal interface WebWorkflowEngines {
     /** [activity] is called after each completed exploration sample. */
     fun explore(binary: Path, reportsDirectory: Path, activity: () -> Unit)
+    /** Evidence-only reconstruction receives the owner's [WebInputSnapshot] as [binary], never the live upload path. */
     fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress,
         published: (PublishedEvidenceModel) -> Unit)
     fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String,
@@ -220,14 +224,19 @@ internal class ReconstructWorkflowAdapter(
         val (result, usage) = executor.run(context.attempt.limits, meter) {
             BestEffortProgressJournal(context.reportsDirectory, "reconstruction", sensitiveValues).use { journal ->
                 val progress = MeteredWorkflowProgress(journal, meter)
-                val uploadedDigest = if (agent) null else selectedUploadDigest(context.job)
+                // Only a route that executes nothing from the upload and contacts no agent commits a model, so no
+                // untrusted execution shares this attempt. It imports an owner-private snapshot, never the live upload.
+                val snapshot = if (agent || launch.executesBinary || launch.contactsAgent) null
+                    else WebInputSnapshot.create(context.job, context.reportsDirectory)
                 try {
-                    engines.reconstruct(context.job.binaryPath, context.reportsDirectory, mode, progress) { published ->
-                        evidenceModel = evidenceModelCommitment(context.job.id, context.attempt.runId, uploadedDigest, published)
+                    engines.reconstruct(snapshot?.path ?: context.job.binaryPath, context.reportsDirectory, mode, progress) { published ->
+                        evidenceModel = evidenceModelCommitment(context.job.id, context.attempt.runId, snapshot, published)
                     }
                 } catch (failure: Exception) {
                     progress.phase(AgentWorkflowPhase.FAILED)
                     throw failure
+                } finally {
+                    snapshot?.close()
                 }
             }
         }
@@ -243,8 +252,8 @@ internal class ReconstructWorkflowAdapter(
 
 /**
  * A model the bundled analyzer published. [inputSha256] is the exporter's own read of the executable path;
- * [importedProgramSha256] is the isolated worker's report of the digest Ghidra recorded for the bytes it
- * actually imported, or null when the worker reported none.
+ * [importedProgramSha256] is the isolated worker's report, over its stdout pipe, of the digest Ghidra recorded
+ * for the bytes it actually imported, or null when the worker reported none or the report was not attested.
  */
 internal class PublishedEvidenceModel(val inputSha256: String, val importedProgramSha256: String?,
     bytes: ByteArray, val profileSha256: String) {
@@ -254,38 +263,111 @@ internal class PublishedEvidenceModel(val inputSha256: String, val importedProgr
 }
 
 /**
- * Commit a published model only to the bytes Ghidra imported. Two reads of the upload path (the adapter's,
- * before analysis, and the exporter's, after import) can agree while Ghidra imported different bytes, so the
- * imported Program's own digest must equal the independently verified upload digest too. No commitment, and
- * so no resume from this model, results when: the upload could not be verified; the worker reported no
- * imported-Program digest; that digest or the model's inputSha256 differs from the upload; or the model is
- * outside 1..[WorkflowEvidenceModel.MAX_BYTES].
+ * Commit a published model only to the owner's snapshot, the bytes the worker imported. The snapshot is
+ * immutable while the worker runs, and the imported Program's own digest and the model's inputSha256 must
+ * both equal the digest the owner computed while copying it. No commitment, and so no resume from this
+ * model, results when: no snapshot exists; the snapshot changed; the worker reported no imported-Program
+ * digest; either digest differs from the snapshot; or the model is outside 1..[WorkflowEvidenceModel.MAX_BYTES].
  */
-internal fun evidenceModelCommitment(jobId: String, runId: String, uploadedDigest: String?,
+internal fun evidenceModelCommitment(jobId: String, runId: String, snapshot: WebInputSnapshot?,
     published: PublishedEvidenceModel): WorkflowEvidenceModel? {
-    if (uploadedDigest == null) return null
-    if (published.importedProgramSha256 == null || published.importedProgramSha256 != uploadedDigest) return null
-    if (published.inputSha256 != uploadedDigest || published.size !in 1..WorkflowEvidenceModel.MAX_BYTES) return null
-    return WorkflowEvidenceModel(jobId, runId, uploadedDigest, published.sha256, published.size, published.profileSha256)
+    val digest = snapshot?.sha256 ?: return null
+    if (published.importedProgramSha256 == null || published.importedProgramSha256 != digest) return null
+    if (published.inputSha256 != digest || published.size !in 1..WorkflowEvidenceModel.MAX_BYTES) return null
+    if (!snapshot.unchanged()) return null
+    return WorkflowEvidenceModel(jobId, runId, digest, published.sha256, published.size, published.profileSha256)
 }
 
-/** Bind a published model to a separate, bounded observation of this attempt's selected input. */
-private fun selectedUploadDigest(job: Job): String? {
-    val directory = job.binaryPath.parent ?: return null
-    if (directory.fileName.toString() != job.id || job.binaryPath.fileName.toString() != "input.elf" ||
-        job.sizeBytes !in 1..MAX_JOB_INPUT_BYTES) return null
-    val storageRoot = directory.parent ?: return null
-    return try {
-        hashStableRegularFile(storageRoot, "${job.id}/input.elf",
-            declaredSize = { require(it == job.sizeBytes.toLong()) },
-            readBytes = { _, total -> require(total <= job.sizeBytes.toLong()) },
-            cancellationCheck = { if (Thread.currentThread().isInterrupted) throw InterruptedException() },
-        ).sha256
-    } catch (interrupted: InterruptedException) {
-        throw interrupted
-    } catch (_: Exception) {
-        // The optional checkpoint needs an independently verified upload.
-        null
+/**
+ * An owner-private, read-only copy of an attempt's selected upload, written from one stable read of it and
+ * hashed by the owner as it was copied. The directory is created fresh (mode 0700) for each attempt and the
+ * file is read-only (0400), so a later change to the upload path cannot reach the importer. [close] removes it.
+ */
+internal class WebInputSnapshot private constructor(private val directory: Path, val path: Path, val sha256: String,
+    private val identity: Any) : AutoCloseable {
+    /** Rechecked after import: the same read-only regular file, still holding the hashed bytes. */
+    fun unchanged(): Boolean = try {
+        val attributes = Files.readAttributes(path, PosixFileAttributes::class.java, NOFOLLOW_LINKS)
+        attributes.isRegularFile && attributes.fileKey() == identity && attributes.permissions() == READ_ONLY &&
+            streamSha256(path) == sha256
+    } catch (_: java.io.IOException) {
+        false
+    }
+
+    override fun close() {
+        try { Files.deleteIfExists(path) } catch (_: java.io.IOException) { }
+        try { Files.deleteIfExists(directory) } catch (_: java.io.IOException) { }
+    }
+
+    companion object {
+        private val PRIVATE_DIRECTORY = PosixFilePermissions.fromString("rwx------")
+        private val PRIVATE_FILE = PosixFilePermissions.fromString("rw-------")
+        private val READ_ONLY = PosixFilePermissions.fromString("r--------")
+
+        /** Null when the selected upload has no stable, bounded identity; the attempt then commits nothing. */
+        fun create(job: Job, workDirectory: Path): WebInputSnapshot? {
+            val upload = job.binaryPath.parent ?: return null
+            if (upload.fileName.toString() != job.id || job.binaryPath.fileName.toString() != "input.elf" ||
+                job.sizeBytes !in 1..MAX_JOB_INPUT_BYTES) return null
+            val storageRoot = upload.parent ?: return null
+            var directory: Path? = null
+            var target: Path? = null
+            try {
+                Files.createDirectories(workDirectory)
+                val created = Files.createDirectory(workDirectory.resolve(".input-snapshot-${randomToken()}"),
+                    PosixFilePermissions.asFileAttribute(PRIVATE_DIRECTORY)).also { directory = it }
+                val owner = Files.readAttributes(created, PosixFileAttributes::class.java, NOFOLLOW_LINKS)
+                require(owner.isDirectory && owner.permissions() == PRIVATE_DIRECTORY) { "snapshot directory is not owner-private" }
+                val file = created.resolve("input.elf").also { target = it }
+                val written = java.security.MessageDigest.getInstance("SHA-256")
+                var total = 0L
+                val stable = Files.newByteChannel(file, setOf(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, NOFOLLOW_LINKS),
+                    PosixFilePermissions.asFileAttribute(PRIVATE_FILE)).use { channel ->
+                    hashStableRegularFile(storageRoot, "${job.id}/input.elf",
+                        declaredSize = { require(it == job.sizeBytes.toLong()) },
+                        readBytes = { _, read -> require(read <= job.sizeBytes.toLong()) },
+                        cancellationCheck = { if (Thread.currentThread().isInterrupted) throw InterruptedException() },
+                        consumeBytes = { buffer, count ->
+                            val chunk = java.nio.ByteBuffer.wrap(buffer, 0, count)
+                            while (chunk.hasRemaining()) channel.write(chunk)
+                            written.update(buffer, 0, count)
+                            total += count
+                        },
+                    )
+                }
+                // The stable read revalidates the upload after its last chunk; only then is the copy trusted.
+                val digest = written.digest().joinToString("") { "%02x".format(it) }
+                require(digest == stable.sha256 && total == job.sizeBytes.toLong()) { "snapshot differs from the stable read" }
+                Files.setPosixFilePermissions(file, READ_ONLY)
+                val identity = Files.readAttributes(file, PosixFileAttributes::class.java, NOFOLLOW_LINKS).fileKey()
+                    ?: error("snapshot has no file identity")
+                return WebInputSnapshot(created, file, digest, identity)
+            } catch (failure: Exception) {
+                target?.let { try { Files.deleteIfExists(it) } catch (_: java.io.IOException) { } }
+                directory?.let { try { Files.deleteIfExists(it) } catch (_: java.io.IOException) { } }
+                if (failure is InterruptedException) throw failure
+                // The optional checkpoint needs a verified snapshot; evidence-only analysis still runs without one.
+                return null
+            }
+        }
+
+        private fun randomToken(): String {
+            val bytes = ByteArray(16).also(java.security.SecureRandom()::nextBytes)
+            return bytes.joinToString("") { "%02x".format(it) }
+        }
+
+        private fun streamSha256(path: Path): String {
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            Files.newInputStream(path, NOFOLLOW_LINKS).use { input ->
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    digest.update(buffer, 0, count)
+                }
+            }
+            return digest.digest().joinToString("") { "%02x".format(it) }
+        }
     }
 }
 
