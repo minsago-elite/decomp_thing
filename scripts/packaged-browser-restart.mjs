@@ -239,8 +239,8 @@ function factPreview(text, maxBytes = FAILURE_PREVIEW_BYTES) {
 
 /**
  * Primary report: every top-level fact inline until the bound is met. Large diagnostics become bounded
- * head/tail excerpts (#1992) sized to the room left after the largest other facts are replaced by digest
- * references; a diagnostic is itself referenced only if zero-byte excerpts still cannot fit.
+ * head/tail excerpts (#1992) given at least a quarter of the bound: the largest other facts are replaced by
+ * digest references first; a diagnostic is itself referenced only if zero-byte excerpts still cannot fit.
  */
 function primaryReport(full, evidence, maxBytes) {
   let primary = { ...full, reportEvidence: evidence };
@@ -249,9 +249,9 @@ function primaryReport(full, evidence, maxBytes) {
   const sizes = Object.entries(full).filter(([key, value]) => key !== 'status' && value !== undefined)
     .map(([key, value]) => [key, Buffer.from(JSON.stringify(value) ?? 'null', 'utf8')])
     .sort((a, b) => b[1].length - a[1].length);
-  const reference = keys => {
+  const reference = (keys, limit = maxBytes) => {
     for (const [key, bytes] of sizes) {
-      if (measure() <= maxBytes) break;
+      if (measure() <= limit) break;
       if (!keys(key)) continue;
       primary[key] = { reportEvidence: key, bytes: bytes.length, sha256: sha256(bytes) };
       evidence.referencedKeys.push(key);
@@ -260,7 +260,11 @@ function primaryReport(full, evidence, maxBytes) {
   if (Array.isArray(primary.cleanupErrors)) primary.cleanupErrors = [...primary.cleanupErrors];
   const diagnostics = largeDiagnostics(primary);
   const excerpted = new Set(diagnostics.map(diagnostic => diagnostic.key));
-  if (!diagnostics.length || !excerptDiagnostics(primary, diagnostics, maxBytes, measure, () => reference(key => !excerpted.has(key)))) {
+  // Reserve a quarter of the bound for excerpts before other evidence may stay inline, so a report whose
+  // markers barely fit still keeps a useful head and tail of each diagnostic (#1992).
+  const reserve = Math.min(Math.floor(maxBytes / 4), diagnostics.reduce((sum, diagnostic) => sum + diagnostic.serializedBytes, 0));
+  if (!diagnostics.length || !excerptDiagnostics(primary, diagnostics, maxBytes, measure,
+    () => reference(key => !excerpted.has(key), maxBytes - reserve))) {
     // No large diagnostics, or even marker-only excerpts cannot fit: reference the largest facts
     // of the unmodified report, as before excerpts existed. The parts remain lossless either way.
     primary = { ...full, reportEvidence: evidence };

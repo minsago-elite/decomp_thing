@@ -215,6 +215,31 @@ test('publishes a scrubbed, byte-bounded failure with large UTF-8 diagnostics an
   }
 });
 
+test('reserves diagnostic excerpts before near-limit request evidence at the production cap', async () => {
+  const buildDirectory = join(process.cwd(), 'build');
+  await mkdir(buildDirectory, { recursive: true });
+  const directory = await mkdtemp(join(buildDirectory, 'diagnostic-reserve-'));
+  try {
+    // Without a reserve these requests fit beside marker-only excerpts, leaving ~0 bytes of either diagnostic.
+    const report = { status: 'failed', mode: 'audit', error: 'D'.repeat(200_000) + ' DRIVER-END',
+      applicationError: 'A'.repeat(1_000_000) + ' APPLICATION-END', requests: 'r'.repeat(MAX_REPORT_BYTES - 1500) };
+    await publishReport(directory, report, []);
+    const bytes = await readFile(join(directory, 'report.json'));
+    assert.ok(bytes.length <= MAX_REPORT_BYTES);
+    const parsed = JSON.parse(bytes);
+    assert.deepEqual(parsed.reportEvidence.referencedKeys, ['requests']);
+    for (const [name, end] of [['error', 'DRIVER-END'], ['applicationError', 'APPLICATION-END']]) {
+      const truncation = parsed.diagnosticTruncation[name];
+      assert.ok(truncation.retainedBytes >= 16 * 1024, `${name} kept only ${truncation.retainedBytes} bytes`);
+      assert.equal(truncation.originalBytes, Buffer.byteLength(report[name]));
+      assert.equal(truncation.sha256, createHash('sha256').update(report[name]).digest('hex'));
+      assert.ok(parsed[name].endsWith(end));
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('references large diagnostics when even their excerpt markers cannot fit the primary bound', async () => {
   const buildDirectory = join(process.cwd(), 'build');
   await mkdir(buildDirectory, { recursive: true });
