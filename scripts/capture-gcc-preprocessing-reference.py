@@ -620,20 +620,28 @@ IDENTITY_SUBSTITUTION_LIMIT = (
 
 
 def substitute(data: bytes, values: dict[str, str]) -> bytes:
-    """Replace the group-1 span of each matching identity pattern, line by line."""
-    lines = data.decode("utf-8", "surrogateescape").split("\n")
-    for rule in IDENTITY_SUBSTITUTIONS:
-        if rule["id"] not in values:
-            continue
-        value = values[rule["id"]]
-        for pattern in rule["patterns"]:
-            regex = re.compile(pattern)
+    """Replace original group-1 spans, with earlier rules owning overlapping spans.
 
-            def replace(match: re.Match) -> str:
-                start, end = match.start(1) - match.start(), match.end(1) - match.start()
-                return match.group(0)[:start] + value + match.group(0)[end:]
-
-            lines = [regex.sub(replace, line) for line in lines]
+    Replacement identities are opaque: a later rule must not rewrite an already
+    substituted argv[0], even when it contains the original install prefix.
+    """
+    patterns = [
+        (re.compile(pattern), values[rule["id"]])
+        for rule in IDENTITY_SUBSTITUTIONS if rule["id"] in values
+        for pattern in rule["patterns"]
+    ]
+    lines = []
+    for line in data.decode("utf-8", "surrogateescape").split("\n"):
+        replacements: list[tuple[int, int, str]] = []
+        for regex, value in patterns:
+            for match in regex.finditer(line):
+                start, end = match.span(1)
+                if not any(start < previous_end and previous_start < end
+                           for previous_start, previous_end, _ in replacements):
+                    replacements.append((start, end, value))
+        for start, end, value in sorted(replacements, reverse=True):
+            line = line[:start] + value + line[end:]
+        lines.append(line)
     return "\n".join(lines).encode("utf-8", "surrogateescape")
 
 
@@ -740,8 +748,8 @@ def execute(runtime: str, scratch: Path, spec: dict, attempt: str, alternate: bo
 
 
 def capture_case(runtime: str, scratch: Path, spec: dict) -> dict:
-    first = execute(runtime, scratch, spec, 1)
-    second = execute(runtime, scratch, spec, 2)
+    first = execute(runtime, scratch, spec, "1")
+    second = execute(runtime, scratch, spec, "2")
     if first != second:
         raise SystemExit(f"{spec['id']}: independent repetition differs")
     return {

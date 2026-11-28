@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { sourceDirectoryPath } from '../app/paths';
 import { ApiClientError, withApiFailureReference } from '../api/errors';
+import { isDeletedJob } from '../shared/retainMetadata';
 import { recordedValidationCopy as copy } from '../copy/attempt';
+import { commonCopy } from '../copy/common';
+import { message } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { bindDirectory, directoryReadRoute } from '../sources/navigation';
 
@@ -10,8 +13,9 @@ import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 
 /** Resolve the durable workflow candidate by its exact source commitment, without equating revision namespaces. */
-export function ValidationSourceSnapshot({ jobId, runId, validationRevisionId, sourceSha256, basePath }: {
+export function ValidationSourceSnapshot({ jobId, runId, validationRevisionId, sourceSha256, basePath, onDeleted }: {
   jobId: string; runId: string; validationRevisionId: string; sourceSha256: string; basePath: string;
+  onDeleted?: (failure: unknown) => void;
 }) {
   const { client } = usePrivateTransport(basePath);
   const binding = useMemo(() => ({ client, jobId, runId, validationRevisionId, sourceSha256, active: null as AbortController | null }),
@@ -37,7 +41,9 @@ export function ValidationSourceSnapshot({ jobId, runId, validationRevisionId, s
         { sourceSha256, metadataVersion: directory.metadataVersion });
       setStored(current => current?.binding === binding ? { binding, data: receive({ href, revisionId: selected.revisionId }), loading: false, error: '' } : current);
     } catch (failure: unknown) {
-      if (!controller.signal.aborted) setStored(current => current?.binding === binding ? { binding, data: null, loading: false,
+      if (controller.signal.aborted) return;
+      if (isDeletedJob(failure) && onDeleted) { onDeleted(failure); return; }
+      setStored(current => current?.binding === binding ? { binding, data: null, loading: false,
         error: withApiFailureReference(copy.sourceUnavailable, failure) } : current);
     }
   }
@@ -46,6 +52,6 @@ export function ValidationSourceSnapshot({ jobId, runId, validationRevisionId, s
     <button type="button" disabled={view?.loading ?? false} onClick={() => { void resolve(); }}>{copy.findSource}</button>
     {view?.loading && <p role="status">{copy.readingSource}</p>}
     {view?.error && <p role="alert">{view.error}</p>}
-    {view?.data && <><MetadataReceipt kind="sourceResolution" receipt={view.data.receipt} /><p>{copy.retainedRevision}: <code>{view.data.value.revisionId}</code></p><a href={view.data.value.href}>{copy.openSource}</a></>}
+    {view?.data && <><MetadataReceipt kind="sourceResolution" receipt={view.data.receipt} /><p>{message(commonCopy.labeledValue, { label: copy.retainedRevision, value: <code>{view.data.value.revisionId}</code> })}</p><a href={view.data.value.href}>{copy.openSource}</a></>}
   </section>;
 }

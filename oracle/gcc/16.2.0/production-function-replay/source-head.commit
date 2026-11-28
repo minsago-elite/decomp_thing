@@ -1,0 +1,11 @@
+tree 7fc1055b170b357c0759e3307375765da24b6109
+parent c5acf81875fd0518e65bb79ed957abf33972d9b1
+parent e1f8b8f78d27d82d8e39a841650f6c5eb924a476
+author Rhajune Park <june@pythonplayer123.dev> 1792945959 +0900
+committer Rhajune Park <june@pythonplayer123.dev> 1792945959 +0900
+
+Integrate frozen report membership into boundary consumers
+
+Preserved live run 40206483699 completed with the same pre-replay report-directory identity failure at GccBundledOperationCoordinator.kt:674. Merge the tested producer correction after retaining that terminal evidence. Refs #679, #689, #690.
+
+Validation: 59 focused Kotlin tests pass with no failures or skips; git diff --check passes. Frontend tasks excluded only from this focused local run; hosted qualification remains required.

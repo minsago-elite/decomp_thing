@@ -1,14 +1,19 @@
 import { runtimeCopy as copy } from '../copy/runtime';
 import { message as displayMessage } from '../shared/messages';
-import { formatExactBytes } from '../jobs/metadataFormat';
+import { formatExactBytes } from '../copy/format';
+import { commonCopy } from '../copy/common';
 import { useLayoutEffect, useState } from 'preact/hooks';
 import type { BrowserSession } from '../session/session';
 import { SchedulerSummary } from '../jobs/SchedulerSummary';
 import { ProgressRetentionSummary } from '../jobs/ProgressRetentionSummary';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
+import { StorageSummary } from '../jobs/StorageSummary';
 import type { BuildIdentity } from '../app/buildIdentity';
+import { SupportExport } from '../jobs/SupportExport';
+import { usePrivateTransport } from '../session/PrivateTransport';
 
-export default function Runtime({ identity, session = null }: { identity: BuildIdentity; session?: BrowserSession | null }) {
+export default function Runtime({ identity, session = null, basePath = '/' }: { identity: BuildIdentity; session?: BrowserSession | null; basePath?: string }) {
+  const { client } = usePrivateTransport(basePath);
   const [state, setState] = useState(() => session?.snapshot());
   useLayoutEffect(() => {
     setState(session?.snapshot());
@@ -45,18 +50,20 @@ export default function Runtime({ identity, session = null }: { identity: BuildI
         </dl>
         <SchedulerSummary scheduler={snapshot.runtime.scheduler} />
         <ProgressRetentionSummary retention={snapshot.runtime.progressRetention} />
+        <StorageSummary basePath={basePath} />
         <h3>{copy.workflowCapabilities}</h3>
         {snapshot.capabilities.length === 0 ? <p>{copy.noCapabilitiesReported}</p> : <ul>
           {snapshot.capabilities.map(capability => <li key={capability.id}>
-            <strong>{capability.id}</strong>: {capability.state}
+            {displayMessage(commonCopy.labeledValue, { label: <strong>{capability.id}</strong>, value: capability.state })}
             {capability.message && <p>{capability.message}</p>}
             {capability.reasonCode && <p>{displayMessage(copy.reason, { reason: <code>{capability.reasonCode}</code> })}</p>}
           </li>)}
         </ul>}
-      </section> : <div class="notice" aria-labelledby="runtime-availability-title">
+        <SupportExport key={state?.status === 'authenticated' ? state.generation : 'disconnected'} client={client} />
+      </section> : <section class="notice" aria-labelledby="runtime-availability-title">
         <h2 id="runtime-availability-title">{copy.runtimeInformationIsNotConnected}</h2>
         <p>{copy.connectALocalSessionToSeeReportedToolAvailabilityAnd}</p>
-      </div>}
+      </section>}
     </section>
   );
 }

@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render } from '@testing-library/preact';
 import { afterEach, expect, it } from 'vitest';
 import { message, textMessage } from '../src/shared/messages';
-import { formatExactTimestamp } from '../src/jobs/metadataFormat';
+import { formatExactTimestamp } from '../src/copy/format';
 import { SchedulerSummary } from '../src/jobs/SchedulerSummary';
 import { ProgressRetentionSummary } from '../src/jobs/ProgressRetentionSummary';
 

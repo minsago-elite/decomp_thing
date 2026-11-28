@@ -53,7 +53,7 @@ class AcpThoughtProjectionTest {
     }
 
     @Test
-    fun `thought chunks are distinct redacted messages and never the result summary`() {
+    fun `thought chunks are distinct withheld messages and never the result summary`() {
         val root = createTempDirectory("acp-thought-projection-")
         val request = AgentExecutionRequest("benign fixture", listOf(AgentWorkspaceRoot("project", root)),
             accessPolicy = AgentAccessPolicy(emptyList()))
@@ -78,9 +78,13 @@ class AcpThoughtProjectionTest {
         val completed = snapshot.getValue("events").jsonArray.map { it.jsonObject }.filter {
             it["completed"]?.jsonPrimitive?.booleanOrNull == true
         }
-        assertEquals(mapOf("assistant" to "answer", "thought" to "[redacted]"), completed.associate {
-            it.getValue("role").jsonPrimitive.content to it.getValue("text").jsonPrimitive.content
+        // Reasoning is private: the journal marks its position without retaining even redacted text.
+        assertEquals(mapOf("assistant" to "answer", "thought" to null), completed.associate {
+            it.getValue("role").jsonPrimitive.content to it["text"]?.jsonPrimitive?.content
         })
+        val thought = completed.single { it.getValue("role").jsonPrimitive.content == "thought" }
+        assertTrue(thought.getValue("textOmitted").jsonPrimitive.boolean)
+        assertFalse("contentSha256" in thought)
         val recorder = decompengine.project.BoundedAgentExecutionEventRecorder()
         events.forEach(recorder::record)
         val archived = recorder.snapshot().map { event ->

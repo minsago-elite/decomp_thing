@@ -107,8 +107,20 @@ class WebAccessDenied internal constructor(
     val allowedMethods: Set<String> = emptySet(),
     internal val clearCookie: Boolean = false,
     internal val eventGap: JsonObject? = null,
+    internal val details: List<WebErrorDetail> = emptyList(),
 ) : RuntimeException(message) {
-    init { require(eventGap == null || (status == 410 && code == "EVENT_GAP")) }
+    init {
+        require(eventGap == null || (status == 410 && code == "EVENT_GAP"))
+        require(details.size <= 32)
+    }
+}
+
+/** Field-level or policy detail: a JSON pointer plus fixed code/message, never a rejected value. */
+internal data class WebErrorDetail(val pointer: String, val code: String, val message: String) {
+    init {
+        require(pointer.length <= 256 && (pointer.isEmpty() || pointer.startsWith("/")))
+        require(code.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")) && message.length <= 500)
+    }
 }
 
 /** These return values deliberately redact their printable representation. Never serialize them wholesale. */
@@ -233,6 +245,29 @@ class LocalWebAccess(
         return describe(authenticate(exchange, policy.mutation), clock.instant())
     }
 
+    /**
+     * Audit attribution only: the identity of a live session named by the request cookie, or null.
+     * It never authorizes, never extends idle lifetime and never reports why a cookie was refused.
+     */
+    @Synchronized
+    fun auditSessionId(exchange: HttpExchange): String? = try {
+        if (closed) null else {
+            val hash = tokenDigest("session", sessionCookieToken(exchange))
+            sessions.firstOrNull { MessageDigest.isEqual(it.digest, hash) && !expired(it, clock.nanoTime()) }?.digest?.hex()
+        }
+    } catch (_: Exception) { null }
+
+    /** Audit attribution for a session this response just issued in its Set-Cookie header. */
+    @Synchronized
+    fun auditIssuedSessionId(exchange: HttpExchange): String? {
+        if (closed) return null
+        val token = exchange.responseHeaders["Set-Cookie"].orEmpty().map { it.substringBefore(';').trim() }
+            .singleOrNull { it.substringBefore('=') == configuration.cookieName }?.substringAfter('=', "")
+            ?.takeIf(::validToken) ?: return null
+        val hash = tokenDigest("session", token)
+        return sessions.firstOrNull { MessageDigest.isEqual(it.digest, hash) }?.digest?.hex()
+    }
+
     /** Authenticated bootstrap GET restores the same CSRF token without invalidating other tabs. */
     @Synchronized
     fun csrfForSession(exchange: HttpExchange): WebSessionCredentials {
@@ -271,6 +306,7 @@ class LocalWebAccess(
 
     /** All denial bodies are fixed safe text, including navigation, SSE and download failures. */
     fun sendDenied(exchange: HttpExchange, failure: WebAccessDenied) {
+        WebDeniedResponseTrace.note(failure.code)
         val requestId = UUID.randomUUID().toString()
         val body = buildJsonObject {
             put("apiVersion", 1)
@@ -278,10 +314,12 @@ class LocalWebAccess(
             put("requestId", requestId)
             put("error", buildJsonObject {
                 put("code", failure.code)
-                put("message", failure.message)
-                failure.eventGap?.let { put("recovery", it) }
+                put("message", WebRedactionPolicy.of(exchange).text(failure.message ?: ""))
+                failure.eventGap?.let { put("recovery", WebRedactionPolicy.of(exchange).json(it)) }
                 put("retryable", failure.status == 429)
-                put("details", JsonArray(emptyList()))
+                put("details", JsonArray(failure.details.map { detail -> buildJsonObject {
+                    put("pointer", detail.pointer); put("code", detail.code); put("message", detail.message)
+                } }))
                 put("retryAfterMs", if (failure.status == 429) JsonPrimitiveRetry else JsonNull)
             })
         }.toString().toByteArray()

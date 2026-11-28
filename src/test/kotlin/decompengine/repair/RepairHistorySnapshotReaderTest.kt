@@ -82,6 +82,23 @@ class RepairHistorySnapshotReaderTest {
     }
 
     @Test
+    fun reflectedSessionReservesEachCaptureAndPropagatesReservationRefusal() {
+        withRevisions { revisions, path ->
+            path.resolve("graph.json").writeText("abc")
+            val reservations = mutableListOf<Long>()
+            val session = session(revisions, reserveCapture = { reservations += it })
+            val captured = call(session, "capture", "graph.json", 3L) as StableRegularFile
+            assertContentEquals("abc".toByteArray(), captured.bytes)
+            assertEquals(listOf(3L), reservations)
+            val refusal = IllegalStateException("capture reservation refused")
+            val refused = session(revisions, reserveCapture = { throw refusal })
+            assertSame(refusal, assertFailsWith<IllegalStateException> {
+                call(refused, "capture", "graph.json", 3L)
+            })
+        }
+    }
+
+    @Test
     fun specialSymlinkOversizeLinkAndWriteAdmissionRefuseBeforePayloadRead() {
         val path = Files.createDirectory(root().resolve("fixture-revisions"))
         val target = path.resolve("target").also { it.writeText("abc") }
@@ -329,7 +346,7 @@ class RepairHistorySnapshotReaderTest {
         val root = root()
         Files.createDirectory(root.resolve("reports"))
         root.resolve("reports/not-a-directory").writeText("x")
-        val chain = construct("HistoryDirectoryChain", root, listOf("reports", "not-a-directory"), {})
+        val chain = construct("HistoryDirectoryChain", root, listOf("reports", "not-a-directory"), {}, { _: Long -> })
         assertFails { call(chain, "open") }
         @Suppress("UNCHECKED_CAST")
         val acquired = (field(chain, "held") as List<LinuxDescriptor>).toList()
@@ -1070,13 +1087,15 @@ class RepairHistorySnapshotReaderTest {
         val path = Files.createDirectory(root().resolve("fixture-revisions"))
         LinuxFilesystemSyscalls.openRoot(path).use { body(it, path) }
     }
-    private fun session(revisions: LinuxDescriptor, revalidate: () -> Unit = {}, cancel: () -> Unit = {}): Any =
-        construct("HistoryCaptureSession", revisions, revalidate, cancel)
+    private fun session(revisions: LinuxDescriptor, revalidate: () -> Unit = {}, cancel: () -> Unit = {},
+        reserveCapture: (Long) -> Unit = {}): Any =
+        construct("HistoryCaptureSession", revisions, revalidate, cancel, reserveCapture)
     private fun unavailable(result: RepairHistoryReadResult) {
         assertEquals(RepairHistoryReadStatus.UNAVAILABLE, result.status); assertNull(result.snapshot)
     }
     private fun construct(name: String, vararg arguments: Any): Any =
-        Class.forName("decompengine.repair.$name").declaredConstructors.single().also { it.isAccessible = true }
+        Class.forName("decompengine.repair.$name").declaredConstructors
+            .single { !it.isSynthetic && it.parameterCount == arguments.size }.also { it.isAccessible = true }
             .let { invoke { it.newInstance(*arguments) } }!!
     private fun call(target: Any, name: String, vararg arguments: Any): Any? =
         target.javaClass.declaredMethods.single { it.name == name && it.parameterCount == arguments.size }

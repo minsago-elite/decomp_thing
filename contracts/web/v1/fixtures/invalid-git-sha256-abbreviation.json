@@ -8,8 +8,12 @@
     "repositoryVersion": "repo_version_1",
     "worktreeVersion": "worktree_version_1",
     "objectFormat": "sha256",
+    "origin": "initialized",
+    "trackingPolicy": "source-only-v1",
     "headObjectId": "cdef1234",
     "headRefId": "ref_main",
+    "headState": "attached",
+    "headRefName": "refs/heads/main",
     "candidateRevisionId": "revision_example_1",
     "dirty": false,
     "refs": [

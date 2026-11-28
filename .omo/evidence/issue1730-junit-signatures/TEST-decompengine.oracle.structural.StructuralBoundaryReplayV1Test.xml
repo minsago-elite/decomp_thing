@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.oracle.structural.StructuralBoundaryReplayV1Test" tests="17" skipped="0" failures="0" errors="0" timestamp="2026-10-25T16:17:41.257Z" hostname="whatsername" time="1.296">
+  <properties/>
+  <testcase name="crossed name-driven pair sequence is rejected even when local equations close()" classname="decompengine.oracle.structural.StructuralBoundaryReplayV1Test" time="0.213"/>
+  <testcase name="a valid one-to-one near mapping is rejected when it is not minimum distance()" classname="decompengine.oracle.structural.StructuralBoundaryReplayV1Test" time="0.019"/>
+  <testcase name="selected observation retains failed extraction records in every recovered boundary partition()" classname="decompengine.oracle.structural.StructuralBoundaryReplayV1Test" time="0.013"/>
+  <testcase name="selected verification cannot reuse an observation for another model twin base or oracle()" classname="decompengine.oracle.structural.StructuralBoundaryReplayV1Test" time="0.021"/>
+  <testcase name="selected observation enforces canonical input address and resource bounds()" classname="decompengine.oracle.structural.StructuralBoundaryReplayV1Test" time="0.015"/>
+  <testcase name="recovered universe omissions and substitutions are rejected()" classname="decompengine.oracle.structural.StructuralBoundaryReplayV1Test" time="0.024"/>
+  <testcase name="selected base underflow and executable-range escapes fail closed()" classname="decompengine.oracle.structural.StructuralBoundaryReplayV1Test" time="0.02"/>
+  <testcase name="replay derives facts from the authenticated parsed snapshot only()" classname="decompengine.oracle.structural.StructuralBoundaryReplayV1Test" time="0.01"/>
+  <testcase name="selected verification rejects altered results metadata and canonical bytes()" classname="decompengine.oracle.structural.StructuralBoundaryReplayV1Test" time="0.026"/>
+  <testcase name="objective tie ambiguity and canonical-report claims are independently checked()" classname="decompengine.oracle.structural.StructuralBoundaryReplayV1Test" time="0.022"/>
+  <testcase name="historical rich fixture replays deterministically to an observed binding()" classname="decompengine.oracle.structural.StructuralBoundaryReplayV1Test" time="0.013"/>
+  <testcase name="selected observation preserves name-independent stable ties and exclusion accounting()" classname="decompengine.oracle.structural.StructuralBoundaryReplayV1Test" time="0.013"/>
+  <testcase name="selected observation bytes are deterministic and defensively owned()" classname="decompengine.oracle.structural.StructuralBoundaryReplayV1Test" time="0.015"/>
+  <testcase name="selected observation reproduces every historical rich projection without scoring authority()" classname="decompengine.oracle.structural.StructuralBoundaryReplayV1Test" time="0.013"/>
+  <testcase name="duplicate normalized starts and noncanonical model bytes fail closed()" classname="decompengine.oracle.structural.StructuralBoundaryReplayV1Test" time="0.011"/>
+  <testcase name="recovered names cannot choose the upper edge of an equal-distance tie()" classname="decompengine.oracle.structural.StructuralBoundaryReplayV1Test" time="0.017"/>
+  <testcase name="selected full export parser admits large source without widening historical replay()" classname="decompengine.oracle.structural.StructuralBoundaryReplayV1Test" time="0.814"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

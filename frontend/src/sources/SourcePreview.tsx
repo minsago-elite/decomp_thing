@@ -6,20 +6,23 @@ import { sourceCopy as copy } from '../copy/sources';
 import { message, textMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { beginSourceRead, currentSourceRead, sourceReadMessage } from './navigation';
-import type { FileSelection, SourceReadState } from './navigation';
+import type { FileSelection, SourceHistoryEntry, SourceReadState } from './navigation';
 import { bindSourceChunk, sourceChunkMaximum, sourceChunkRoute, sourcePosition, sourcePositionPath, sourceWindow } from './viewer';
 import { sourceHighlightLanguage } from './highlight';
 import { beginSourceHighlight } from './highlightOperation';
 import type { HighlightResult } from './highlightOperation';
 import { sourceHighlightRuntime } from './highlightRuntime';
+import { browserCapabilities } from '../shared/browserCapabilities';
 
+import { sameTabNavigationLink } from '../shared/departingFocus';
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 
 /** One deliberately opened range. Highlighting separately requires an explicit local action. */
-export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes, search, snapshotPin }: {
+export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes, search, snapshotPin, historyEntry, onDeleted }: {
   selected: FileSelection; metadata: RevisionFile; basePath: string; maximumChunkBytes: string; search: string; snapshotPin?: SourceSnapshotPin;
+  historyEntry?: SourceHistoryEntry; onDeleted?: (failure: unknown) => void;
 }) {
   const location = useLocation();
   const { client } = usePrivateTransport(basePath);
@@ -40,6 +43,7 @@ export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes,
   const highlighting = highlight?.key === copyKey ? highlight : null;
   const highlighted = highlighting?.result?.status === 'ready' ? highlighting.result.value : null;
   const language = sourceHighlightLanguage(metadata.item.displayName);
+  const [{ clipboardWrite }] = useState(browserCapabilities);
   useEffect(() => {
     setHighlight(current => current?.key === copyKey ? current : null);
     return () => {
@@ -49,7 +53,7 @@ export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes,
   useEffect(() => () => { stopCopy.current?.(); stopCopy.current = null; }, [copyKey]);
   useEffect(() => beginSourceRead(key, async signal => receive(bindSourceChunk(
     (await client.get('sourceChunk', sourceChunkRoute(selected, metadata, position, maximum), { signal })).data,
-    selected, metadata, position, maximum)), setRead), [client, key]);
+    selected, metadata, position, maximum)), setRead, onDeleted), [client, key, historyEntry]);
   const current = currentSourceRead(read, key);
   const observation = current.state === 'ready' ? current.value : null;
   const chunk = observation?.value;
@@ -92,7 +96,7 @@ export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes,
         {view.rows.map((row, index) => <div class="source-row" key={`${row.offset}/${index}`}>
           {row.line === null ? <span class="source-position"><code>{row.offset}</code></span>
             : <a class="source-position" href={sourcePositionPath(basePath, selected, { offset: row.offset, line: row.line }, snapshotPin)}
-              onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.button === 0) moveFocus.current = true; }}
+              onClick={event => { if (sameTabNavigationLink(event)) moveFocus.current = true; }}
               aria-label={textMessage(copy.lineLink, { line: row.line, offset: row.offset })}>{row.line}{row.continued && <span> {copy.continued}</span>}</a>}
           <pre dir="ltr">{highlighted?.mode === 'formatted'
             ? highlighted.rows[index]!.map((token, tokenIndex) => <span key={tokenIndex} class={`source-token source-token-${token.kind}`}>{token.text}</span>)
@@ -105,11 +109,11 @@ export function SourcePreview({ selected, metadata, basePath, maximumChunkBytes,
       </nav>
       {view.originalText !== null && <>
         <p>{message(copy.copyRange, { offset: view.offset, length: view.length })}</p>
-        <button type="button" disabled={copying?.state === 'loading'} onClick={() => {
+        {!clipboardWrite ? <p>{copy.clipboardUnavailable}</p> : <><button type="button" disabled={copying?.state === 'loading'} onClick={() => {
           const text = view.originalText!; stopCopy.current?.();
           stopCopy.current = beginSourceRead(copyKey, async () => { await navigator.clipboard.writeText(text); return null; }, setCopied);
         }}>{copy.copyText}</button>
-        <p role="status">{copying?.state === 'ready' ? copy.copied : copying?.state === 'failed' ? copy.copyFailed : copy.clipboardNotice}</p>
+        <p role="status">{copying?.state === 'ready' ? copy.copied : copying?.state === 'failed' ? copy.copyFailed : copy.clipboardNotice}</p></>}
       </>}
     </>}
     <nav aria-label={copy.rangeNavigation}>

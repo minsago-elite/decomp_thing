@@ -1,0 +1,182 @@
+{
+  "schemaVersion": 1,
+  "originals": {
+    "faf": {
+      "source": "https://github.com/minsago-elite/decomp_thing/actions/runs/41904229735",
+      "retainedPath": "build/orchestration/pr1891-current/faf-gcc-failure/downloaded/image-inspect.json",
+      "classification": "actual refusal; Id and layer 8 differ",
+      "sha256": "dbfc1cc7a84dca6351eea149032eb3ec72fc0ddcca423e66e52eb46019f3284a",
+      "utf8": "[\n    {\n        \"Id\": \"sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248\",\n        \"RepoTags\": [\n            \"decomp-gcc-oracle-toolchain:16.2.0\"\n        ],\n        \"RepoDigests\": [],\n        \"Parent\": \"\",\n        \"Comment\": \"buildkit.dockerfile.v0\",\n        \"Created\": \"2026-08-07T00:00:00Z\",\n        \"DockerVersion\": \"\",\n        \"Author\": \"\",\n        \"Config\": {\n            \"Hostname\": \"\",\n            \"Domainname\": \"\",\n            \"User\": \"\",\n            \"AttachStdin\": false,\n            \"AttachStdout\": false,\n            \"AttachStderr\": false,\n            \"Tty\": false,\n            \"OpenStdin\": false,\n            \"StdinOnce\": false,\n            \"Env\": [\n                \"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\",\n                \"GPG_KEYS=B215C1633BCA0477615F1B35A5B3A004745C015A \\tB3C42148A44E6983B3E4CC0793FA9B1AB75C61B8 \\t90AA470469D3965A87A5DCB494D03953902C9419 \\t80F98B2E0DAB6C8281BDF541A7C8C3B2F71EDF1C \\t7F74F97C103468EE5D750B583AB00996FC26A641 \\t33C235A34C46AA3FFB293709A328C3A2C3C45C06 \\tD3A93CAD751C2AF4F8C7AD516C35B99309B5FA62\",\n                \"GCC_MIRRORS=https://ftpmirror.gnu.org/gcc \\t\\thttps://mirrors.kernel.org/gnu/gcc \\t\\thttps://bigsearcher.com/mirrors/gcc/releases \\t\\thttp://www.netgull.com/gcc/releases \\t\\thttps://ftpmirror.gnu.org/gcc \\t\\thttps://sourceware.org/pub/gcc/releases \\t\\tftp://ftp.gnu.org/gnu/gcc\",\n                \"GCC_VERSION=16.2.0\"\n            ],\n            \"Cmd\": [\n                \"bash\"\n            ],\n            \"Image\": \"\",\n            \"Volumes\": null,\n            \"WorkingDir\": \"\",\n            \"Entrypoint\": null,\n            \"OnBuild\": null,\n            \"Labels\": null\n        },\n        \"Architecture\": \"amd64\",\n        \"Os\": \"linux\",\n        \"Size\": 1561504285,\n        \"GraphDriver\": {\n            \"Data\": {\n                \"LowerDir\": \"/var/lib/docker/overlay2/3aa867fcd766c2f5cf264a5f85841a0803b1f311bd672b7c4651af6e458b6c9f/diff:/var/lib/docker/overlay2/675dd992bafb215fed0d2132a87c3f8c9a5c5f8f95d0d413563266f375315a8a/diff:/var/lib/docker/overlay2/b2cc316963d9f8715c4c8cf3fb1da066808832ccd7a985bc573038624f30d58b/diff:/var/lib/docker/overlay2/df55efb3e5ffb7c5a78877ed5bfd15423a9046e4414d66f17618baa870f8b7a3/diff:/var/lib/docker/overlay2/67432b99524e1454ff1eac16070cbb9335a45c0a67edee983f30aa80d5d4d96d/diff:/var/lib/docker/overlay2/fd850822989dffde19c38f8c315650d3baffa1adac0cf01937071de98a8a0f1a/diff:/var/lib/docker/overlay2/d4dedd2a210a08cd88f84249418dee7324e0afa7b1ede5dbe342e36c58c99eb9/diff:/var/lib/docker/overlay2/9627b27d32791172f29f0c021d9c787af122d2655ddde3409b1cb91da2f9ae37/diff\",\n                \"MergedDir\": \"/var/lib/docker/overlay2/u8t2jxdv6vqa5lvyjjoqibp93/merged\",\n                \"UpperDir\": \"/var/lib/docker/overlay2/u8t2jxdv6vqa5lvyjjoqibp93/diff\",\n                \"WorkDir\": \"/var/lib/docker/overlay2/u8t2jxdv6vqa5lvyjjoqibp93/work\"\n            },\n            \"Name\": \"overlay2\"\n        },\n        \"RootFS\": {\n            \"Type\": \"layers\",\n            \"Layers\": [\n                \"sha256:31631a95db7cd650d1c826f269b9e93b57d9f418128bf7c5499b4403be4d44d0\",\n                \"sha256:7c367ef8c1ea18872336c6bc0672b2ff7fee5dc56c055ce54e62f2ccfde4f847\",\n                \"sha256:144ea2bdbdf828c7c9867865b4eeffc5ec977e8e686cdfd1e240a890e9d4cf8e\",\n                \"sha256:758a60093d45fcab0f50466c34253fcdaea5dbb0bacd6495bda7d4e8d90e61d6\",\n                \"sha256:bd3697430d9c1e3d4cf6044fed4feb40ddfbec5d01420b2fd6d9565779423d99\",\n                \"sha256:c103436de306bfcb20eb5265f729760010d0c7bfdd10c937664882ecc1d8db5d\",\n                \"sha256:91b571880d8f2325dfaf81992875cbdaceefe7110cc448ff3271e9ae82606dff\",\n                \"sha256:13edf68405b45fb51540a7cea394c1b6856ee27cb4fadc2f6738896d1529b0e8\",\n                \"sha256:77250f4c2124695b8d29c754106650284a7ad8a52fb0798fa3a119e1dd0a2ae0\"\n            ]\n        },\n        \"Metadata\": {\n            \"LastTagTime\": \"2026-11-04T20:12:58.798117933Z\"\n        }\n    }\n]\n"
+    },
+    "pr1864": {
+      "source": "https://github.com/minsago-elite/decomp_thing/actions/runs/41612674027",
+      "retainedPath": "build/orchestration/gcc-current-reproduction-evidence/pr1864-diagnostics/image-inspect.json",
+      "classification": "actual refusal; index Id, truncated Config, all nine DiffIDs match",
+      "sha256": "a66a6c94f0aade573aef6fb31c3603725c7f694af109817c61468af7ac82a6bf",
+      "utf8": "[\n    {\n        \"Id\": \"sha256:561e447d3e47833d99420dea1bfbb6dc836ec0b0077e522de688fd72f558784a\",\n        \"RepoTags\": [\n            \"decomp-gcc-oracle-toolchain:16.2.0\"\n        ],\n        \"RepoDigests\": [\n            \"decomp-gcc-oracle-toolchain@sha256:561e447d3e47833d99420dea1bfbb6dc836ec0b0077e522de688fd72f558784a\"\n        ],\n        \"Comment\": \"buildkit.dockerfile.v0\",\n        \"Created\": \"2026-08-07T00:00:00Z\",\n        \"Config\": {\n            \"Env\": [\n                \"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\",\n                \"GPG_KEYS=B215C1633BCA0477615F1B35A5B3A004745C015A \\tB3C42148A44E6983B3E4CC0793FA9B1AB75C61B8 \\t90AA470469D3965A87A5DCB494D03953902C9419 \\t80F98B2E0DAB6C8281BDF541A7C8C3B2F71EDF1C \\t7F74F97C103468EE5D750B583AB00996FC26A641 \\t33C235A34C46AA3FFB293709A328C3A2C3C45C06 \\tD3A93CAD751C2AF4F8C7AD516C35B99309B5FA62\",\n                \"GCC_MIRRORS=https://ftpmirror.gnu.org/gcc \\t\\thttps://mirrors.kernel.org/gnu/gcc \\t\\thttps://bigsearcher.com/mirrors/gcc/releases \\t\\thttp://www.netgull.com/gcc/releases \\t\\thttps://ftpmirror.gnu.org/gcc \\t\\thttps://sourceware.org/pub/gcc/releases \\t\\tftp://ftp.gnu.org/gnu/gcc\",\n                \"GCC_VERSION=16.2.0\"\n            ],\n            \"Cmd\": [\n                \"bash\"\n            ]\n        },\n        \"Architecture\": \"amd64\",\n        \"Os\": \"linux\",\n        \"Size\": 561692502,\n        \"RootFS\": {\n            \"Type\": \"layers\",\n            \"Layers\": [\n                \"sha256:31631a95db7cd650d1c826f269b9e93b57d9f418128bf7c5499b4403be4d44d0\",\n                \"sha256:7c367ef8c1ea18872336c6bc0672b2ff7fee5dc56c055ce54e62f2ccfde4f847\",\n                \"sha256:144ea2bdbdf828c7c9867865b4eeffc5ec977e8e686cdfd1e240a890e9d4cf8e\",\n                \"sha256:758a60093d45fcab0f50466c34253fcdaea5dbb0bacd6495bda7d4e8d90e61d6\",\n                \"sha256:bd3697430d9c1e3d4cf6044fed4feb40ddfbec5d01420b2fd6d9565779423d99\",\n                \"sha256:c103436de306bfcb20eb5265f729760010d0c7bfdd10c937664882ecc1d8db5d\",\n                \"sha256:91b571880d8f2325dfaf81992875cbdaceefe7110cc448ff3271e9ae82606dff\",\n                \"sha256:13edf68405b45fb51540a7cea394c1b6856ee27cb4fadc2f6738896d1529b0e8\",\n                \"sha256:fc0f59678a37682ac1b60b253df3dc1383cded10a10f3d83372b13b67a3a7321\"\n            ]\n        },\n        \"Metadata\": {\n            \"LastTagTime\": \"2026-08-07T00:00:00Z\"\n        },\n        \"Descriptor\": {\n            \"mediaType\": \"application/vnd.oci.image.index.v1+json\",\n            \"digest\": \"sha256:561e447d3e47833d99420dea1bfbb6dc836ec0b0077e522de688fd72f558784a\",\n            \"size\": 856\n        },\n        \"Identity\": {\n            \"Build\": [\n                {\n                    \"Ref\": \"nqcttx7uiqceqvt23a99k8pli\",\n                    \"CreatedAt\": \"2026-11-03T10:02:19.825308496Z\"\n                }\n            ]\n        }\n    }\n]\n"
+    },
+    "historical": {
+      "source": "https://github.com/minsago-elite/decomp_thing/blob/b9b47fd23ce66a0747a16dcd1f1ceadb02c01124/tests/oracle/fixtures/gcc-inspect-api/historical-image-inspect.json",
+      "retainedPath": "build/orchestration/gcc-current-reproduction-evidence/pr1866-historical-image-inspect.json",
+      "classification": "retained historical complete fixture, NOT a new hosted observation; data only, no PR1866 implementation imported",
+      "sha256": "0f65dfe3ab98b2c3fc8ac6d1896264c2f681b7ae99f2a6787427c3cf87cedc23",
+      "utf8": "[\n    {\n        \"Id\": \"sha256:807f16e03368e1e0ff3c904f21f1a13c260d78a8b7226a52284a2ee68a4d1511\",\n        \"RepoTags\": [\n            \"decomp-gcc-oracle-toolchain:16.2.0\"\n        ],\n        \"RepoDigests\": [],\n        \"Parent\": \"\",\n        \"Comment\": \"buildkit.dockerfile.v0\",\n        \"Created\": \"2026-08-07T00:00:00Z\",\n        \"DockerVersion\": \"\",\n        \"Author\": \"\",\n        \"Config\": {\n            \"Hostname\": \"\",\n            \"Domainname\": \"\",\n            \"User\": \"\",\n            \"AttachStdin\": false,\n            \"AttachStdout\": false,\n            \"AttachStderr\": false,\n            \"Tty\": false,\n            \"OpenStdin\": false,\n            \"StdinOnce\": false,\n            \"Env\": [\n                \"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\",\n                \"GPG_KEYS=B215C1633BCA0477615F1B35A5B3A004745C015A \\tB3C42148A44E6983B3E4CC0793FA9B1AB75C61B8 \\t90AA470469D3965A87A5DCB494D03953902C9419 \\t80F98B2E0DAB6C8281BDF541A7C8C3B2F71EDF1C \\t7F74F97C103468EE5D750B583AB00996FC26A641 \\t33C235A34C46AA3FFB293709A328C3A2C3C45C06 \\tD3A93CAD751C2AF4F8C7AD516C35B99309B5FA62\",\n                \"GCC_MIRRORS=https://ftpmirror.gnu.org/gcc \\t\\thttps://mirrors.kernel.org/gnu/gcc \\t\\thttps://bigsearcher.com/mirrors/gcc/releases \\t\\thttp://www.netgull.com/gcc/releases \\t\\thttps://ftpmirror.gnu.org/gcc \\t\\thttps://sourceware.org/pub/gcc/releases \\t\\tftp://ftp.gnu.org/gnu/gcc\",\n                \"GCC_VERSION=16.2.0\"\n            ],\n            \"Cmd\": [\n                \"bash\"\n            ],\n            \"Image\": \"\",\n            \"Volumes\": null,\n            \"WorkingDir\": \"\",\n            \"Entrypoint\": null,\n            \"OnBuild\": null,\n            \"Labels\": null\n        },\n        \"Architecture\": \"amd64\",\n        \"Os\": \"linux\",\n        \"Size\": 1561406743,\n        \"GraphDriver\": {\n            \"Data\": {\n                \"LowerDir\": \"/var/lib/docker/overlay2/e3cbf1ca2f5185ec0bcd5202ce38a5ea8ef4d696020b3d13386f4172f95e5df4/diff:/var/lib/docker/overlay2/f37c07201b569f96cfa81fef5ec854e5fc913eb6352532b89440c8140e8f7b27/diff:/var/lib/docker/overlay2/f886aeed688a31abfc550b722b3189bf2cf8108a1cff3fcaec640cac06d3c2d5/diff:/var/lib/docker/overlay2/7dbad8d7c65a52368bebaacb82d4f977ef0ec59ca57cf561207ab4dd7c29f196/diff:/var/lib/docker/overlay2/78daa6793fed5759a2ad04fe174de406ffc08730f77861dc50eb328e99f2b257/diff:/var/lib/docker/overlay2/e764bba0411ff40496cfe43a6f96d806ca9f8852d11090b4f4fd34701d84bc74/diff:/var/lib/docker/overlay2/026f40abba3be53973651eedb07ee0af78b370e9966162a6de7592b47d8974a3/diff:/var/lib/docker/overlay2/e2c3c43b6b9d6cd1e6d1cc3c2669a486eacc9cdcdb05876defedc4c274ef5681/diff\",\n                \"MergedDir\": \"/var/lib/docker/overlay2/99ehttx69audvdhd9gz2jvowj/merged\",\n                \"UpperDir\": \"/var/lib/docker/overlay2/99ehttx69audvdhd9gz2jvowj/diff\",\n                \"WorkDir\": \"/var/lib/docker/overlay2/99ehttx69audvdhd9gz2jvowj/work\"\n            },\n            \"Name\": \"overlay2\"\n        },\n        \"RootFS\": {\n            \"Type\": \"layers\",\n            \"Layers\": [\n                \"sha256:31631a95db7cd650d1c826f269b9e93b57d9f418128bf7c5499b4403be4d44d0\",\n                \"sha256:7c367ef8c1ea18872336c6bc0672b2ff7fee5dc56c055ce54e62f2ccfde4f847\",\n                \"sha256:144ea2bdbdf828c7c9867865b4eeffc5ec977e8e686cdfd1e240a890e9d4cf8e\",\n                \"sha256:758a60093d45fcab0f50466c34253fcdaea5dbb0bacd6495bda7d4e8d90e61d6\",\n                \"sha256:bd3697430d9c1e3d4cf6044fed4feb40ddfbec5d01420b2fd6d9565779423d99\",\n                \"sha256:c103436de306bfcb20eb5265f729760010d0c7bfdd10c937664882ecc1d8db5d\",\n                \"sha256:91b571880d8f2325dfaf81992875cbdaceefe7110cc448ff3271e9ae82606dff\",\n                \"sha256:13edf68405b45fb51540a7cea394c1b6856ee27cb4fadc2f6738896d1529b0e8\",\n                \"sha256:fc0f59678a37682ac1b60b253df3dc1383cded10a10f3d83372b13b67a3a7321\"\n            ]\n        },\n        \"Metadata\": {\n            \"LastTagTime\": \"2026-11-03T06:26:09.814599596Z\"\n        }\n    }\n]\n"
+    }
+  },
+  "derived": {
+    "classification": "FAKE injected transport controls, not hosted observations; version based on retained PR1864 builder.txt, info based on retained PR1864 docker-info.json with classic Driver/DriverStatus substituted; scoped client ApiVersion changed to 1.49; inspect comes from the unmodified historical fixture; unused info fields omitted from this fake control",
+    "sourceRun": "https://github.com/minsago-elite/decomp_thing/actions/runs/41612674027",
+    "sourceHashes": {
+      "builder.txt": "829bf44d5e8fc5561b48f294ba2662ee835cf7f8bc4b39faba0476e3715a5bd0",
+      "docker-info.json": "23076770c1bd1de5961b7a027f004ecd8b74ab9f6fe665a2a744f158d5895767"
+    },
+    "version": {
+      "Client": {
+        "Version": "29.7.2",
+        "ApiVersion": "1.55",
+        "DefaultAPIVersion": "1.55",
+        "GitCommit": "a7dcaa6",
+        "GoVersion": "go1.26.5",
+        "Os": "linux",
+        "Arch": "amd64",
+        "BuildTime": "Wed Aug  5 18:27:38 2026",
+        "Context": "default"
+      },
+      "Server": {
+        "Platform": {
+          "Name": "Docker Engine - Community"
+        },
+        "Version": "29.7.2",
+        "ApiVersion": "1.55",
+        "MinAPIVersion": "1.40",
+        "Os": "linux",
+        "Arch": "amd64",
+        "Components": [
+          {
+            "Name": "Engine",
+            "Version": "29.7.2",
+            "Details": {
+              "ApiVersion": "1.55",
+              "Arch": "amd64",
+              "BuildTime": "Wed Aug  5 18:29:56 2026",
+              "Experimental": "false",
+              "GitCommit": "6a43e3d",
+              "GoVersion": "go1.26.5",
+              "KernelVersion": "7.0.0-1017-azure",
+              "MinAPIVersion": "1.40",
+              "Module": "github.com/moby/moby/v2",
+              "ModuleVersion": "v2.0.0+unknown",
+              "Os": "linux"
+            }
+          },
+          {
+            "Name": "containerd",
+            "Version": "v2.4.2",
+            "Details": {
+              "GitCommit": "b7a25261e029d68978bbf290df0a62fc819b3c51"
+            }
+          },
+          {
+            "Name": "runc",
+            "Version": "1.4.3",
+            "Details": {
+              "GitCommit": "v1.4.3-0-gbb14dab"
+            }
+          },
+          {
+            "Name": "docker-init",
+            "Version": "0.19.0",
+            "Details": {
+              "GitCommit": "de40ad0"
+            }
+          }
+        ],
+        "GitCommit": "6a43e3d",
+        "GoVersion": "go1.26.5",
+        "KernelVersion": "7.0.0-1017-azure",
+        "BuildTime": "2026-08-05T18:29:56.000000000+00:00"
+      }
+    },
+    "info": {
+      "ServerVersion": "29.7.2",
+      "Driver": "overlay2",
+      "DriverStatus": [
+        [
+          "Backing Filesystem",
+          "extfs"
+        ],
+        [
+          "Supports d_type",
+          "true"
+        ]
+      ]
+    },
+    "scopedVersion": {
+      "Client": {
+        "Version": "29.7.2",
+        "ApiVersion": "1.49",
+        "DefaultAPIVersion": "1.55",
+        "GitCommit": "a7dcaa6",
+        "GoVersion": "go1.26.5",
+        "Os": "linux",
+        "Arch": "amd64",
+        "BuildTime": "Wed Aug  5 18:27:38 2026",
+        "Context": "default"
+      },
+      "Server": {
+        "Platform": {
+          "Name": "Docker Engine - Community"
+        },
+        "Version": "29.7.2",
+        "ApiVersion": "1.55",
+        "MinAPIVersion": "1.40",
+        "Os": "linux",
+        "Arch": "amd64",
+        "Components": [
+          {
+            "Name": "Engine",
+            "Version": "29.7.2",
+            "Details": {
+              "ApiVersion": "1.55",
+              "Arch": "amd64",
+              "BuildTime": "Wed Aug  5 18:29:56 2026",
+              "Experimental": "false",
+              "GitCommit": "6a43e3d",
+              "GoVersion": "go1.26.5",
+              "KernelVersion": "7.0.0-1017-azure",
+              "MinAPIVersion": "1.40",
+              "Module": "github.com/moby/moby/v2",
+              "ModuleVersion": "v2.0.0+unknown",
+              "Os": "linux"
+            }
+          },
+          {
+            "Name": "containerd",
+            "Version": "v2.4.2",
+            "Details": {
+              "GitCommit": "b7a25261e029d68978bbf290df0a62fc819b3c51"
+            }
+          },
+          {
+            "Name": "runc",
+            "Version": "1.4.3",
+            "Details": {
+              "GitCommit": "v1.4.3-0-gbb14dab"
+            }
+          },
+          {
+            "Name": "docker-init",
+            "Version": "0.19.0",
+            "Details": {
+              "GitCommit": "de40ad0"
+            }
+          }
+        ],
+        "GitCommit": "6a43e3d",
+        "GoVersion": "go1.26.5",
+        "KernelVersion": "7.0.0-1017-azure",
+        "BuildTime": "2026-08-05T18:29:56.000000000+00:00"
+      }
+    }
+  }
+}

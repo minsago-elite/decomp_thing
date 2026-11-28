@@ -73,7 +73,11 @@ diagnostic prefixes, the `--version` banner and the `--help` usage text; the
 invocation `argv[0]` in the `-v` `COLLECT_GCC=` line; and the install prefix in
 path output and the complete `--prefix=` configure argument in `-v`. The capture
 re-runs every metadata case through a symlinked driver named `candidate-cc` and fails unless the driver-name substitutions account for
-every difference. Everything else must match byte-for-byte.
+every difference. Substitutions match the original output only; replacement values
+are not searched again. Earlier rules own overlapping spans, so an explicitly
+substituted `argv[0]` remains independent of the configured install prefix even
+when the invocation path contains the original prefix. Everything else must
+match byte-for-byte.
 
 Phase orchestration (`oracle/gcc/16.2.0/orchestration-phase-reference.json`,
 issue #712): compile to assembly, compile to object (plain, `-pipe`,

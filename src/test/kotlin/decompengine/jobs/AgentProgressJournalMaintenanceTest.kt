@@ -67,6 +67,52 @@ class AgentProgressJournalMaintenanceTest {
         assertEquals(ProgressRetentionResult.RETAINED, f.expire())
     }
 
+    @Test fun `due expiration invalidates listing at exact retention boundary including uncertain publication`() = Fixture().use { f ->
+        val originalMetadata = Files.readAllBytes(f.root.resolve("${f.job}/workflow-state.json"))
+        var reads = 0
+        val refusal = assertFailsWith<WorkflowStoreException> {
+            f.owner.inspectForListing(f.job, { relative, maximum ->
+                Files.readAllBytes(f.root.resolve(relative)).also { bytes ->
+                    reads++
+                    assertTrue(bytes.size <= maximum)
+                }
+            }) { captured ->
+                assertEquals(ProgressRetentionResult.EXPIRED, f.expire())
+                captured
+            }
+        }
+        assertEquals("JOB_RECORD_UNAVAILABLE", refusal.code)
+        assertEquals(2, reads, "due expiry must invalidate without retrying metadata")
+        assertContentEquals(originalMetadata, Files.readAllBytes(f.root.resolve("${f.job}/workflow-state.json")))
+        assertTrue(AgentProgressJournal.read(f.directory)!!.containsKey("retentionExpiredAt"))
+
+        // A fresh exact-boundary journal with a failure after synced preparation is uncertain and
+        // must also invalidate a listing even though its callback catches the public maintenance error.
+        val nextJob = JobStore(f.root).createFromUpload("fixture.elf", elfFixture()).id
+        val queued = f.owner.create(nextJob, (f.owner.inspect(nextJob) as WorkflowJobInspection.Available).snapshot.version,
+            NewWorkflowAttempt(WorkflowKind.EXPLORE, WorkflowExecutionLimits(60000u, 15000u, 1048576u, 16u))).attempt
+        val started = f.owner.transition(nextJob, queued.runId, queued.version, WorkflowTransition.Start).attempt
+        val terminal = f.owner.transition(nextJob, started.runId, started.version,
+            WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.NO_CHANGES)).attempt
+        val directory = f.root.resolve("$nextJob/reports/runs/${terminal.runId}")
+        AgentProgressJournal(directory, "explore").use { }
+        f.clock.now = f.clock.now.plus(Duration.ofHours(24))
+        var failureReads = 0
+        val failedRefusal = assertFailsWith<WorkflowStoreException> {
+            f.owner.inspectForListing(nextJob, { relative, maximum ->
+                Files.readAllBytes(f.root.resolve(relative)).also { bytes -> failureReads++; assertTrue(bytes.size <= maximum) }
+            }) { captured ->
+                assertEquals("PROGRESS_RETENTION_FAILED", assertFailsWith<WorkflowStoreException> {
+                    f.owner.expireProgressJournal(nextJob, terminal.runId, false,
+                        fault = { point -> if (point == ProgressRetentionFaultPoint.AFTER_TEMP_SYNC) error("private canary") })
+                }.code)
+                captured
+            }
+        }
+        assertEquals("JOB_RECORD_UNAVAILABLE", failedRefusal.code)
+        assertEquals(2, failureReads, "uncertain expiry must invalidate without retrying metadata")
+    }
+
     @Test fun `active attempts and absent journals do not acquire a retention publication`() {
         Fixture(terminal = false).use { f ->
             val original = Files.readAllBytes(f.journal)
@@ -180,6 +226,64 @@ class AgentProgressJournalMaintenanceTest {
         Files.createLink(f.journal, other)
         assertEquals("PROGRESS_RETENTION_FAILED", assertFailsWith<WorkflowStoreException> { f.expire() }.code)
         assertContentEquals(original, Files.readAllBytes(other))
+    }
+
+    @Test fun `filesystem retention outcomes and failures invalidate listing captures`() {
+        for (mode in listOf("expired", "later-retained", "absent", "writer", "invalid-duration") +
+            ProgressRetentionFaultPoint.entries.map { it.name }) Fixture().use { f ->
+            if (mode == "later-retained") assertEquals(ProgressRetentionResult.EXPIRED, f.expire())
+            if (mode == "absent") Files.delete(f.journal)
+            val writer = if (mode == "writer") AgentProgressJournal(f.directory, "explore") else null
+            try {
+                val failure = assertFailsWith<WorkflowStoreException>(mode) {
+                    f.owner.inspectForListing(f.job, { relative, _ -> Files.readAllBytes(f.root.resolve(relative)) }) {
+                        when (mode) {
+                            "expired" -> assertEquals(ProgressRetentionResult.EXPIRED, f.expire())
+                            "later-retained" -> assertEquals(ProgressRetentionResult.RETAINED, f.expire())
+                            "absent" -> assertEquals(ProgressRetentionResult.NO_JOURNAL, f.expire())
+                            "writer" -> assertEquals(ProgressRetentionResult.WRITER_ACTIVE, f.expire())
+                            "invalid-duration" -> assertFailsWith<WorkflowStoreException> {
+                                f.owner.expireProgressJournal(f.job, f.run.runId, false, Duration.ZERO)
+                            }
+                            else -> assertFailsWith<SimulatedCrash> {
+                                f.expire { if (it.name == mode) throw SimulatedCrash() }
+                            }
+                        }
+                    }
+                }
+                assertEquals("JOB_RECORD_UNAVAILABLE", failure.code, mode)
+            } finally { writer?.close() }
+        }
+    }
+
+    @Test fun `retention filesystem boundary is crossed only after pure admission guards`() {
+        Fixture().use { f ->
+            val retention = Duration.ofHours(48)
+            val earlyAttempts = listOf(
+                "active" to f.run.copy(state = WorkflowRunState.RUNNING, endedAt = null, terminalReason = null),
+                "publication-pending" to f.run.copy(candidate = WorkflowCandidate("revision_candidate", "ab".repeat(32))),
+                "pinned" to f.run.copy(progressRetentionPinned = true),
+            )
+            for ((name, attempt) in earlyAttempts) {
+                var entries = 0
+                assertEquals(ProgressRetentionResult.RETAINED,
+                    AgentProgressJournalMaintenance.expire(f.root, attempt, f.clock.now, retention,
+                        beforeFilesystem = { entries++ }), name)
+                assertEquals(0, entries, "$name entered filesystem retention work")
+            }
+
+            var recentEntries = 0
+            assertEquals(ProgressRetentionResult.RETAINED,
+                AgentProgressJournalMaintenance.expire(f.root, f.run, f.clock.now, retention,
+                    beforeFilesystem = { recentEntries++ }), "not-old-enough")
+            assertEquals(0, recentEntries, "a recent terminal run entered filesystem retention work")
+
+            var eligibleEntries = 0
+            assertEquals(ProgressRetentionResult.EXPIRED,
+                AgentProgressJournalMaintenance.expire(f.root, f.run, f.clock.now, Duration.ofHours(1),
+                    beforeFilesystem = { eligibleEntries++ }), "eligible")
+            assertEquals(1, eligibleEntries, "eligible expiry must announce the filesystem boundary exactly once")
+        }
     }
 
     private class SimulatedCrash : Error("synthetic interruption")

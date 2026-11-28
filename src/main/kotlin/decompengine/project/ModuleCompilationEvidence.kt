@@ -10,6 +10,7 @@ internal data class ModuleCompilationEvidence(
     val returnCode: Int?,
     val diagnosticsSha256: String,
     val diagnosticsBytes: Long,
+    val diagnosticsPrefix: String = "",
 ) {
     val passed: Boolean get() = outcome == "passed" && returnCode == 0
 

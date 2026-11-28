@@ -15,6 +15,7 @@ internal class WebEventStream(
     private val pollMs: Long = 1000,
     private val heartbeatMs: Long = 15_000,
     private val clock: Clock = Clock.systemUTC(),
+    private val deleted: (String) -> Boolean = { false },
 ) {
     init { require(pollMs in 1..1000 && heartbeatMs in 1..15_000) }
 
@@ -29,7 +30,8 @@ internal class WebEventStream(
             throw WebAccessDenied(400, "INVALID_CURSOR", "Use one resume position: Last-Event-ID, after or cursor.")
         }
         val initialCursor = lastId ?: queryCursor
-        resources.submit(session, AutoCloseable { exchange.close() }) {
+        val accounting = WebResponseAccounting.current()
+        resources.submit(session, AutoCloseable { exchange.close() }) { WebResponseAccounting.recordAfter(accounting, exchange) {
             var cursor = initialCursor
             var latestBytes: ByteArray? = null
             fun authorize() {
@@ -58,7 +60,8 @@ internal class WebEventStream(
                         write(": connected\n\n".toByteArray())
                     }
                     for (item in page.getValue("items").jsonArray) {
-                        val event = item.jsonObject
+                        // The same listener policy as the polling page, so live and replayed frames match.
+                        val event = WebRedactionPolicy.of(exchange).json(item.jsonObject).jsonObject
                         write(webSseFrame(event))
                         cursor = event.getValue("cursor").jsonPrimitive.content
                     }
@@ -90,7 +93,9 @@ internal class WebEventStream(
             } catch (failure: WebJobServiceException) {
                 if (exchange.responseCode == -1) {
                     val missing = failure.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")
-                    access.sendDenied(exchange, WebAccessDenied(if (missing) 404 else 503,
+                    access.sendDenied(exchange, if (missing && deleted(jobId)) WebAccessDenied(410, "RESOURCE_GONE",
+                        "This job was deleted. Only its deletion record is retained.")
+                    else WebAccessDenied(if (missing) 404 else 503,
                         if (missing) "NOT_FOUND" else "PROGRESS_UNAVAILABLE", "The requested progress is unavailable."))
                 }
             } catch (_: InterruptedException) {
@@ -99,7 +104,9 @@ internal class WebEventStream(
                 if (exchange.responseCode == -1) access.sendDenied(exchange,
                     WebAccessDenied(503, "PROGRESS_UNAVAILABLE", "The requested progress is unavailable."))
             }
-        }
+        } }
+        // The stream worker now owns this exchange and records its outcome when it ends.
+        WebResponseAccounting.deferCurrent()
     }
 }
 

@@ -70,12 +70,18 @@ internal object DescriptorBoundAtomicStateFile {
     /** Preflights the same owner-only parent requirement used by every publication/read path. */
     fun requireOwnerOnlyParent(parent: LinuxDescriptor) = requireParent(parent)
 
+    /**
+     * [beforePublication] admits a new final name after preparation, including exact-temporary
+     * recovery. It does not bound the following validation or an in-flight rename. An already
+     * published exact target remains an idempotent read and does not need new admission.
+     */
     fun publishNoReplace(
         parent: LinuxDescriptor,
         name: String,
         bytes: ByteArray,
         maximumBytes: Int,
         faultInjector: DescriptorBoundStateFaultInjector? = null,
+        beforePublication: (() -> Unit)? = null,
     ): DescriptorBoundStateSnapshot = publishNoReplaceWithMode(
         parent,
         name,
@@ -84,6 +90,7 @@ internal object DescriptorBoundAtomicStateFile {
         MAXIMUM_STATE_FILE_BYTES,
         OWNER_READ_ONLY_MODE,
         faultInjector,
+        beforePublication,
     )
 
     /** Larger immutable inventory manifests; ordinary journal records retain their one-MiB limit. */
@@ -125,6 +132,7 @@ internal object DescriptorBoundAtomicStateFile {
         maximumAllowedBytes: Int,
         ownerMode: Int,
         faultInjector: DescriptorBoundStateFaultInjector?,
+        beforePublication: (() -> Unit)? = null,
     ): DescriptorBoundStateSnapshot {
         requireName(name)
         require(maximumBytes in 1..maximumAllowedBytes)
@@ -134,6 +142,17 @@ internal object DescriptorBoundAtomicStateFile {
         val expectedBytes = bytes.copyOf()
         requireParent(parent)
         val temporaryName = temporaryName(name)
+
+        fun requireCurrentTemporary(expectedIdentity: LinuxFileIdentity, pinned: LinuxDescriptor) {
+            requireParent(parent)
+            val current = readRequiredWithMode(parent, temporaryName, maximumBytes, ownerMode)
+            requireExactBytes(current.bytes, expectedBytes, "immutable state temporary")
+            val pinnedIdentity = pinned.whileOpen(LinuxFilesystemSyscalls::identity)
+            if (pinnedIdentity != expectedIdentity || current.identity != pinnedIdentity) {
+                stateFail("immutable state temporary changed identity before publication")
+            }
+            requireNamedIdentity(parent, temporaryName, pinnedIdentity, "immutable state temporary")
+        }
 
         readWithModeOrNull(parent, name, maximumBytes, ownerMode)?.let { existing ->
             requireExactBytes(existing.bytes, expectedBytes, "immutable state target")
@@ -146,9 +165,10 @@ internal object DescriptorBoundAtomicStateFile {
             return readRequiredWithMode(parent, name, maximumBytes, ownerMode)
         }
 
-        readWithModeOrNull(parent, temporaryName, maximumBytes, ownerMode)?.let { temporary ->
+        inspectWithModeOrNull(parent, temporaryName, maximumBytes, maximumAllowedBytes, ownerMode)?.use { temporary ->
             requireExactBytes(temporary.bytes, expectedBytes, "immutable state temporary")
-            requireNamedIdentity(parent, temporaryName, temporary.identity, "immutable state temporary")
+            beforePublication?.invoke()
+            requireCurrentTemporary(temporary.identity, temporary.descriptor)
             LinuxFilesystemSyscalls.renameNoReplace(parent.fd, temporaryName, name)
             faultInjector?.hit(DescriptorBoundStateFaultPoint.AFTER_PUBLICATION_RENAME)
             LinuxFilesystemSyscalls.synchronize(parent)
@@ -180,6 +200,8 @@ internal object DescriptorBoundAtomicStateFile {
             LinuxFilesystemSyscalls.synchronize(parent)
             faultInjector?.hit(DescriptorBoundStateFaultPoint.AFTER_TEMPORARY_DIRECTORY_SYNC)
 
+            beforePublication?.invoke()
+            requireCurrentTemporary(materialized.identity, prepared)
             LinuxFilesystemSyscalls.renameNoReplace(parent.fd, temporaryName, name)
             faultInjector?.hit(DescriptorBoundStateFaultPoint.AFTER_PUBLICATION_RENAME)
             LinuxFilesystemSyscalls.synchronize(parent)

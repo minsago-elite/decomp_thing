@@ -1,0 +1,1838 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/native-inferred-interface-observations-v1.schema.json",
+  "title": "Raw inferred native interfaces and bounded type graphs (no oracle or scoring authority)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "addressSpaces",
+    "bindings",
+    "configuration",
+    "dataOrganization",
+    "policy",
+    "records",
+    "schemaVersion",
+    "summary"
+  ],
+  "properties": {
+    "addressSpaces": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/addressSpace"
+      },
+      "minItems": 1
+    },
+    "bindings": {
+      "$ref": "#/$defs/bindings"
+    },
+    "configuration": {
+      "$ref": "#/$defs/configuration"
+    },
+    "dataOrganization": {
+      "$ref": "#/$defs/dataOrganization"
+    },
+    "policy": {
+      "const": "ghidra-native-inferred-interface-observations-v1"
+    },
+    "records": {
+      "type": "array",
+      "maxItems": 4724288,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/function"
+          },
+          {
+            "$ref": "#/$defs/root"
+          },
+          {
+            "$ref": "#/$defs/node"
+          },
+          {
+            "$ref": "#/$defs/edge"
+          }
+        ]
+      }
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "summary": {
+      "$ref": "#/$defs/summary"
+    }
+  },
+  "$defs": {
+    "address": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/locatedAddress"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "no-address"
+            }
+          }
+        }
+      ]
+    },
+    "locatedAddress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "spaceIndex",
+        "offsetBits"
+      ],
+      "properties": {
+        "spaceIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "offsetBits": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$"
+        },
+        "kind": {
+          "const": "address"
+        }
+      }
+    },
+    "addressSpace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "name",
+        "type",
+        "sizeBits",
+        "addressableUnitSize",
+        "overlay",
+        "signedOffsets"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "type": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 15
+        },
+        "sizeBits": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "addressableUnitSize": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "overlay": {
+          "type": "boolean"
+        },
+        "signedOffsets": {
+          "type": "boolean"
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "size",
+        "autoStorage",
+        "autoParameterType",
+        "forcedIndirect",
+        "varnodes"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "assigned",
+            "bad",
+            "unassigned",
+            "void",
+            "absent"
+          ]
+        },
+        "size": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "autoStorage": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "autoParameterType": {
+          "enum": [
+            null,
+            "THIS",
+            "RETURN_STORAGE_PTR"
+          ]
+        },
+        "forcedIndirect": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "varnodes": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "address",
+              "size"
+            ],
+            "properties": {
+              "address": {
+                "$ref": "#/$defs/locatedAddress"
+              },
+              "size": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2147483647
+              }
+            }
+          }
+        }
+      }
+    },
+    "listingBindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "collectorSha256",
+        "compilerSpecId",
+        "ghidraArchiveSha256",
+        "imageBase",
+        "inputSha256",
+        "languageId",
+        "programModelBytes",
+        "programModelExporterSha256",
+        "programModelSha256"
+      ],
+      "properties": {
+        "collectorSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "compilerSpecId": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "ghidraArchiveSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "imageBase": {
+          "$ref": "#/$defs/locatedAddress"
+        },
+        "inputSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "languageId": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "programModelBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 536870912
+        },
+        "programModelExporterSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "programModelSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "listingBindings",
+        "collectorSha256",
+        "wrapperSha256",
+        "nativeDecompilerSha256",
+        "listingBytes",
+        "listingSha256",
+        "listingManifestSha256",
+        "configurationSha256",
+        "typeGraphSha256"
+      ],
+      "properties": {
+        "listingBindings": {
+          "$ref": "#/$defs/listingBindings"
+        },
+        "collectorSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "wrapperSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "nativeDecompilerSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "listingBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1073741824
+        },
+        "listingSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "listingManifestSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "configurationSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "typeGraphSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "simplificationStyle",
+        "syntaxTree",
+        "cCode",
+        "maximumInstructions",
+        "maximumPayloadMBytes",
+        "maximumJumpTableEntries",
+        "maximumSecondsPerFunction",
+        "maximumOperationMillis",
+        "attemptsPerFunction"
+      ],
+      "properties": {
+        "simplificationStyle": {
+          "const": "decompile"
+        },
+        "syntaxTree": {
+          "const": true
+        },
+        "cCode": {
+          "const": false
+        },
+        "maximumInstructions": {
+          "const": 500000
+        },
+        "maximumPayloadMBytes": {
+          "const": 50
+        },
+        "maximumJumpTableEntries": {
+          "const": 1024
+        },
+        "maximumSecondsPerFunction": {
+          "const": 60
+        },
+        "maximumOperationMillis": {
+          "const": 120000
+        },
+        "attemptsPerFunction": {
+          "const": 1
+        }
+      }
+    },
+    "dataOrganization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pointerSize",
+        "pointerShift",
+        "charSize",
+        "wideCharSize",
+        "shortSize",
+        "integerSize",
+        "longSize",
+        "longLongSize",
+        "floatSize",
+        "doubleSize",
+        "longDoubleSize",
+        "absoluteMaxAlignment",
+        "machineAlignment",
+        "defaultAlignment",
+        "defaultPointerAlignment",
+        "bigEndian",
+        "signedChar",
+        "sizeAlignments",
+        "bitFieldPacking"
+      ],
+      "properties": {
+        "pointerSize": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "pointerShift": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "charSize": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "wideCharSize": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "shortSize": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "integerSize": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "longSize": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "longLongSize": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "floatSize": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "doubleSize": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "longDoubleSize": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "absoluteMaxAlignment": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "machineAlignment": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "defaultAlignment": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "defaultPointerAlignment": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "bigEndian": {
+          "type": "boolean"
+        },
+        "signedChar": {
+          "type": "boolean"
+        },
+        "sizeAlignments": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "size",
+              "alignment"
+            ],
+            "properties": {
+              "size": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              "alignment": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              }
+            }
+          }
+        },
+        "bitFieldPacking": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "msConvention",
+            "typeAlignmentEnabled",
+            "zeroLengthBoundary"
+          ],
+          "properties": {
+            "msConvention": {
+              "type": "boolean"
+            },
+            "typeAlignmentEnabled": {
+              "type": "boolean"
+            },
+            "zeroLengthBoundary": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            }
+          }
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "completed",
+        "valid",
+        "timedOut",
+        "cancelled",
+        "failedToStart",
+        "diagnostic"
+      ],
+      "properties": {
+        "completed": {
+          "type": "boolean"
+        },
+        "valid": {
+          "type": "boolean"
+        },
+        "timedOut": {
+          "type": "boolean"
+        },
+        "cancelled": {
+          "type": "boolean"
+        },
+        "failedToStart": {
+          "type": "boolean"
+        },
+        "diagnostic": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      }
+    },
+    "prototype": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parameterCountsMatch",
+        "backedByLocalSymbols",
+        "varArgs",
+        "hasThis",
+        "noReturn",
+        "inline",
+        "constructor",
+        "destructor",
+        "parameterCount",
+        "localSymbolParameterCount",
+        "modelName",
+        "extraPop",
+        "returnType",
+        "returnStorage",
+        "formalEffectiveRelation",
+        "allMappings",
+        "privateFlags"
+      ],
+      "properties": {
+        "parameterCountsMatch": {
+          "type": "boolean"
+        },
+        "backedByLocalSymbols": {
+          "type": "boolean"
+        },
+        "varArgs": {
+          "type": "boolean"
+        },
+        "hasThis": {
+          "type": "boolean"
+        },
+        "noReturn": {
+          "type": "boolean"
+        },
+        "inline": {
+          "type": "boolean"
+        },
+        "constructor": {
+          "type": "boolean"
+        },
+        "destructor": {
+          "type": "boolean"
+        },
+        "parameterCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "localSymbolParameterCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "modelName": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "extraPop": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "returnType": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 199999
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "returnStorage": {
+          "$ref": "#/$defs/storage"
+        },
+        "formalEffectiveRelation": {
+          "const": "unavailable-native-api"
+        },
+        "allMappings": {
+          "const": "first-mapping-only"
+        },
+        "privateFlags": {
+          "const": "unavailable-native-api"
+        }
+      }
+    },
+    "parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "typeLocked",
+        "nameLocked",
+        "isThisPointer",
+        "isHiddenReturn",
+        "index",
+        "categoryIndex",
+        "highParamSlot",
+        "highVariableState",
+        "nativeIdBits",
+        "name",
+        "type",
+        "storage",
+        "firstUse",
+        "formalEffectiveRelation",
+        "forcedIndirectMeaning",
+        "allMappings"
+      ],
+      "properties": {
+        "typeLocked": {
+          "type": "boolean"
+        },
+        "nameLocked": {
+          "type": "boolean"
+        },
+        "isThisPointer": {
+          "type": "boolean"
+        },
+        "isHiddenReturn": {
+          "type": "boolean"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1023
+        },
+        "categoryIndex": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "highParamSlot": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "highVariableState": {
+          "enum": [
+            "absent",
+            "parameter",
+            "other"
+          ]
+        },
+        "nativeIdBits": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 199999
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "storage": {
+          "$ref": "#/$defs/storage"
+        },
+        "firstUse": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/address"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "formalEffectiveRelation": {
+          "const": "unavailable-native-api"
+        },
+        "forcedIndirectMeaning": {
+          "const": "unavailable-for-plain-decoded-storage"
+        },
+        "allMappings": {
+          "const": "first-mapping-only"
+        }
+      }
+    },
+    "function": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recordKind",
+        "functionOrdinal",
+        "entry",
+        "isExternal",
+        "isThunk",
+        "disposition",
+        "attempt",
+        "result",
+        "prototype",
+        "parameters"
+      ],
+      "properties": {
+        "recordKind": {
+          "const": "function"
+        },
+        "functionOrdinal": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 131071
+        },
+        "entry": {
+          "$ref": "#/$defs/locatedAddress"
+        },
+        "isExternal": {
+          "type": "boolean"
+        },
+        "isThunk": {
+          "type": "boolean"
+        },
+        "disposition": {
+          "enum": [
+            "high-function-observed",
+            "not-attempted-external",
+            "not-attempted-unsupported-body",
+            "decompile-timeout",
+            "decompile-cancelled",
+            "decompiler-start-failed",
+            "decompiler-error",
+            "completed-without-high-function",
+            "unsupported-high-representation"
+          ]
+        },
+        "attempt": {
+          "enum": [
+            0,
+            1
+          ]
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/result"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prototype": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/prototype"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parameters": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "$ref": "#/$defs/parameter"
+          }
+        }
+      }
+    },
+    "root": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recordKind",
+        "channel",
+        "functionOrdinal",
+        "role",
+        "slot",
+        "listingTypeOrdinal",
+        "node"
+      ],
+      "properties": {
+        "recordKind": {
+          "const": "type-root"
+        },
+        "channel": {
+          "enum": [
+            "listing",
+            "inferred"
+          ]
+        },
+        "functionOrdinal": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 131071
+        },
+        "role": {
+          "enum": [
+            "return-formal",
+            "return-effective",
+            "parameter-formal",
+            "parameter-effective",
+            "inferred-return",
+            "inferred-parameter"
+          ]
+        },
+        "slot": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 1023
+        },
+        "listingTypeOrdinal": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 524287
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "node": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 199999
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recordKind",
+        "channel",
+        "functionOrdinal",
+        "id",
+        "nativeClass",
+        "kind",
+        "length",
+        "alignedLength",
+        "alignment",
+        "zeroLength",
+        "notYetDefined",
+        "undefined",
+        "expansion",
+        "childCount",
+        "details"
+      ],
+      "properties": {
+        "recordKind": {
+          "const": "type-node"
+        },
+        "channel": {
+          "enum": [
+            "listing",
+            "inferred"
+          ]
+        },
+        "functionOrdinal": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 131071
+        },
+        "id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 199999
+        },
+        "nativeClass": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "kind": {
+          "enum": [
+            "integer",
+            "float",
+            "void",
+            "undefined",
+            "unsupported",
+            "pointer",
+            "array",
+            "typedef",
+            "bitfield",
+            "enum",
+            "function-definition",
+            "structure",
+            "union"
+          ]
+        },
+        "length": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "alignedLength": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "alignment": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "zeroLength": {
+          "type": "boolean"
+        },
+        "notYetDefined": {
+          "type": "boolean"
+        },
+        "undefined": {
+          "type": "boolean"
+        },
+        "expansion": {
+          "enum": [
+            "terminal",
+            "expanded",
+            "partial",
+            "unsupported"
+          ]
+        },
+        "childCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4096
+        },
+        "details": {
+          "type": "object"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "integer"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "signed"
+                ],
+                "properties": {
+                  "signed": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "float"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [],
+                "properties": {}
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "void"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [],
+                "properties": {}
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "undefined"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [],
+                "properties": {}
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "unsupported"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [],
+                "properties": {}
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "pointer"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "pointerSize"
+                ],
+                "properties": {
+                  "pointerSize": {
+                    "type": "integer",
+                    "minimum": -2147483648,
+                    "maximum": 2147483647
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "array"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "elementCount",
+                  "elementLength",
+                  "extentState"
+                ],
+                "properties": {
+                  "elementCount": {
+                    "type": "integer",
+                    "minimum": -2147483648,
+                    "maximum": 2147483647
+                  },
+                  "elementLength": {
+                    "type": "integer",
+                    "minimum": -2147483648,
+                    "maximum": 2147483647
+                  },
+                  "extentState": {
+                    "enum": [
+                      "consistent",
+                      "inconsistent",
+                      "zero-length",
+                      "unknown"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "typedef"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "autoNamed",
+                  "settingsState"
+                ],
+                "properties": {
+                  "autoNamed": {
+                    "type": "boolean"
+                  },
+                  "settingsState": {
+                    "const": "unavailable-bounded-count-api"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "bitfield"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "storageSize",
+                  "declaredBitSize",
+                  "effectiveBitSize",
+                  "bitOffset",
+                  "baseTypeSize",
+                  "bigEndian"
+                ],
+                "properties": {
+                  "storageSize": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2147483647
+                  },
+                  "declaredBitSize": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2147483647
+                  },
+                  "effectiveBitSize": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2147483647
+                  },
+                  "bitOffset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2147483647
+                  },
+                  "baseTypeSize": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2147483647
+                  },
+                  "bigEndian": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "enum"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "enumeratorCount",
+                  "signedState",
+                  "enumeratorsState"
+                ],
+                "properties": {
+                  "enumeratorCount": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2147483647
+                  },
+                  "signedState": {
+                    "type": "string",
+                    "maxLength": 4096
+                  },
+                  "enumeratorsState": {
+                    "const": "not-captured"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "function-definition"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "convention",
+                  "varArgs",
+                  "noReturn",
+                  "argumentsState"
+                ],
+                "properties": {
+                  "convention": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 4096
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "varArgs": {
+                    "type": "boolean"
+                  },
+                  "noReturn": {
+                    "type": "boolean"
+                  },
+                  "argumentsState": {
+                    "const": "unavailable-bounded-count-api"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "structure"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "componentCount",
+                  "definedComponentCount",
+                  "packingType",
+                  "explicitPackingValue",
+                  "alignmentType",
+                  "explicitMinimumAlignment"
+                ],
+                "properties": {
+                  "componentCount": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4096
+                  },
+                  "definedComponentCount": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4096
+                  },
+                  "packingType": {
+                    "type": "string",
+                    "maxLength": 4096
+                  },
+                  "explicitPackingValue": {
+                    "type": "integer",
+                    "minimum": -2147483648,
+                    "maximum": 2147483647
+                  },
+                  "alignmentType": {
+                    "type": "string",
+                    "maxLength": 4096
+                  },
+                  "explicitMinimumAlignment": {
+                    "type": "integer",
+                    "minimum": -2147483648,
+                    "maximum": 2147483647
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "union"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "componentCount",
+                  "definedComponentCount",
+                  "packingType",
+                  "explicitPackingValue",
+                  "alignmentType",
+                  "explicitMinimumAlignment"
+                ],
+                "properties": {
+                  "componentCount": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4096
+                  },
+                  "definedComponentCount": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4096
+                  },
+                  "packingType": {
+                    "type": "string",
+                    "maxLength": 4096
+                  },
+                  "explicitPackingValue": {
+                    "type": "integer",
+                    "minimum": -2147483648,
+                    "maximum": 2147483647
+                  },
+                  "alignmentType": {
+                    "type": "string",
+                    "maxLength": 4096
+                  },
+                  "explicitMinimumAlignment": {
+                    "type": "integer",
+                    "minimum": -2147483648,
+                    "maximum": 2147483647
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recordKind",
+        "channel",
+        "functionOrdinal",
+        "source",
+        "ordinal",
+        "relation",
+        "target",
+        "referenceState",
+        "offset",
+        "length",
+        "fieldName",
+        "undefined",
+        "bitField",
+        "zeroBitField"
+      ],
+      "properties": {
+        "recordKind": {
+          "const": "type-edge"
+        },
+        "channel": {
+          "enum": [
+            "listing",
+            "inferred"
+          ]
+        },
+        "functionOrdinal": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 131071
+        },
+        "source": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 199999
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
+        },
+        "relation": {
+          "enum": [
+            "pointer-target",
+            "array-element",
+            "typedef-target",
+            "component",
+            "bitfield-base",
+            "function-return"
+          ]
+        },
+        "target": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 199999
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "referenceState": {
+          "enum": [
+            "new-node",
+            "backedge",
+            "reused-node",
+            "missing"
+          ]
+        },
+        "offset": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "length": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fieldName": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "undefined": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bitField": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "zeroBitField": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "functions",
+        "internalFunctions",
+        "externalFunctions",
+        "thunks",
+        "attempted",
+        "observed",
+        "parameters",
+        "storageVarnodes",
+        "roots",
+        "graphNodes",
+        "graphEdges",
+        "graphWork",
+        "dispositions",
+        "coverage",
+        "authoritativeOracleEvidence",
+        "recoveredModelScored",
+        "productionInterfacesAdmitted",
+        "releaseEligible",
+        "abiClassification",
+        "sourceTypeIdentity"
+      ],
+      "properties": {
+        "functions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1073741824
+        },
+        "internalFunctions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1073741824
+        },
+        "externalFunctions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1073741824
+        },
+        "thunks": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1073741824
+        },
+        "attempted": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1073741824
+        },
+        "observed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1073741824
+        },
+        "parameters": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1073741824
+        },
+        "storageVarnodes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1073741824
+        },
+        "roots": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1073741824
+        },
+        "graphNodes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1073741824
+        },
+        "graphEdges": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1073741824
+        },
+        "graphWork": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1073741824
+        },
+        "dispositions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "high-function-observed",
+            "not-attempted-external",
+            "not-attempted-unsupported-body",
+            "decompile-timeout",
+            "decompile-cancelled",
+            "decompiler-start-failed",
+            "decompiler-error",
+            "completed-without-high-function",
+            "unsupported-high-representation"
+          ],
+          "properties": {
+            "high-function-observed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1073741824
+            },
+            "not-attempted-external": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1073741824
+            },
+            "not-attempted-unsupported-body": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1073741824
+            },
+            "decompile-timeout": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1073741824
+            },
+            "decompile-cancelled": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1073741824
+            },
+            "decompiler-start-failed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1073741824
+            },
+            "decompiler-error": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1073741824
+            },
+            "completed-without-high-function": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1073741824
+            },
+            "unsupported-high-representation": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1073741824
+            }
+          }
+        },
+        "coverage": {
+          "const": "all-currently-listed-internal-and-external-functions"
+        },
+        "authoritativeOracleEvidence": {
+          "const": false
+        },
+        "recoveredModelScored": {
+          "const": false
+        },
+        "productionInterfacesAdmitted": {
+          "const": false
+        },
+        "releaseEligible": {
+          "const": false
+        },
+        "abiClassification": {
+          "const": "not-captured"
+        },
+        "sourceTypeIdentity": {
+          "const": "not-captured"
+        }
+      }
+    }
+  }
+}

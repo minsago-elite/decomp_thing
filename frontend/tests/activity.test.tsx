@@ -169,13 +169,16 @@ it('links the exact attempt and exposes digest-only correlation without inventin
   const link = await screen.findByRole('link', { name: `Attempt ${snapshot.data.run.runId}` });
   expect(link.getAttribute('href')).toBe(`/nested/jobs/${snapshot.data.run.jobId}/runs/${snapshot.data.run.runId}`);
   fireEvent.click(screen.getByText('Correlation details for sequence 9007199254740993'));
-  expect(screen.getByText('e'.repeat(64))).toBeTruthy();
+  expect(await screen.findByText('e'.repeat(64))).toBeTruthy();
   expect(screen.getByText('f'.repeat(64))).toBeTruthy();
   expect(screen.getByText('b'.repeat(64))).toBeTruthy();
   expect(screen.getByText('d'.repeat(64))).toBeTruthy();
   expect(screen.getByText('turn_fixture_1')).toBeTruthy();
   expect(screen.getByText('Writer: writer_fixture_1.')).toBeTruthy();
-  expect(screen.getByText(/Task, session and revision evidence pages are not available/)).toBeTruthy();
+  expect(screen.getByText(/Each one states whether this view links it/)).toBeTruthy();
+  expect(await screen.findByText(/Does not match this attempt's input or result revision/)).toBeTruthy();
+  expect(screen.getByText(/No session evidence page is published/)).toBeTruthy();
+  expect(screen.getByText(/No task evidence page is published/)).toBeTruthy();
   expect(screen.getAllByRole('link')).toHaveLength(1);
 });
 

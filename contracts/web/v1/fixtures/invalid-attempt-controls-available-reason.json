@@ -1,0 +1,26 @@
+{
+  "apiVersion": 1,
+  "kind": "attemptControls",
+  "requestId": "request_controls_1",
+  "data": {
+    "jobId": "1234567890abcdef1234567890abcdef",
+    "runId": "run_recoverable_1",
+    "runVersion": "run_version_4",
+    "state": "failed",
+    "inputRevisionId": null,
+    "cancel": {
+      "available": false,
+      "reason": "ATTEMPT_TERMINAL"
+    },
+    "retry": {
+      "available": true,
+      "reason": "ATTEMPT_SUPERSEDED"
+    },
+    "resume": {
+      "available": false,
+      "reason": "RESUME_UNSUPPORTED"
+    },
+    "resumeRestores": null,
+    "successorRunId": null
+  }
+}

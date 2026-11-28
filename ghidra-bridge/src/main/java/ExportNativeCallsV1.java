@@ -20,6 +20,7 @@ public final class ExportNativeCallsV1 extends GhidraScript {
     private static final int MAXIMUM_FUNCTIONS = 131072;
     private static final long MAXIMUM_INSTRUCTIONS = 100000000L;
     private static final long MAXIMUM_SITES = 10000000L;
+    private static final long MAXIMUM_REFERENCE_VISITS = 100000000L;
     private static final int MAXIMUM_REFERENCES = 64;
     private static final int MAXIMUM_SITE_REFERENCES = 256;
     private static final int MAXIMUM_RECORD_BYTES = 1024 * 1024;
@@ -29,6 +30,7 @@ public final class ExportNativeCallsV1 extends GhidraScript {
     private final TaskMonitor task;
     private final List<AddressSpace> spaces = new ArrayList<>();
     private final Map<AddressSpace, Integer> spaceIndices = new HashMap<>();
+    private long referenceVisits;
 
     public ExportNativeCallsV1() { program = null; task = null; }
     private ExportNativeCallsV1(Program program, TaskMonitor task) { this.program = Objects.requireNonNull(program); this.task = Objects.requireNonNull(task); }
@@ -105,17 +107,14 @@ public final class ExportNativeCallsV1 extends GhidraScript {
                     if (count == null) totals.unownedInstructions++; else { totals.ownedInstructions++; count.instructions++; }
                     var context = instruction.getInstructionContext(); var prototype = instruction.getPrototype();
                     FlowType raw = prototype.getFlowType(context); FlowType effective = instruction.getFlowType();
-                    Address[] rawTargets = Objects.requireNonNull(prototype.getFlows(context), "null prototype flows");
-                    if (rawTargets.length > MAXIMUM_REFERENCES) throw new IllegalStateException("prototype target bound exceeded");
-                    rawTargets = rawTargets.clone(); Arrays.sort(rawTargets, this::compare);
-                    for (int i = 1; i < rawTargets.length; i++) if (compare(rawTargets[i-1], rawTargets[i]) == 0) throw new IllegalStateException("duplicate prototype target");
-                    Reference[] refs = references(instruction.getAddress());
-                    boolean analyzedCall = effective.isCall();
-                    boolean resolvedJump = false;
-                    for (Reference ref : refs) {
-                        if (ref.getReferenceType().isCall()) analyzedCall = true;
-                        if (!ref.getReferenceType().isIndirect() && (ref.getReferenceType().isCall() || ref.getReferenceType().isJump()) && (ref.getToAddress().isMemoryAddress() || ref.getToAddress().isExternalAddress())) resolvedJump = true;
-                    }
+                    ReferenceScan scan = scanReferences(instruction.getAddress());
+                    boolean analyzedCall = effective.isCall() || scan.analyzedCall;
+                    boolean resolvedJump = scan.resolvedJump;
+                    // Ordinary branches/switches need classification, not an emitted target array.
+                    // Prototype flows have no iterator API; request them only for a possible site.
+                    boolean possibleTail = raw.isJump() && !raw.isConditional() && !raw.isComputed();
+                    Address[] rawTargets = raw.isCall() || analyzedCall || possibleTail
+                        ? Objects.requireNonNull(prototype.getFlows(context), "null prototype flows") : new Address[0];
                     boolean tail = false;
                     if (!raw.isCall() && !analyzedCall && raw.isJump() && !raw.isConditional() && !raw.isComputed() && rawTargets.length == 1) {
                         Function target = program.getFunctionManager().getFunctionAt(rawTargets[0]);
@@ -125,6 +124,10 @@ public final class ExportNativeCallsV1 extends GhidraScript {
                     if (raw.isJump() && kind == null) { totals.ordinaryJumps++; if (count != null) count.ordinaryJumps++; }
                     if (raw.isJump() && raw.isComputed() && !resolvedJump) { totals.unresolvedComputedJumps++; if(count != null) count.unresolvedComputedJumps++; }
                     if (kind == null) continue;
+                    if (rawTargets.length > MAXIMUM_REFERENCES) throw referenceFailure("prototype target bound exceeded", instruction.getAddress(), rawTargets.length, MAXIMUM_REFERENCES);
+                    rawTargets = rawTargets.clone(); Arrays.sort(rawTargets, this::compare);
+                    for (int i = 1; i < rawTargets.length; i++) if (compare(rawTargets[i-1], rawTargets[i]) == 0) throw new IllegalStateException("duplicate prototype target");
+                    Reference[] refs = retainedReferences(instruction.getAddress(), scan);
                     if (++totals.sites > MAXIMUM_SITES) throw new IllegalStateException("native site count bound exceeded");
                     totals.site(kind, count == null); if (count != null) count.site(kind);
                     List<Object> targets = new ArrayList<>(); for (Address rawTarget : rawTargets) targets.add(target(rawTarget, null));
@@ -136,7 +139,7 @@ public final class ExportNativeCallsV1 extends GhidraScript {
                         if (!via.getToAddress().isMemoryAddress() || !(via.getReferenceType().isData() || via.getReferenceType() == RefType.INDIRECTION)) continue;
                         Reference[] second = references(via.getToAddress());
                         retainedReferences = Math.addExact(retainedReferences, second.length);
-                        if (retainedReferences > MAXIMUM_SITE_REFERENCES) throw new IllegalStateException("site neighborhood reference bound exceeded");
+                        if (retainedReferences > MAXIMUM_SITE_REFERENCES) throw referenceFailure("site neighborhood reference bound exceeded", instruction.getAddress(), retainedReferences, MAXIMUM_SITE_REFERENCES);
                         List<Object> recordsAtSource = new ArrayList<>(); for (Reference ref : second) recordsAtSource.add(reference(ref));
                         neighborhoods.add(object("viaReferenceIndex", index, "source", address(via.getToAddress()), "references", recordsAtSource));
                         totals.neighborhoodReferences = Math.addExact(totals.neighborhoodReferences, second.length);
@@ -208,12 +211,44 @@ public final class ExportNativeCallsV1 extends GhidraScript {
         return object("from", address(ref.getFromAddress()), "target", target(ref.getToAddress(), location), "operandIndex", ref.getOperandIndex(), "primary", ref.isPrimary(), "source", ref.getSource().name(), "referenceType", refType(ref.getReferenceType()));
     }
     private Reference[] references(Address source) throws Exception {
+        return retainedReferences(source, scanReferences(source));
+    }
+    /** Classify the complete source under a total work bound; retain at most one emitted record's cap. */
+    private ReferenceScan scanReferences(Address source) throws Exception {
         task.checkCancelled(); ReferenceManager manager = program.getReferenceManager();
+        long modification = program.getModificationNumber();
         int count = manager.getReferenceCountFrom(source);
-        if (count < 0 || count > MAXIMUM_REFERENCES) throw new IllegalStateException("native reference count bound exceeded");
-        Reference[] values = Objects.requireNonNull(manager.getReferencesFrom(source), "native references unavailable");
-        if (values.length != count || values.length > MAXIMUM_REFERENCES) throw new IllegalStateException("native reference count changed or exceeded bound");
-        values = values.clone(); Arrays.sort(values, (a,b) -> {
+        if (count < 0) throw referenceFailure("invalid native reference count", source, count, MAXIMUM_REFERENCE_VISITS);
+        if (count > MAXIMUM_REFERENCE_VISITS - referenceVisits) throw referenceFailure("native reference scan work bound exceeded", source, count, MAXIMUM_REFERENCE_VISITS);
+        ReferenceIterator iterator = Objects.requireNonNull(manager.getReferenceIterator(source), "native reference iterator unavailable");
+        ArrayList<Reference> retained = new ArrayList<>(Math.min(count, MAXIMUM_REFERENCES));
+        int visited = 0; boolean analyzedCall = false; boolean resolvedJump = false;
+        // The bundled iterator continues into later source addresses. It has no within-source
+        // ordering guarantee, so a jump reference must never hide a subsequent call reference.
+        while (iterator.hasNext()) {
+            task.checkCancelled();
+            if (++referenceVisits > MAXIMUM_REFERENCE_VISITS) throw referenceFailure("native reference scan work bound exceeded", source, visited, MAXIMUM_REFERENCE_VISITS);
+            Reference ref = iterator.next();
+            if (ref == null) throw referenceFailure("native reference iterator returned null", source, visited, count);
+            int order = compare(ref.getFromAddress(), source);
+            if (order < 0) throw referenceFailure("native reference source order changed", source, visited, count);
+            if (order > 0) break;
+            if (++visited > count) throw referenceFailure("native reference count changed", source, visited, count);
+            RefType type = ref.getReferenceType();
+            if (type.isCall()) analyzedCall = true;
+            if (!type.isIndirect() && (type.isCall() || type.isJump()) &&
+                (ref.getToAddress().isMemoryAddress() || ref.getToAddress().isExternalAddress())) resolvedJump = true;
+            if (retained.size() < MAXIMUM_REFERENCES) retained.add(ref);
+        }
+        if (visited != count || manager.getReferenceCountFrom(source) != count || program.getModificationNumber() != modification)
+            throw referenceFailure("native reference enumeration changed", source, visited, count);
+        return new ReferenceScan(count, analyzedCall, resolvedJump, retained);
+    }
+    private Reference[] retainedReferences(Address source, ReferenceScan scan) {
+        if (scan.count > MAXIMUM_REFERENCES) throw referenceFailure("native reference count bound exceeded for emitted site", source, scan.count, MAXIMUM_REFERENCES);
+        Reference[] values = scan.retained.toArray(Reference[]::new);
+        if (values.length != scan.count) throw referenceFailure("native retained reference count differs", source, values.length, scan.count);
+        Arrays.sort(values, (a,b) -> {
             int c = compare(a.getToAddress(),b.getToAddress()); if(c != 0) return c;
             c = Integer.compare(a.getOperandIndex(),b.getOperandIndex()); if(c != 0) return c;
             c = Byte.compare(a.getReferenceType().getValue(), b.getReferenceType().getValue()); if(c != 0) return c;
@@ -226,6 +261,12 @@ public final class ExportNativeCallsV1 extends GhidraScript {
         }
         return values;
     }
+    private IllegalStateException referenceFailure(String reason, Address source, long count, long limit) {
+        // Fixed numeric coordinates keep failure diagnostics bounded even for arbitrary space names.
+        return new IllegalStateException(reason + "; spaceIndex=" + spaceIndices.get(source.getAddressSpace()) +
+            "; offsetBits=" + String.format(Locale.ROOT, "%016x", source.getOffset()) + "; count=" + count + "; limit=" + limit);
+    }
+    private record ReferenceScan(int count, boolean analyzedCall, boolean resolvedJump, List<Reference> retained) {}
     private static boolean sameReferenceKey(Reference a, Reference b) { return a.getToAddress().equals(b.getToAddress()) && a.getOperandIndex() == b.getOperandIndex() && a.getReferenceType().equals(b.getReferenceType()) && a.getSource() == b.getSource() && a.isPrimary() == b.isPrimary(); }
     private static Map<String,Object> refType(RefType type) { return object("code", (int) type.getValue(), "name", text(type.getName())); }
     private ModelIdentity hashModel(Path model) throws Exception {

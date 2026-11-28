@@ -17,19 +17,23 @@ bytes under the old descriptor. Old bytes are not retained in a separate blob st
 
 GET/HEAD `/api/v1/jobs/{jobId}/artifacts/{artifactId}/content` requires the existing
 private session policy and rejects query parameters. Both methods resolve and
-verify the digest; HEAD returns the same Content-Length without a body. Range and
-conditional headers are explicitly unsupported and return 400 UNSUPPORTED_HEADER.
+verify the stored digest before sending anything. The body is the shared redacted report
+projection (also served by the legacy report route), so it can differ from the stored bytes the
+descriptor's `sizeBytes` and `sha256` describe. Content-Length, ETag and ranges describe the served
+projection; `X-Decomp-Artifact-SHA256` repeats the stored digest, and `content.projection` in the
+descriptor is `redacted`, or `unavailable` when the stored report exceeds the 64 MiB projection limit
+(content then returns `409 ARTIFACT_PROJECTION_UNAVAILABLE`, never raw bytes). HEAD returns the same
+Content-Length without a body. Range and
+strong-ETag conditional semantics now follow the general artifact reader in
+[web-api.md](web-api.md#attempt-artifact-catalog-and-streamed-downloads).
 Content is served as an application/octet-stream attachment named exploration.json,
 with no-store, no-referrer, nosniff, frame denial and the shared sandboxed inert CSP headers.
 The descriptor's application/json is the producer file's media type, not permission
 to render it as trusted application content.
 
-The resolver keeps the existing 1 MiB report read ceiling and copies one bounded
-snapshot before the HTTP write. It does not keep a filesystem descriptor open while
-a client receives bytes. The existing ordinary HTTP deadline and bounded executor
-apply. This is not a general large-artifact streaming implementation; catalog
-pagination, large-file streaming/abort qualification and retention leases remain
-outstanding under #192/#172.
+The exploration ID uses the same `<family>_<binding>_<sha256>` scheme as the general
+artifact catalog. Content is now delivered by its digest-bound pinned stream (#552) instead
+of a copied 1 MiB snapshot; the report projection keeps its own 1 MiB read ceiling.
 
 The attempt evidence view displays exact byte count and SHA-256 and uses a normal
 browser download anchor. It does not fetch a whole-file JavaScript Blob. The page

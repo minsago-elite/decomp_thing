@@ -43,7 +43,12 @@ enum class WorkflowRunState(val wireName: String) {
     QUEUED("queued"), RUNNING("running"), CANCELLING("cancelling"), COMPLETED("completed"), FAILED("failed"), CANCELLED("cancelled"), INTERRUPTED("interrupted");
     val terminal: Boolean get() = this in setOf(COMPLETED, FAILED, CANCELLED, INTERRUPTED)
 }
-enum class WorkflowTerminalReason { COMPLETED, NO_CHANGES, REFUSED, CANCELLED, LIMIT_EXHAUSTED, FAILED, PROCESS_INTERRUPTED }
+/**
+ * Stop outcomes stay distinct: LIMIT_EXHAUSTED is a budget (tool calls, output, tokens), TIMED_OUT a
+ * wall-clock or idle deadline, CANCELLED a recorded user request, FAILED a workflow-reported failure,
+ * INFRASTRUCTURE_FAILED an adapter that could not report any outcome and PROCESS_INTERRUPTED a stopped service.
+ */
+enum class WorkflowTerminalReason { COMPLETED, NO_CHANGES, REFUSED, CANCELLED, LIMIT_EXHAUSTED, TIMED_OUT, FAILED, INFRASTRUCTURE_FAILED, PROCESS_INTERRUPTED }
 
 data class WorkflowExecutionLimits(val wallClockMs: ULong, val idleMs: ULong, val maxOutputBytes: ULong, val maxToolCalls: ULong) {
     init { require(wallClockMs > 0uL && idleMs > 0uL && idleMs <= wallClockMs && maxOutputBytes > 0uL) { "invalid workflow execution limits" } }
@@ -64,8 +69,12 @@ data class WorkflowAcceptanceReference(
 data class NewWorkflowAttempt(
     val workflow: WorkflowKind, val limits: WorkflowExecutionLimits,
     val inputRevisionId: String? = null, val harnessCapabilityId: String? = null, val previousRunId: String? = null,
+    val recovery: WorkflowAttemptRecovery? = null,
 ) {
-    init { listOfNotNull(inputRevisionId, harnessCapabilityId, previousRunId).forEach(::requireId) }
+    init {
+        listOfNotNull(inputRevisionId, harnessCapabilityId, previousRunId).forEach(::requireId)
+        require(recovery == null || previousRunId != null) { "a recovery attempt requires its predecessor" }
+    }
 }
 
 data class WorkflowAttempt(
@@ -76,8 +85,38 @@ data class WorkflowAttempt(
     val acceptedRevision: WorkflowAcceptanceReference?,
     val progressRetentionPinned: Boolean = false,
     internal val startReceipt: WorkflowStartReceipt? = null,
+    val recovery: WorkflowAttemptRecovery? = null,
 ) {
     val publicationPending: Boolean get() = state == WorkflowRunState.COMPLETED && candidate != null && acceptedRevision == null
+}
+
+/**
+ * How a restarted server must treat an attempt, derived only from durable state. Startup recovery
+ * turns unfinished attempts into interrupted ones; the start time distinguishes queued work that
+ * never executed from interrupted active work. Neither is ever resumed or re-executed implicitly.
+ */
+enum class WorkflowRecoveryDisposition {
+    /** Still queued, running or cancelling (an owning live server, before any restart). */
+    UNFINISHED,
+    /** Interrupted before it started: no binary or model execution happened for it. */
+    QUEUED_NOT_STARTED,
+    /** Interrupted after it started; its partial evidence is retained, never resumed automatically. */
+    INTERRUPTED_ACTIVE,
+    /** Completed with a candidate that has no recorded acceptance. */
+    COMPLETED_UNPUBLISHED,
+    /** Bound to a validated accepted revision; immutable and never published twice. */
+    ACCEPTED,
+    /** Any other terminal outcome. */
+    TERMINAL,
+}
+
+val WorkflowAttempt.recoveryDisposition: WorkflowRecoveryDisposition get() = when {
+    !state.terminal -> WorkflowRecoveryDisposition.UNFINISHED
+    acceptedRevision != null -> WorkflowRecoveryDisposition.ACCEPTED
+    publicationPending -> WorkflowRecoveryDisposition.COMPLETED_UNPUBLISHED
+    state == WorkflowRunState.INTERRUPTED && startedAt == null -> WorkflowRecoveryDisposition.QUEUED_NOT_STARTED
+    state == WorkflowRunState.INTERRUPTED -> WorkflowRecoveryDisposition.INTERRUPTED_ACTIVE
+    else -> WorkflowRecoveryDisposition.TERMINAL
 }
 
 sealed interface WorkflowTransition {
@@ -125,20 +164,50 @@ class WorkflowAttemptStore private constructor(
 ) : AutoCloseable {
     private val lifetime = ReentrantReadWriteLock(true)
     private val stripes = Array(64) { ReentrantLock() }
+    // Guarded by the matching stripe (or the exclusive lifetime lock during startup).
+    // Identity tokens are bounded and cannot wrap back to an earlier observation.
+    private val listingEpochs = Array<Any>(stripes.size) { Any() }
     private val poisoned = AtomicBoolean()
     private var closed = false
 
-    fun inspect(jobId: String): WorkflowJobInspection = withJob(jobId) { directory -> inspectLocked(jobId, directory) }
+    fun inspect(jobId: String): WorkflowJobInspection = withJob(jobId, readOnly = true) { directory -> inspectLocked(jobId, directory) }
 
-    /** Display-only collection inspection; ordinary detail/mutation readers retain their existing profile. */
-    internal fun inspectForListing(jobId: String, read: (String, Int) -> ByteArray): WorkflowJobInspection = withJob(jobId) { directory ->
-        inspectRecord(jobId, directory) { path, maximum -> read("$jobId/${path.fileName}", maximum) }
+    /** Optimistic display-only read: neither lifetime nor stripe locks span physical listing I/O.
+     * Validate after presentation too, so a command crossing either metadata read refuses the row.
+     * Close/recovery/publication failures are rechecked before returning captured data; listing
+     * callbacks must only capture bounded metadata/presentation, never mutate or publish it.
+     */
+    internal fun <T> inspectForListing(jobId: String, read: (String, Int) -> ByteArray,
+        onEpochRefusal: () -> Unit = {}, present: (WorkflowJobInspection.Available) -> T): T {
+        val epoch = listingEpoch(jobId)
+        val directory = root.resolve(jobId)
+        if (!Files.isDirectory(directory, NOFOLLOW_LINKS)) fail("JOB_NOT_FOUND", "The job storage directory is missing or invalid.")
+        val result = present(inspectRecord(jobId, directory) { path, maximum -> read("$jobId/${path.fileName}", maximum) })
+        if (epoch !== listingEpoch(jobId)) {
+            try { onEpochRefusal() } catch (_: Exception) { }
+            fail("JOB_RECORD_UNAVAILABLE", "The job changed during listing capture; refresh its state.")
+        }
+        return result
+    }
+
+    /** Only in-memory checks under these locks: even directory probes belong outside them. */
+    private fun listingEpoch(jobId: String): Any = lifetime.read {
+        ensureOpen()
+        requireJobId(jobId)
+        val stripe = (jobId.hashCode() and Int.MAX_VALUE) % stripes.size
+        stripes[stripe].withLock { ensureOpen(); listingEpochs[stripe] }
+    }
+
+    /** Caller holds the matching stripe through withJob. */
+    private fun invalidateListingEpoch(jobId: String) {
+        val stripe = (jobId.hashCode() and Int.MAX_VALUE) % stripes.size
+        listingEpochs[stripe] = Any()
     }
 
     /** Read-side transaction: callers may read bounded local evidence, never wait on network delivery.
      * Lifecycle publication and close cannot interleave until the callback has returned.
      */
-    internal fun <T> withAttemptSnapshot(jobId: String, runId: String, read: (WorkflowAttempt) -> T): T = withJob(jobId) { directory ->
+    internal fun <T> withAttemptSnapshot(jobId: String, runId: String, read: (WorkflowAttempt) -> T): T = withJob(jobId, readOnly = true) { directory ->
         val attempt = available(jobId, directory).snapshot.attempts.singleOrNull { it.runId == runId }
             ?: fail("RUN_NOT_FOUND", "The requested attempt does not belong to this job.")
         read(attempt)
@@ -150,15 +219,19 @@ class WorkflowAttemptStore private constructor(
      */
     internal fun expireProgressJournal(jobId: String, runId: String, protectedFromRetention: Boolean,
         retention: java.time.Duration = AgentProgressJournalRetention.DEFAULT_TERMINAL_RETENTION,
-        fault: (ProgressRetentionFaultPoint) -> Unit = {}): ProgressRetentionResult = withJob(jobId) { directory ->
-        val attempt = available(jobId, directory).snapshot.attempts.singleOrNull { it.runId == runId }
-            ?: fail("RUN_NOT_FOUND", "The requested attempt does not belong to this job.")
-        if (protectedFromRetention || attempt.progressRetentionPinned) ProgressRetentionResult.RETAINED else try {
-            AgentProgressJournalMaintenance.expire(root, attempt, clock.instant(), retention, fault)
-        } catch (failure: Exception) {
-            throw WorkflowStoreException("PROGRESS_RETENTION_FAILED",
-                "Progress retention did not finish. Preserve the journal and pending retention file, then retry maintenance with storage ownership.",
-                outcomeUnknown = true, cause = failure)
+        fault: (ProgressRetentionFaultPoint) -> Unit = {}): ProgressRetentionResult {
+        var filesystemPhase = false
+        return withJob(jobId, invalidateOnSuccess = { filesystemPhase }) { directory ->
+            val attempt = available(jobId, directory).snapshot.attempts.singleOrNull { it.runId == runId }
+                ?: fail("RUN_NOT_FOUND", "The requested attempt does not belong to this job.")
+            if (protectedFromRetention || attempt.progressRetentionPinned) ProgressRetentionResult.RETAINED else try {
+                AgentProgressJournalMaintenance.expire(root, attempt, clock.instant(), retention, fault,
+                    beforeFilesystem = { filesystemPhase = true })
+            } catch (failure: Exception) {
+                throw WorkflowStoreException("PROGRESS_RETENTION_FAILED",
+                    "Progress retention did not finish. Preserve the journal and pending retention file, then retry maintenance with storage ownership.",
+                    outcomeUnknown = true, cause = failure)
+            }
         }
     }
 
@@ -235,9 +308,19 @@ class WorkflowAttemptStore private constructor(
 
     /** Read-only replay lookup for a future authenticated service admission, before queue/CAS checks. */
     internal fun replayStart(jobId: String, request: NewWorkflowAttempt, requestKey: String,
-        expectedRequestVersion: String): WorkflowStartResult? = withJob(jobId) { directory ->
+        expectedRequestVersion: String): WorkflowStartResult? = withJob(jobId, readOnly = true) { directory ->
         val key = workflowStartKeyDigest(jobId, requestKey)
         val intent = workflowStartIntentSha256(expectedRequestVersion, request)
+        val current = available(jobId, directory).snapshot
+        requireRecovered(current, directory)
+        replayStartLocked(current, key, intent)
+    }
+
+    /** Read-only recovery replay lookup; it precedes predecessor, capability and CAS checks. */
+    internal fun replayRecovery(jobId: String, previousRunId: String, expectedRunVersion: String, mode: WorkflowRecoveryMode,
+        inputRevisionId: String?, requestKey: String): WorkflowStartResult? = withJob(jobId, readOnly = true) { directory ->
+        val key = workflowStartKeyDigest(jobId, requestKey)
+        val intent = workflowRecoveryIntentSha256(expectedRunVersion, previousRunId, mode, inputRevisionId)
         val current = available(jobId, directory).snapshot
         requireRecovered(current, directory)
         replayStartLocked(current, key, intent)
@@ -274,9 +357,16 @@ class WorkflowAttemptStore private constructor(
         request.previousRunId?.let { previous ->
             if (current.attempts.none { it.runId == previous && it.state.terminal }) fail("INVALID_PREVIOUS_RUN", "The previous attempt must be a terminal attempt of this job.")
         }
+        if (request.recovery != null) {
+            // Recovery links exactly one successor to the latest unsuccessful attempt, under the same lock as publication.
+            val latest = current.latestRun
+            if (receipt == null || latest == null || latest.runId != request.previousRunId || latest.state == WorkflowRunState.COMPLETED) {
+                fail("INVALID_PREVIOUS_RUN", "Recovery requires the latest unsuccessful attempt of this job and a keyed command.")
+            }
+        }
         val initial = WorkflowAttempt(newId("run"), current.jobId, request.workflow, WorkflowRunState.QUEUED, newId("version"),
             clock.instant(), null, null, request.previousRunId, request.inputRevisionId, request.harnessCapabilityId,
-            request.limits, null, null, null, null)
+            request.limits, null, null, null, null, recovery = request.recovery)
         val attempt = if (receipt == null) initial else initial.copy(startReceipt = receipt(initial.runId))
         val updated = current.copy(version = newId("version"), attempts = immutable(current.attempts + attempt))
         persist(directory, updated)
@@ -314,8 +404,13 @@ class WorkflowAttemptStore private constructor(
     }
 
     /** Call only after a trusted adapter verifies canonical source, graph and acceptance artifact binding. */
-    fun recordAcceptedRevision(jobId: String, runId: String, expectedJobVersion: String, expectedRunVersion: String, reference: WorkflowAcceptanceReference): WorkflowMutation = withJob(jobId) { directory ->
-        val current = available(jobId, directory).snapshot
+    fun recordAcceptedRevision(jobId: String, runId: String, expectedJobVersion: String, expectedRunVersion: String, reference: WorkflowAcceptanceReference): WorkflowMutation =
+        recordAcceptedRevision(jobId, runId, expectedJobVersion, expectedRunVersion, reference, null)
+
+    internal fun recordAcceptedRevision(jobId: String, runId: String, expectedJobVersion: String, expectedRunVersion: String,
+        reference: WorkflowAcceptanceReference, startup: WorkflowStartupRecoveryBudget?): WorkflowMutation = withJob(jobId) { directory ->
+        val current = if (startup == null) available(jobId, directory).snapshot else
+            inspectRecord(jobId, directory) { path, maximum -> startup.read(root, root.relativize(path).toString(), maximum) }.snapshot
         checkVersion(current.version, expectedJobVersion)
         requireRecovered(current, directory)
         val old = current.attempts.singleOrNull { it.runId == runId } ?: fail("RUN_NOT_FOUND", "The requested workflow attempt does not belong to this job.")
@@ -326,7 +421,11 @@ class WorkflowAttemptStore private constructor(
         }
         val attempt = old.copy(version = newId("version"), acceptedRevision = reference)
         val updated = replace(current, attempt).copy(acceptedRevision = reference)
-        persist(directory, updated)
+        if (startup == null) persist(directory, updated) else {
+            val replacement = encodeSnapshot(updated)
+            startup.retain(replacement.size.toLong())
+            persistPrepared(directory, replacement, startup::checkpoint)
+        }
         WorkflowMutation(updated, attempt)
     }
 
@@ -342,10 +441,11 @@ class WorkflowAttemptStore private constructor(
     /** Complete startup admission; all bounded reads and encoded replacements precede any recovery mutation. */
     internal fun recoverForStartup(
         limits: WorkflowStartupRecoveryLimits = WorkflowStartupRecoveryLimits(),
-        cancellation: () -> Boolean = { false }, beforeChanges: (() -> Unit) -> Unit = {},
+        cancellation: () -> Boolean = { false },
+        budget: WorkflowStartupRecoveryBudget = WorkflowStartupRecoveryBudget(limits, cancellation),
+        beforeChanges: (() -> Unit) -> Unit = {},
     ) = lifetime.write {
         ensureOpen()
-        val budget = WorkflowStartupRecoveryBudget(limits, cancellation)
         try {
             Files.newDirectoryStream(root).use { entries ->
                 executeWorkflowStartupRecovery(entries.asSequence().map { it.fileName.toString() }, budget,
@@ -392,6 +492,9 @@ class WorkflowAttemptStore private constructor(
         } catch (failure: Error) {
             if (budget.changesStarted) poisoned.set(true)
             throw failure
+        } finally {
+            // Recovery uses the exclusive lifetime lock rather than withJob's command boundary.
+            listingEpochs.indices.forEach { listingEpochs[it] = Any() }
         }
     }
 
@@ -577,14 +680,24 @@ class WorkflowAttemptStore private constructor(
         throw WorkflowStoreException("CORRUPT_WORKFLOW_STATE", "The workflow state is invalid; preserve workflow-state.json and restore a verified backup before retrying.", cause = failure)
     }
 
-    private fun <T> withJob(jobId: String, operation: (Path) -> T): T = lifetime.read {
+    private fun <T> withJob(jobId: String, readOnly: Boolean = false, invalidateOnSuccess: () -> Boolean = { true }, operation: (Path) -> T): T = lifetime.read {
         ensureOpen()
         requireJobId(jobId)
-        stripes[(jobId.hashCode() and Int.MAX_VALUE) % stripes.size].withLock {
+        val stripe = (jobId.hashCode() and Int.MAX_VALUE) % stripes.size
+        stripes[stripe].withLock {
             ensureOpen()
             val directory = root.resolve(jobId)
             if (!Files.isDirectory(directory, NOFOLLOW_LINKS)) fail("JOB_NOT_FOUND", "The job storage directory is missing or invalid.")
-            operation(directory)
+            var invalidate = true
+            try {
+                val result = operation(directory)
+                invalidate = invalidateOnSuccess()
+                result
+            } finally {
+                // Invalidate even a failed/uncertain command, and conservatively include colliding
+                // jobs. Read-only status/replay calls do not invalidate concurrent listing rows.
+                if (!readOnly && invalidate) invalidateListingEpoch(jobId)
+            }
         }
     }
     private fun ensureOpen() {
@@ -644,7 +757,8 @@ class WorkflowAttemptStore private constructor(
         private fun validateTerminal(state: WorkflowRunState, reason: WorkflowTerminalReason) {
             val valid = when (state) {
                 WorkflowRunState.COMPLETED -> reason in setOf(WorkflowTerminalReason.COMPLETED, WorkflowTerminalReason.NO_CHANGES)
-                WorkflowRunState.FAILED -> reason in setOf(WorkflowTerminalReason.FAILED, WorkflowTerminalReason.REFUSED, WorkflowTerminalReason.LIMIT_EXHAUSTED)
+                WorkflowRunState.FAILED -> reason in setOf(WorkflowTerminalReason.FAILED, WorkflowTerminalReason.REFUSED, WorkflowTerminalReason.LIMIT_EXHAUSTED,
+                    WorkflowTerminalReason.TIMED_OUT, WorkflowTerminalReason.INFRASTRUCTURE_FAILED)
                 WorkflowRunState.CANCELLED -> reason == WorkflowTerminalReason.CANCELLED
                 WorkflowRunState.INTERRUPTED -> reason == WorkflowTerminalReason.PROCESS_INTERRUPTED
                 else -> false
@@ -665,6 +779,9 @@ class WorkflowAttemptStore private constructor(
             val previous = mutableSetOf<String>()
             snapshot.attempts.forEach { attempt ->
                 attempt.startReceipt?.validate(attempt)
+                require(attempt.recovery == null || (attempt.previousRunId != null && attempt.startReceipt != null)) {
+                    "a recovery attempt requires its predecessor and keyed receipt"
+                }
                 requireId(attempt.runId); requireId(attempt.version); require(attempt.jobId == snapshot.jobId)
                 listOfNotNull(attempt.inputRevisionId, attempt.harnessCapabilityId, attempt.previousRunId).forEach(::requireId)
                 require(attempt.previousRunId == null || attempt.previousRunId in previous)
@@ -706,13 +823,14 @@ class WorkflowAttemptStore private constructor(
             put("acceptedRevision", a.acceptedRevision?.let(::encodeAcceptance) ?: JsonNull)
             if (a.progressRetentionPinned) put("progressRetentionPinned", true)
             a.startReceipt?.let { put("startReceipt", it.encode()) }
+            a.recovery?.let { put("recovery", it.encode()) }
         }
         private fun encodeAcceptance(a: WorkflowAcceptanceReference): JsonObject = buildJsonObject {
             put("jobId", a.jobId); put("runId", a.runId); put("revisionId", a.revisionId); put("sourceSha256", a.sourceSha256)
             put("graphNodeId", a.graphNodeId); put("artifactId", a.artifactId); put("artifactSha256", a.artifactSha256)
         }
         private fun parseAttempt(value: JsonElement): WorkflowAttempt {
-            val a = value.asObject().also { JsonObject(it - "progressRetentionPinned" - "startReceipt").keysExactly("runId", "jobId", "workflow", "state", "version", "createdAt", "startedAt", "endedAt", "previousRunId", "inputRevisionId", "harnessCapabilityId", "limits", "terminalReason", "usage", "candidate", "acceptedRevision") }
+            val a = value.asObject().also { JsonObject(it - "progressRetentionPinned" - "startReceipt" - "recovery").keysExactly("runId", "jobId", "workflow", "state", "version", "createdAt", "startedAt", "endedAt", "previousRunId", "inputRevisionId", "harnessCapabilityId", "limits", "terminalReason", "usage", "candidate", "acceptedRevision") }
             val limits = a.getValue("limits").asObject().also { it.keysExactly("wallClockMs", "idleMs", "maxOutputBytes", "maxToolCalls") }
             val usage = a.optional("usage")?.asObject()?.also { it.keysExactly("inputTokens", "outputTokens", "cachedInputTokens", "toolCalls", "wallClockMs") }
             val candidate = a.optional("candidate")?.asObject()?.also { it.keysExactly("revisionId", "sourceSha256") }
@@ -722,7 +840,8 @@ class WorkflowAttemptStore private constructor(
                 usage?.let { WorkflowUsage(it.optionalUInt("inputTokens"), it.optionalUInt("outputTokens"), it.optionalUInt("cachedInputTokens"), it.optionalUInt("toolCalls"), it.optionalUInt("wallClockMs")) },
                 candidate?.let { WorkflowCandidate(it.string("revisionId"), it.string("sourceSha256")) }, a.optional("acceptedRevision")?.let(::parseAcceptance),
                 if ("progressRetentionPinned" in a) a.boolean("progressRetentionPinned") else false,
-                if ("startReceipt" in a) WorkflowStartReceipt.decode(a.getValue("startReceipt").asObject()) else null)
+                if ("startReceipt" in a) WorkflowStartReceipt.decode(a.getValue("startReceipt").asObject()) else null,
+                if ("recovery" in a) WorkflowAttemptRecovery.decode(a.getValue("recovery").asObject()) else null)
         }
         private fun parseAcceptance(value: JsonElement): WorkflowAcceptanceReference {
             val a = value.asObject().also { it.keysExactly("jobId", "runId", "revisionId", "sourceSha256", "graphNodeId", "artifactId", "artifactSha256") }
@@ -769,8 +888,15 @@ internal class WorkflowStartupRecoveryBudget(
     var planBytes: Long = 0; private set
     var changesStarted: Boolean = false; private set
     private var cancelled = false
+    private var refusal: WorkflowStoreException? = null
+
+    private fun refuse(code: String, message: String, cause: Throwable? = null): Nothing {
+        if (refusal == null) refusal = WorkflowStoreException(code, message, changesStarted, cause)
+        throw checkNotNull(refusal)
+    }
 
     fun checkpoint() {
+        refusal?.let { throw it }
         if (cancelled || Thread.currentThread().isInterrupted || cancellation()) {
             cancelled = true
             throw WorkflowStoreException("RECOVERY_CANCELLED", if (changesStarted)
@@ -780,32 +906,48 @@ internal class WorkflowStartupRecoveryBudget(
     }
     fun entry() {
         checkpoint()
-        if (entries >= limits.maximumEntries) fail("STORE_LIMIT", "Startup recovery exceeds its complete root-entry limit.")
+        if (entries >= limits.maximumEntries) refuse("STORE_LIMIT", "Startup recovery exceeds its complete root-entry limit.")
         entries++
     }
     fun job() {
         checkpoint()
-        if (jobs >= limits.profile.maximumJobs) fail("STORE_LIMIT", "Startup recovery exceeds its job-identity limit.")
+        if (jobs >= limits.profile.maximumJobs) refuse("STORE_LIMIT", "Startup recovery exceeds its job-identity limit.")
         jobs++
     }
     fun readAllowance(perFile: Int): Long {
         checkpoint()
         val remaining = limits.maximumReadBytes - readBytes
-        if (remaining == 0L) fail("STORE_LIMIT", "Startup recovery has exhausted its aggregate metadata-read allowance.")
+        if (remaining == 0L) refuse("STORE_LIMIT", "Startup recovery has exhausted its aggregate metadata-read allowance.")
         return minOf(perFile.toLong(), remaining)
     }
     fun chargeRead(bytes: Long) {
         require(bytes >= 0)
-        if (bytes > limits.maximumReadBytes - readBytes) fail("STORE_LIMIT", "Startup recovery exceeds its aggregate metadata-read limit.")
+        if (bytes > limits.maximumReadBytes - readBytes) refuse("STORE_LIMIT", "Startup recovery exceeds its aggregate metadata-read limit.")
         readBytes += bytes
         checkpoint()
     }
     fun retain(bytes: Long) {
         checkpoint()
         require(bytes >= 0)
-        if (bytes > limits.maximumPlanBytes - planBytes) fail("STORE_LIMIT", "Startup recovery exceeds its retained replacement-byte limit.")
+        if (bytes > limits.maximumPlanBytes - planBytes) refuse("STORE_LIMIT", "Startup recovery exceeds its retained replacement-byte limit.")
         planBytes += bytes
     }
+    /** Shared by reconciliation metadata and mutation rechecks; failures latch before the next unit. */
+    fun read(root: Path, relative: String, maximum: Int): ByteArray {
+        val allowance = readAllowance(maximum)
+        val bytes = try {
+            decompengine.repair.readStableRegularFile(root, relative, allowance, cancellationCheck = ::checkpoint).bytes
+        } catch (failure: Exception) {
+            checkpoint()
+            refuse(if (failure is decompengine.repair.RepairBudgetExceededException) "STORE_LIMIT" else "STARTUP_RECOVERY_INCOMPLETE",
+                "Startup evidence capture did not finish; preserve storage and reconcile before retrying.", failure)
+        }
+        chargeRead(bytes.size.toLong())
+        return bytes
+    }
+
+    /** Reserve BEFORE an evidence capture; conservatively retain its full size through this operation. */
+    fun reserveEvidence(bytes: Long) { checkpoint(); chargeRead(bytes); retain(bytes) }
     fun beginChanges() { checkpoint(); changesStarted = true }
 }
 
@@ -814,7 +956,7 @@ internal class WorkflowStartupRecoveryMutation(val retainedBytes: Long, val appl
 internal fun executeWorkflowStartupRecovery(
     rootEntries: Sequence<String>, budget: WorkflowStartupRecoveryBudget,
     prepare: (String) -> WorkflowStartupRecoveryMutation?, beforeChanges: () -> Unit,
-) {
+): List<String> {
     budget.checkpoint()
     val ids = ArrayList<String>()
     for (name in rootEntries) { budget.entry(); if (JOB_ID.matches(name)) { budget.job(); ids += name } }
@@ -834,6 +976,7 @@ internal fun executeWorkflowStartupRecovery(
         throw WorkflowStoreException((failure as? WorkflowStoreException)?.code ?: "STARTUP_RECOVERY_INCOMPLETE",
             "Startup recovery did not finish; changes may have begun. Preserve storage and reconcile before retrying.", true, failure)
     }
+    return ids.sorted()
 }
 
 internal fun recoveredWorkflowSnapshot(

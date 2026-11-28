@@ -194,7 +194,7 @@ export async function buildBundleReport(output = new URL('../../build/frontend/'
       if (/\.(html|css|js)$/.test(name)) {
         const source = bytes.toString('utf8');
         for (const marker of ['/@vite/client', 'localhost:5173', '127.0.0.1:5173', 'DECOMP_TEST_ONLY_SENTINEL',
-          'SIMULATED_DEVELOPMENT_DATA', 'fixture_job_', 'decomp-development-notice',
+          'SIMULATED_DEVELOPMENT_DATA', 'fixture_run_', 'fixture_attachment', 'decomp-development-notice',
           'DECOMP_DEV_BACKEND_ORIGIN', 'DECOMP_DEV_ONLY_ENDPOINT_SENTINEL', 'synthetic_non_secret_']) {
           assert.ok(!source.includes(marker), `Production asset contains ${marker}: ${name}`);
         }
