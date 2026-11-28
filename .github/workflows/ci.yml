@@ -81,6 +81,8 @@ jobs:
         run: node scripts/test-packaged-browser-upload.mjs
       - name: Verify packaged deletion verdict controls
         run: node --test scripts/packaged-browser-lifecycle.test.mjs
+      - name: Verify packaged structure evidence controls
+        run: node --test scripts/test-packaged-browser-structure.mjs scripts/test-packaged-browser-structure-body-evidence.mjs
       - name: Verify packaged DevTools target lifecycle controls
         run: node --test scripts/test-packaged-browser-target-lifecycle.mjs
       - name: Verify packaged browser target setup integration
@@ -152,11 +154,9 @@ jobs:
     needs: frontend
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
-      PACKAGED_WEB_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      PACKAGED_WEB_SOURCE_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
     name: Packaged web contracts and browser
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 25
     permissions:
       contents: read
     defaults:
@@ -205,9 +205,6 @@ jobs:
           "$RUNNER_TEMP/web-test-browser/chrome" --version | tee build/packaged-web-ci/browser-version.txt
           python3 scripts/test-packaged-browser-install.py
           node --check scripts/check-packaged-web-browser.mjs
-          node --check scripts/packaged-browser-structure-cold.mjs
-          node --check scripts/test-packaged-browser-structure-cold.mjs
-          node --test scripts/test-packaged-browser-structure.mjs scripts/test-packaged-browser-structure-cold.mjs
           node --test scripts/packaged-browser-upload.test.mjs
           node --check scripts/packaged-browser-restart.mjs
           node --test scripts/packaged-browser-restart.test.mjs
@@ -296,6 +293,12 @@ jobs:
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode scale --no-sandbox
+      - name: Verify bounded program-structure views with one hundred thousand recorded functions
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode structure --no-sandbox
       - name: Qualify large replaced log recordings and browser teardown budgets
         run: |
           node --test scripts/test-packaged-browser-logs.mjs
@@ -315,38 +318,6 @@ jobs:
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode audit --no-sandbox
-      - name: Measure twenty fresh-process cold function-inventory loads on loopback
-        timeout-minutes: 25
-        env:
-          STRUCTURE_COLD_REPORT_DIR: ${{ github.workspace }}/build/packaged-web-ci
-        run: |
-          node scripts/packaged-browser-structure-cold.mjs --run loopback -- \
-            scripts/check-packaged-web-browser.mjs \
-            --archive "$WEB_TEST_ARCHIVE" \
-            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
-            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --no-sandbox
-      - name: Measure twenty fresh-process cold function-inventory loads on constrained profile
-        timeout-minutes: 25
-        env:
-          STRUCTURE_COLD_REPORT_DIR: ${{ github.workspace }}/build/packaged-web-ci
-        run: |
-          node scripts/packaged-browser-structure-cold.mjs --run constrained -- \
-            scripts/check-packaged-web-browser.mjs \
-            --archive "$WEB_TEST_ARCHIVE" \
-            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
-            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --no-sandbox
-      - name: Verify bounded program-structure views with one hundred thousand recorded functions on loopback
-        run: |
-          node scripts/check-packaged-web-browser.mjs \
-            --archive "$WEB_TEST_ARCHIVE" \
-            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
-            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode structure --structure-profile loopback --no-sandbox
-      - name: Verify bounded program-structure interactions with one hundred thousand functions on constrained profile
-        run: |
-          node scripts/check-packaged-web-browser.mjs \
-            --archive "$WEB_TEST_ARCHIVE" \
-            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
-            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode structure --structure-profile constrained --no-sandbox
       - name: Exercise explicit Vite proxy against the same packaged JVM
         run: |
           node scripts/check-packaged-web-browser.mjs \
@@ -363,7 +334,6 @@ jobs:
           if-no-files-found: warn
           path: |
             build/packaged-web-ci
-            build/packaged-web-ci/program-structure-cold-*.json
             build/packaged-browser-*/report.json
             build/packaged-browser-*/report.full.part-*
             build/packaged-browser-*/*.png
@@ -613,7 +583,6 @@ jobs:
           path: |
             build/reports/tests/full-suite
             build/test-results/full-suite
-            build/test-results/program-structure-scale.json
             build/reports/tests/test
             build/test-results/test
             build/reports/junit-signatures

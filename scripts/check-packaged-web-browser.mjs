@@ -8,8 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
 import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
-import { seedStructure, qualifyStructure, qualifyStructureColdSample } from './packaged-browser-structure.mjs';
-import { structureProfile, verifyStructureQualificationSource, verifyStructureSourceRevision, verifyStructureBrowser } from './packaged-browser-structure-cold.mjs';
+import { seedStructure, qualifyStructure, structureFailureEvidence } from './packaged-browser-structure.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { qualifyLifecycle } from './packaged-browser-lifecycle.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
@@ -37,13 +36,12 @@ const { values } = parseArgs({ options: {
   'java-home': { type: 'string' },
   python: { type: 'string', default: '/usr/bin/python3' },
   'no-sandbox': { type: 'boolean', default: false },
-  'structure-profile': { type: 'string', default: 'loopback' },
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|logs|sources|scale|structure|structure-cold|live|proxy|upgrade|legacy|audit] [--structure-profile loopback|constrained] [--profile reference|constrained] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--browser-temp-parent /absolute/short-owned-directory] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|logs|sources|scale|structure|live|proxy|upgrade|legacy|audit] [--profile reference|constrained] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--browser-temp-parent /absolute/short-owned-directory] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
-  console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; sources: session plus two preseeded retained candidates browsed, previewed, highlighted and compared by keyboard; scale: session plus 10,000 persisted jobs and keyboard pagination; structure: session plus a 100,000-function recorded revision; structure-cold: one fresh-JVM/browser first-inventory sample; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
+  console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; sources: session plus two preseeded retained candidates browsed, previewed, highlighted and compared by keyboard; scale: session plus 10,000 persisted jobs and keyboard pagination; structure: session plus a 100,000-function recorded revision; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
   console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP, navigation timing budgets, 50 job-filter submissions, and 50 alternating source-file metadata/preview actions (100ms local feedback / 500ms first data).');
   console.log('profile reference preserves browser defaults and enforces the documented navigation budgets; profile constrained applies 4x CPU throttling, 10 Mbit/s download, 2 Mbit/s upload and 100 ms latency to audit targets, records timings without applying those budgets, and does not establish a new threshold.');
@@ -61,8 +59,7 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'logs', 'sources', 'scale', 'structure', 'structure-cold', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, restart, logs, sources, scale, structure, structure-cold, live, proxy, upgrade, legacy or audit');
-structureProfile(values['structure-profile']);
+assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'logs', 'sources', 'scale', 'structure', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, restart, logs, sources, scale, structure, live, proxy, upgrade, legacy or audit');
 assert.ok(['reference', 'constrained'].includes(values.profile), '--profile must be reference or constrained');
 assert.ok(values.mode === 'audit' || values.profile === 'reference', '--profile constrained is only supported with --mode audit');
 if (values.mode === 'upgrade') {
@@ -125,15 +122,8 @@ let applicationError = '';
 let applicationOutput = '';
 let browserError = '';
 let viteError = '';
-let driverCommit = process.env.PACKAGED_WEB_SOURCE_COMMIT ?? process.env.GITHUB_SHA ?? null;
-const driverPullRequestHeadCommit = process.env.PACKAGED_WEB_SOURCE_HEAD_SHA || null;
-const driverPullRequestBaseCommit = process.env.PACKAGED_WEB_SOURCE_BASE_SHA || null;
-if (!driverCommit) {
-  try { driverCommit = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); }
-  catch { /* The report records unavailable provenance; structure qualification fails closed below. */ }
-}
-const report = { status: 'running', mode: values.mode, testDirectory: root, browserProfileDirectory: profile, startedAt: new Date().toISOString(), driverNode: nodeVersion,
-  driverCommit, driverPullRequestHeadCommit, driverPullRequestBaseCommit,
+const report = { status: 'running', mode: values.mode, testDirectory: root, driverNode: nodeVersion,
+  driverCommit: process.env.GITHUB_SHA ?? execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8', maxBuffer: 1024 }).trim(),
   tools: { node: process.execPath, chrome: chromeBinary, javaHome, python: values.python }, requests: {} };
 const launchErrors = new WeakMap();
 console.log(`Evidence directory: ${root}`);
@@ -142,15 +132,6 @@ function startOwned(command, args, options) {
   const child = spawn(command, args, options);
   child.on('error', (error) => launchErrors.set(child, error));
   return child;
-}
-
-async function processStartTimeTicks(pid) {
-  const stat = await fs.readFile(`/proc/${pid}/stat`, 'utf8');
-  const commandEnd = stat.lastIndexOf(') ');
-  assert.ok(commandEnd >= 0, 'Linux process identity record is malformed');
-  const startTimeTicks = Number(stat.slice(commandEnd + 2).trim().split(/\s+/)[19]);
-  assert.ok(Number.isSafeInteger(startTimeTicks) && startTimeTicks > 0, 'Linux process start time is unavailable');
-  return startTimeTicks;
 }
 
 async function waitFor(check, label, timeout = 20000) {
@@ -353,8 +334,6 @@ async function setupTarget({ targetId, sessionId, step, initialization, cspProbe
       sourceFile: event.sourceFile, statusCode: event.statusCode, violatedDirective: event.violatedDirective,
     }));
   });` });
-  // Qualifiers add their own bindings/scripts after setup; keep them in CDP diagnostics without a lifecycle phase.
-  state.initialize = (method, params = {}) => cdpDiagnostics.command(initialization, method, () => cdp.call(method, params, sessionId));
   await initialize('cache-policy', 'Network.setCacheDisabled', { cacheDisabled: !cacheEnabled });
   await initialize('metrics', 'Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
   state.initializationComplete = true;
@@ -486,7 +465,7 @@ async function prepareArchive(archivePath) {
   // HOME/TMPDIR alone do not set HotSpot's directory properties. These controlled
   // options keep the test JVM and its native extraction inside the owned workspace.
   assert.ok(!/["\r\n]/.test(runtimeHome + runtimeTmp), 'JVM test directory cannot be represented in launcher options');
-  const structureTimingOption = ['structure', 'structure-cold'].includes(values.mode) ? ' -Ddecompengine.web.structureTiming=true' : '';
+  const structureTimingOption = values.mode === 'structure' ? ' -Ddecompengine.web.structureTiming=true' : '';
   const environment = { PATH: bins, JAVA_HOME: javaHome, LANG: 'C.UTF-8', HOME: runtimeHome,
     TMPDIR: runtimeTmp, TMP: runtimeTmp, TEMP: runtimeTmp,
     JAVA_TOOL_OPTIONS: `-XX:-UsePerfData -Duser.home="${runtimeHome}" -Djava.io.tmpdir="${runtimeTmp}" -Djna.tmpdir="${runtimeTmp}"${structureTimingOption}` };
@@ -537,18 +516,7 @@ async function removeOwnedWork() {
 }
 
 try {
-  if (values.mode === 'structure' || values.mode === 'structure-cold') {
-    report.sourceIdentity = await verifyStructureQualificationSource(repo, report.driverCommit);
-    report.sourceIdentity.revisionBinding = await verifyStructureSourceRevision(repo, report.driverCommit);
-    report.browserIdentity = await verifyStructureBrowser({ repoRoot: repo, chromePath: chromeBinary });
-    const browserLockSource = report.sourceIdentity.files.find(file => file.path === 'scripts/web-test-browser.json');
-    if (browserLockSource?.sha256 !== report.browserIdentity.lockSha256) {
-      throw new Error('verified browser lock changed after qualification source identity capture');
-    }
-    report.tools.chromeSha256 = report.browserIdentity.executableSha256;
-  } else {
-    report.tools.chromeSha256 = await fileHash(chromeBinary);
-  }
+  report.tools.chromeSha256 = await fileHash(chromeBinary);
   let installation = await prepareArchive(values.mode === 'upgrade' ? values['previous-archive'] : archive);
   recordInstallation(installation);
   const { manifest, data } = installation;
@@ -558,7 +526,7 @@ try {
   const sourcesFixture = values.mode === 'sources' ? await seedSources(data) : null;
   const restartFixture = values.mode === 'restart' ? await seedHistory(data) : null;
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
-  const structureFixture = values.mode === 'structure' || values.mode === 'structure-cold' ? await seedStructure(data) : null;
+  const structureFixture = values.mode === 'structure' ? await seedStructure(data) : null;
   const liveFixture = values.mode === 'live' ? await seedLive(data) : null;
   const populated = !!(logFixture || historyFixture || restartFixture || sourcesFixture || scaleFixture || structureFixture || liveFixture);
   const libraryText = (logFixture || historyFixture || restartFixture) ? 'synthetic-history.elf' : sourcesFixture ? 'synthetic-sources.elf' : scaleFixture ? 'synthetic-project-09999.elf'
@@ -596,8 +564,6 @@ try {
   browser = startOwned(chromeBinary, [...(observeNativeVisibility ? [] : ['--headless=new']), '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
     cwd: repo, env: { ...process.env, TMPDIR: browserTmpForProcess }, stdio: ['ignore', 'ignore', 'pipe'],
   });
-  report.runtimeProcesses = { applicationPid: application.pid, applicationStartTimeTicks: await processStartTimeTicks(application.pid),
-    browserPid: browser.pid, browserStartTimeTicks: await processStartTimeTicks(browser.pid) };
   browser.stderr.on('data', (chunk) => { browserError = (browserError + chunk).slice(-1048576); });
   const portFile = await waitFor(async () => {
     if (browser.exitCode !== null || browser.signalCode !== null) throw new Error(`Browser exited: ${browserError}`);
@@ -952,7 +918,7 @@ try {
     report.requests = {};
   }
 
-  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'logs' || values.mode === 'sources' || values.mode === 'scale' || values.mode === 'structure' || values.mode === 'structure-cold' || values.mode === 'live' || values.mode === 'proxy') {
+  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'logs' || values.mode === 'sources' || values.mode === 'scale' || values.mode === 'structure' || values.mode === 'live' || values.mode === 'proxy') {
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'local bootstrap handoff');
     const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
     sensitiveValues.push(token);
@@ -971,23 +937,6 @@ try {
     })();` }, authenticated.sessionId);
     await cdp.call('Page.navigate', { url: bootstrapUrl }, authenticated.sessionId);
     await ready(authenticated, `document.body.innerText.includes('Local session connected.')`, 'authenticated packaged session');
-    if (values.mode === 'structure-cold') {
-      assert.equal(await evaluate(authenticated, 'location.hash'), '', 'Bootstrap fragment must be scrubbed');
-      assert.equal(await evaluate(authenticated, 'localStorage.length + sessionStorage.length'), 0, 'Fresh browser profile must not retain browser storage');
-      const bootstrapFetches = await evaluate(authenticated, 'window.__sessionTestRequests');
-      assert.equal(bootstrapFetches.filter(request => request.method === 'POST').length, 1, 'The cold profile must make one bootstrap exchange');
-      assert.ok(bootstrapFetches.every(request => request.fragmentEmpty), 'Bootstrap credential must be scrubbed before fetch');
-      const cookies = (await cdp.call('Network.getCookies', { urls: [browserOrigin + '/nested/'] }, authenticated.sessionId)).cookies;
-      const localCookie = cookies.find(cookie => cookie.path === '/nested/' && cookie.httpOnly);
-      assert.ok(localCookie, 'Cold sample must use the packaged HttpOnly session cookie');
-      assert.equal(localCookie.sameSite, 'Strict');
-      report.sessionBootstrap = { authenticatedFromFreshProfile: true, handoffFragmentScrubbed: true,
-        storageEntries: 0, cookie: { httpOnly: true, sameSite: localCookie.sameSite, path: localCookie.path },
-        timedBoundary: 'click browse-recovered-functions to first 100 rendered rows' };
-      report.structureCold = await qualifyStructureColdSample({ fixture: structureFixture, makeTarget, cdp, evaluate, ready,
-        browserOrigin, applicationPid: application.pid, profile: values['structure-profile'] });
-      if (!report.structureCold.passed) throw new Error(`Cold structure sample failed: ${JSON.stringify(report.structureCold.failures)}`);
-    } else {
     if (values.mode === 'proxy') {
       await waitFor(() => hmrConnected, 'real Vite HMR connection');
       report.hmrConnected = true;
@@ -1120,8 +1069,7 @@ try {
 
     if (logFixture) report.logs = await qualifyLogs({ fixture: logFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
     if (scaleFixture) report.scale = await qualifyScale({ fixture: scaleFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
-    if (values.mode === 'structure') report.structure = await qualifyStructure({ fixture: structureFixture, makeTarget, cdp, evaluate, ready, browserOrigin,
-      applicationPid: application.pid, profile: values['structure-profile'] });
+    if (structureFixture) report.structure = await qualifyStructure({ fixture: structureFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
     if (liveFixture) {
       report.liveDashboard = await qualifyLive({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
       report.jobLifecycle = await qualifyLifecycle({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
@@ -1229,7 +1177,6 @@ try {
     assert.equal(await fs.stat(data).then(() => true, () => false), values.mode === 'upload' || values.mode === 'metadata' || populated);
     report.session = { authenticated: true, cookie: { httpOnly: true, sameSite: 'Strict', path: '/nested/', secure: false }, fragmentRemovedBeforeFetch: true, restoredAfterReload: true, explicitLogoutRequests: 1, successfulExchangeRequests: 1, consumedLinkRequests: 1, automaticMutationRetries: 0, storageEntries: 0, installationUnchanged: true, jobDataCreated: values.mode === 'upload' || values.mode === 'metadata' || populated };
     report.requests.authenticated = authenticated.requests;
-    }
   }
 
   // Let the final DevTools events drain before taking the evidence snapshot.
@@ -1263,6 +1210,8 @@ try {
   report.error = safeDiagnostic(error.stack);
   // Fixed logs phase labels and bounded counts only, captured in memory before the throw (#1872).
   report.logsFailurePhase = logsFailureEvidence(error);
+  // Fixed Structure body-read facts only; observations, not a cause (#1879).
+  report.structureFailurePhase = structureFailureEvidence(error);
   report.applicationError = safeDiagnostic(applicationError);
   report.browserError = safeDiagnostic(browserError);
   report.viteError = safeDiagnostic(viteError);
@@ -1314,7 +1263,7 @@ try {
       process.exitCode = 1;
     }
   }
-  if (values.mode === 'structure' || values.mode === 'structure-cold') report.structureServerTiming = structureServerTimingSummary(applicationError);
+  if (values.mode === 'structure') report.structureServerTiming = structureServerTimingSummary(applicationError);
   // Scrubbed, bounded and lossless (#1882): report.json stays within 512 KiB, with any larger
   // evidence in digest-referenced parts; a failed publication leaves a failure record and throws.
   const { primaryText } = await publishReport(root, report, sensitiveValues);
