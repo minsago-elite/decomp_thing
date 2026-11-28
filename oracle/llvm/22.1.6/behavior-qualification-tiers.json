@@ -34,7 +34,7 @@
         "push"
       ],
       "maximumAggregateWallMilliseconds": 120000,
-      "productionEvidence": false,
+      "productionEvidenceEligible": false,
       "repetitions": 1
     },
     "full-qualification": {
@@ -45,7 +45,7 @@
         "workflow_dispatch"
       ],
       "minimumRepetitions": 3,
-      "productionEvidence": true
+      "productionEvidenceEligible": true
     }
   }
 }

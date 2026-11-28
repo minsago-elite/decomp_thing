@@ -5,6 +5,7 @@ import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import java.nio.file.Path
+import java.util.Collections
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -35,61 +36,64 @@ enum class LlvmBehaviorQualificationTierKind(val policyName: String) {
 }
 
 /**
- * One authenticated tier. [caseIds] is the exact case set a run of this tier must execute;
+ * One verified tier. [caseIds] is the exact case set a run of this tier must declare;
  * [repetitions] is exact for CI smoke and a minimum for full qualification.
+ * [productionEvidenceEligible] states only which tier may later be considered as production
+ * evidence; it is not an admission of any run. All collections are unmodifiable copies.
  */
-class LlvmBehaviorQualificationTier internal constructor(
-    val kind: LlvmBehaviorQualificationTierKind,
-    val events: Set<LlvmBehaviorQualificationEvent>,
-    val caseIds: List<String>,
-    val repetitions: Int,
-    val caseLimits: Map<String, Long>,
-    val maximumAggregateWallMilliseconds: Long?,
-    val productionEvidence: Boolean,
-)
-
-/** Admission of one completed run. Only a full-matrix, repeated, manual or periodic run is production evidence. */
-class LlvmBehaviorQualificationAdmission internal constructor(
-    val tier: LlvmBehaviorQualificationTierKind,
-    val event: LlvmBehaviorQualificationEvent,
-    val caseCount: Int,
-    val repetitions: Int,
-    val productionEvidence: Boolean,
-)
+sealed interface LlvmBehaviorQualificationTier {
+    val kind: LlvmBehaviorQualificationTierKind
+    val events: Set<LlvmBehaviorQualificationEvent>
+    val caseIds: List<String>
+    val repetitions: Int
+    val caseLimits: Map<String, Long>
+    val maximumAggregateWallMilliseconds: Long?
+    val productionEvidenceEligible: Boolean
+}
 
 /**
- * Separates bounded CI smoke from full target/resource qualification (#917).
+ * Verified tier policy separating bounded CI smoke from full target/resource qualification.
  *
  * The policy is bound to the authenticated behavior corpus. CI events select a strict, bounded
- * subset at one repetition whose ceilings never exceed the corpus limits, and such a run is never
- * production evidence. Manual and periodic events select every corpus case at three or more
- * clean repetitions. This gate does not execute Clang, measure resources, or derive regression
- * ratios; those remain with the measurement and threshold slices (#915, #916).
+ * subset at one repetition whose limits are executable, mutually consistent and never above the
+ * corpus limits. Manual and periodic events select every corpus case at three or more clean
+ * repetitions. Instances are constructed only by [LlvmBehaviorQualificationTierVerifier].
+ *
+ * This is policy validation only. It does not execute Clang, measure resources, derive regression
+ * ratios, or admit evidence. Admitting a run as production evidence is reserved for authenticated
+ * workflow provenance together with verified per-case run records from the measurement and
+ * threshold work; caller-declared run shapes can never establish it.
  */
-class LlvmBehaviorQualificationTierPolicy internal constructor(
-    val corpusId: String,
-    val corpusSha256: String,
-    val policySha256: String,
-    val corpusCaseIds: List<String>,
-    val smoke: LlvmBehaviorQualificationTier,
-    val full: LlvmBehaviorQualificationTier,
-) {
+sealed interface LlvmBehaviorQualificationTierPolicy {
+    val corpusId: String
+    val corpusSha256: String
+    val policySha256: String
+    val corpusCaseIds: List<String>
+    val smoke: LlvmBehaviorQualificationTier
+    val full: LlvmBehaviorQualificationTier
+
     fun tierFor(event: LlvmBehaviorQualificationEvent): LlvmBehaviorQualificationTier =
         listOf(smoke, full).single { event in it.events }
 
-    fun admit(
+    /**
+     * Validates that a declared run shape matches the tier its event selects: the event alone
+     * picks the tier, the case set must match exactly, and the repetition count must be exact
+     * (smoke) or at least the minimum (full). Returns nothing because a declared shape proves
+     * neither workflow provenance nor that clean repetitions ran under the limits.
+     */
+    fun validateRunShape(
         requested: LlvmBehaviorQualificationTierKind,
         event: LlvmBehaviorQualificationEvent,
-        observedCaseIds: List<String>,
+        declaredCaseIds: List<String>,
         repetitions: Int,
-    ): LlvmBehaviorQualificationAdmission {
+    ) {
         val tier = tierFor(event)
         if (tier.kind != requested) {
             tierFail("${event.eventName} runs must use ${tier.kind.policyName}, not ${requested.policyName}")
         }
-        if (observedCaseIds.toSet().size != observedCaseIds.size) tierFail("observed case identifiers repeat")
-        if (observedCaseIds.toSet() != tier.caseIds.toSet()) {
-            tierFail("${tier.kind.policyName} runs must execute exactly the declared case set")
+        if (declaredCaseIds.toSet().size != declaredCaseIds.size) tierFail("declared case identifiers repeat")
+        if (declaredCaseIds.toSet() != tier.caseIds.toSet()) {
+            tierFail("${tier.kind.policyName} runs must declare exactly the tier's case set")
         }
         when (tier.kind) {
             LlvmBehaviorQualificationTierKind.CI_SMOKE -> if (repetitions != tier.repetitions) {
@@ -99,18 +103,15 @@ class LlvmBehaviorQualificationTierPolicy internal constructor(
                 tierFail("full-qualification runs need at least ${tier.repetitions} clean repetitions")
             }
         }
-        return LlvmBehaviorQualificationAdmission(
-            tier.kind,
-            event,
-            observedCaseIds.size,
-            repetitions,
-            tier.productionEvidence,
-        )
     }
 }
 
 object LlvmBehaviorQualificationTierVerifier {
-    /** Smoke must finish inside this worst-case wall budget, whatever the policy file says. */
+    /**
+     * Hard cap on the smoke tier's declared aggregate wall budget. The checked 120 s budget is
+     * unmeasured headroom over the 80 s sum of per-case timeout ceilings (8 cases x 10 s); no
+     * runner enforces an aggregate timer yet, so the budget is a declared bound, not a measurement.
+     */
     const val MAXIMUM_SMOKE_AGGREGATE_WALL_MILLISECONDS = 180_000L
     const val MINIMUM_FULL_REPETITIONS = 3
 
@@ -118,7 +119,13 @@ object LlvmBehaviorQualificationTierVerifier {
         policyPath: Path,
         corpusPath: Path,
         reference: LlvmBehaviorReferenceEvidence,
-    ): LlvmBehaviorQualificationTierPolicy = try {
+    ): LlvmBehaviorQualificationTierPolicy = VerifiedPolicy(policyPath, corpusPath, reference)
+
+    private fun authenticate(
+        policyPath: Path,
+        corpusPath: Path,
+        reference: LlvmBehaviorReferenceEvidence,
+    ): VerifiedContent = try {
         val corpusSnapshot = OracleArtifacts.read(corpusPath, OracleArtifactLimits(MAXIMUM_CORPUS_BYTES))
         if (corpusSnapshot.sha256 != reference.corpusSha256) {
             tierFail("behavior corpus changed after reference authentication")
@@ -151,7 +158,7 @@ object LlvmBehaviorQualificationTierVerifier {
         policySha256: String,
         reference: LlvmBehaviorReferenceEvidence,
         corpusLimits: Map<String, Long>,
-    ): LlvmBehaviorQualificationTierPolicy {
+    ): VerifiedContent {
         policy.exactFields(setOf("schemaVersion", "corpus", "tiers"), "qualification tier policy")
         if (policy["schemaVersion"].positiveLong("schemaVersion") != 1L) tierFail("unsupported schemaVersion")
         val corpusBinding = policy.obj("corpus", "qualification tier policy")
@@ -166,14 +173,7 @@ object LlvmBehaviorQualificationTierVerifier {
         val corpusCaseIds = reference.caseIds.toList()
         val smoke = parseSmoke(tiers.obj("ci-smoke", "tiers"), corpusCaseIds, corpusLimits)
         val full = parseFull(tiers.obj("full-qualification", "tiers"), corpusCaseIds, corpusLimits)
-        return LlvmBehaviorQualificationTierPolicy(
-            reference.corpusId,
-            reference.corpusSha256,
-            policySha256,
-            corpusCaseIds,
-            smoke,
-            full,
-        )
+        return VerifiedContent(reference.corpusId, reference.corpusSha256, policySha256, corpusCaseIds, smoke, full)
     }
 
     private fun parseSmoke(
@@ -185,7 +185,7 @@ object LlvmBehaviorQualificationTierVerifier {
         tier.exactFields(
             setOf(
                 "events",
-                "productionEvidence",
+                "productionEvidenceEligible",
                 "repetitions",
                 "caseIds",
                 "caseLimits",
@@ -194,7 +194,7 @@ object LlvmBehaviorQualificationTierVerifier {
             label,
         )
         val events = parseEvents(tier, label, SMOKE_EVENTS)
-        if (tier["productionEvidence"].boolean("$label productionEvidence")) {
+        if (tier["productionEvidenceEligible"].boolean("$label productionEvidenceEligible")) {
             tierFail("$label can never be production evidence")
         }
         if (tier["repetitions"].positiveLong("$label repetitions") != 1L) tierFail("$label must run exactly once")
@@ -207,6 +207,13 @@ object LlvmBehaviorQualificationTierVerifier {
         if (unknown.isNotEmpty()) tierFail("$label selects cases outside the corpus: $unknown")
         if (caseIds.size >= corpusCaseIds.size) tierFail("$label must be a strict subset of the corpus")
         val limitsObject = tier.obj("caseLimits", label)
+        // The same execution-limit contract as the corpus: every field present, each value inside
+        // its executable range, and file/artifact/workspace/memory bounds mutually consistent.
+        try {
+            validateExecutionLimits(limitsObject, "$label caseLimits")
+        } catch (failure: LlvmBehaviorReferenceEvidenceException) {
+            throw LlvmBehaviorQualificationTierException(failure.message ?: "$label caseLimits are invalid", failure)
+        }
         limitsObject.exactFields(corpusLimits.keys, "$label caseLimits")
         val caseLimits = limitsObject.entries.associate { (key, value) ->
             val limit = value.positiveLong("$label caseLimits $key")
@@ -221,14 +228,14 @@ object LlvmBehaviorQualificationTierVerifier {
         if (Math.multiplyExact(timeout, caseIds.size.toLong()) > aggregate) {
             tierFail("$label worst-case wall time exceeds its aggregate bound")
         }
-        return LlvmBehaviorQualificationTier(
+        return VerifiedTier(
             LlvmBehaviorQualificationTierKind.CI_SMOKE,
             events,
             caseIds,
             1,
             caseLimits,
             aggregate,
-            productionEvidence = false,
+            productionEvidenceEligible = false,
         )
     }
 
@@ -239,12 +246,12 @@ object LlvmBehaviorQualificationTierVerifier {
     ): LlvmBehaviorQualificationTier {
         val label = "full-qualification tier"
         tier.exactFields(
-            setOf("events", "productionEvidence", "minimumRepetitions", "caseSelection", "caseLimitSource"),
+            setOf("events", "productionEvidenceEligible", "minimumRepetitions", "caseSelection", "caseLimitSource"),
             label,
         )
         val events = parseEvents(tier, label, FULL_EVENTS)
-        if (!tier["productionEvidence"].boolean("$label productionEvidence")) {
-            tierFail("$label must be the production evidence tier")
+        if (!tier["productionEvidenceEligible"].boolean("$label productionEvidenceEligible")) {
+            tierFail("$label must be the only tier eligible for production evidence")
         }
         val repetitions = tier["minimumRepetitions"].positiveLong("$label minimumRepetitions")
         if (repetitions < MINIMUM_FULL_REPETITIONS || repetitions > MAXIMUM_FULL_REPETITIONS) {
@@ -256,14 +263,14 @@ object LlvmBehaviorQualificationTierVerifier {
         if (tier["caseLimitSource"].string("$label caseLimitSource") != "corpus") {
             tierFail("$label must use the corpus-declared case limits")
         }
-        return LlvmBehaviorQualificationTier(
+        return VerifiedTier(
             LlvmBehaviorQualificationTierKind.FULL_QUALIFICATION,
             events,
             corpusCaseIds,
             repetitions.toInt(),
             corpusLimits,
             maximumAggregateWallMilliseconds = null,
-            productionEvidence = true,
+            productionEvidenceEligible = true,
         )
     }
 
@@ -277,6 +284,50 @@ object LlvmBehaviorQualificationTierVerifier {
             tierFail("$label events must be exactly ${required.map { it.eventName }}")
         }
         return names.map(LlvmBehaviorQualificationEvent::parse).toSet()
+    }
+
+    /** Verifier-private construction; every collection is copied and wrapped unmodifiable. */
+    private class VerifiedTier(
+        override val kind: LlvmBehaviorQualificationTierKind,
+        events: Set<LlvmBehaviorQualificationEvent>,
+        caseIds: List<String>,
+        override val repetitions: Int,
+        caseLimits: Map<String, Long>,
+        override val maximumAggregateWallMilliseconds: Long?,
+        override val productionEvidenceEligible: Boolean,
+    ) : LlvmBehaviorQualificationTier {
+        override val events: Set<LlvmBehaviorQualificationEvent> = Collections.unmodifiableSet(LinkedHashSet(events))
+        override val caseIds: List<String> = Collections.unmodifiableList(ArrayList(caseIds))
+        override val caseLimits: Map<String, Long> = Collections.unmodifiableMap(LinkedHashMap(caseLimits))
+    }
+
+    private class VerifiedContent(
+        val corpusId: String,
+        val corpusSha256: String,
+        val policySha256: String,
+        val corpusCaseIds: List<String>,
+        val smoke: LlvmBehaviorQualificationTier,
+        val full: LlvmBehaviorQualificationTier,
+    )
+
+    /*
+     * Following the reference-evidence model, the only implementation accepts raw production
+     * paths and already-authenticated reference evidence. Even a JVM caller reaching this
+     * non-public class through reflection cannot supply parsed tiers, limits or a claimed digest:
+     * construction performs the same complete verification as [verify].
+     */
+    private class VerifiedPolicy(
+        policyPath: Path,
+        corpusPath: Path,
+        reference: LlvmBehaviorReferenceEvidence,
+    ) : LlvmBehaviorQualificationTierPolicy {
+        private val content = authenticate(policyPath, corpusPath, reference)
+        override val corpusId: String = content.corpusId
+        override val corpusSha256: String = content.corpusSha256
+        override val policySha256: String = content.policySha256
+        override val corpusCaseIds: List<String> = Collections.unmodifiableList(ArrayList(content.corpusCaseIds))
+        override val smoke: LlvmBehaviorQualificationTier = content.smoke
+        override val full: LlvmBehaviorQualificationTier = content.full
     }
 
     private val SMOKE_EVENTS = listOf(LlvmBehaviorQualificationEvent.PULL_REQUEST, LlvmBehaviorQualificationEvent.PUSH)

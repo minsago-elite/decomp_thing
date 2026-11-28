@@ -1,6 +1,8 @@
 package decompengine.oracle.behavior
 
 import decompengine.oracle.core.OracleJson
+import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Modifier
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
@@ -25,7 +27,7 @@ class LlvmBehaviorQualificationTiersTest {
         val smoke = policy.tierFor(LlvmBehaviorQualificationEvent.PULL_REQUEST)
         assertEquals(LlvmBehaviorQualificationTierKind.CI_SMOKE, smoke.kind)
         assertEquals(smoke, policy.tierFor(LlvmBehaviorQualificationEvent.PUSH))
-        assertFalse(smoke.productionEvidence)
+        assertFalse(smoke.productionEvidenceEligible)
         assertEquals(1, smoke.repetitions)
         assertEquals(8, smoke.caseIds.size)
         assertTrue(smoke.caseIds.size < policy.corpusCaseIds.size)
@@ -45,7 +47,7 @@ class LlvmBehaviorQualificationTiersTest {
         val full = policy.tierFor(LlvmBehaviorQualificationEvent.WORKFLOW_DISPATCH)
         assertEquals(LlvmBehaviorQualificationTierKind.FULL_QUALIFICATION, full.kind)
         assertEquals(full, policy.tierFor(LlvmBehaviorQualificationEvent.SCHEDULE))
-        assertTrue(full.productionEvidence)
+        assertTrue(full.productionEvidenceEligible)
         assertEquals(policy.corpusCaseIds, full.caseIds)
         assertEquals(48, full.caseIds.size)
         assertEquals(3, full.repetitions)
@@ -54,28 +56,28 @@ class LlvmBehaviorQualificationTiersTest {
     }
 
     @Test
-    fun `smoke runs are never production evidence and full runs need every case three times`() {
+    fun `run shapes must match the tier their event selects`() {
         val policy = verify(PROFILE.resolve("behavior-qualification-tiers.json"))
         val smokeCases = policy.smoke.caseIds
         val everyCase = policy.corpusCaseIds
 
-        val smoke = policy.admit(
+        // Policy validation only: a matching declared shape returns nothing and admits no evidence.
+        policy.validateRunShape(
             LlvmBehaviorQualificationTierKind.CI_SMOKE,
             LlvmBehaviorQualificationEvent.PULL_REQUEST,
             smokeCases.reversed(),
             1,
         )
-        assertFalse(smoke.productionEvidence)
-        assertEquals(smokeCases.size, smoke.caseCount)
-
-        val full = policy.admit(
+        policy.validateRunShape(
             LlvmBehaviorQualificationTierKind.FULL_QUALIFICATION,
             LlvmBehaviorQualificationEvent.WORKFLOW_DISPATCH,
             everyCase,
             3,
         )
-        assertTrue(full.productionEvidence)
-        assertEquals(48, full.caseCount)
+        val validateRunShape = LlvmBehaviorQualificationTierPolicy::class.java.methods.single {
+            it.name == "validateRunShape"
+        }
+        assertEquals(Void.TYPE, validateRunShape.returnType)
 
         val rejected = listOf(
             // CI events cannot claim full qualification, even with the full matrix.
@@ -118,7 +120,7 @@ class LlvmBehaviorQualificationTiersTest {
         )
         rejected.forEach { (kind, event, run) ->
             assertFailsWith<LlvmBehaviorQualificationTierException>("$kind $event ${run.first.size}x${run.second}") {
-                policy.admit(kind, event, run.first, run.second)
+                policy.validateRunShape(kind, event, run.first, run.second)
             }
         }
         assertFailsWith<LlvmBehaviorQualificationTierException> { LlvmBehaviorQualificationEvent.parse("merge_group") }
@@ -127,7 +129,7 @@ class LlvmBehaviorQualificationTiersTest {
     @Test
     fun `tampered policies are rejected`() {
         val mutations: List<Pair<String, (JsonObject) -> JsonObject>> = listOf(
-            "smoke claims production" to { root -> root.setSmoke("productionEvidence", JsonPrimitive(true)) },
+            "smoke claims production" to { root -> root.setSmoke("productionEvidenceEligible", JsonPrimitive(true)) },
             "smoke repeats" to { root -> root.setSmoke("repetitions", JsonPrimitive(3)) },
             "smoke selects every case" to { root -> root.setSmoke("caseIds", strings(corpusCaseIds())) },
             "smoke selects unknown case" to { root ->
@@ -143,6 +145,9 @@ class LlvmBehaviorQualificationTiersTest {
                     JsonObject(root.smoke()["caseLimits"]!!.jsonObject() + ("memoryBytes" to JsonPrimitive(1073741825L))),
                 )
             },
+            "smoke limit below executable minimum" to { root -> root.setSmokeLimit("openFiles", 8) },
+            "smoke file limit above workspace limit" to { root -> root.setSmokeLimit("workspaceBytes", 8L * 1024 * 1024) },
+            "smoke artifact limit above file limit" to { root -> root.setSmokeLimit("fileBytes", 8L * 1024 * 1024) },
             "smoke limit missing" to { root ->
                 root.setSmoke("caseLimits", JsonObject(root.smoke()["caseLimits"]!!.jsonObject() - "cpuSeconds"))
             },
@@ -156,7 +161,7 @@ class LlvmBehaviorQualificationTiersTest {
                 root.setSmoke("events", strings(listOf("pull_request", "push", "workflow_dispatch")))
             },
             "full on CI event" to { root -> root.setFull("events", strings(listOf("push", "schedule", "workflow_dispatch"))) },
-            "full not production" to { root -> root.setFull("productionEvidence", JsonPrimitive(false)) },
+            "full not production" to { root -> root.setFull("productionEvidenceEligible", JsonPrimitive(false)) },
             "full single run" to { root -> root.setFull("minimumRepetitions", JsonPrimitive(1)) },
             "full two runs" to { root -> root.setFull("minimumRepetitions", JsonPrimitive(2)) },
             "full partial matrix" to { root -> root.setFull("caseSelection", JsonPrimitive("ci-smoke")) },
@@ -180,6 +185,65 @@ class LlvmBehaviorQualificationTiersTest {
         }
         val noncanonical = writeRaw("noncanonical", PROFILE.resolve("behavior-qualification-tiers.json").readText().trimEnd().toByteArray())
         assertFailsWith<LlvmBehaviorQualificationTierException> { verify(noncanonical) }
+    }
+
+    @Test
+    fun `a tighter consistent smoke tier verifies`() {
+        val checked = OracleJson.parse(PROFILE.resolve("behavior-qualification-tiers.json").readBytes()).jsonObject()
+        val tighter = checked.setSmokeLimit("timeoutMilliseconds", 5_000).setSmokeLimit("memoryBytes", 512L * 1024 * 1024)
+        val smoke = verify(writePolicy("tighter", tighter)).smoke
+        assertEquals(5_000L, smoke.caseLimits.getValue("timeoutMilliseconds"))
+        assertEquals(512L * 1024 * 1024, smoke.caseLimits.getValue("memoryBytes"))
+    }
+
+    @Test
+    fun `verified policy is immutable and only the verifier constructs it`() {
+        val policy = verify(PROFILE.resolve("behavior-qualification-tiers.json"))
+        listOf(policy.smoke, policy.full).forEach { tier ->
+            @Suppress("UNCHECKED_CAST")
+            assertFailsWith<UnsupportedOperationException> { (tier.caseIds as MutableList<String>).add("forged") }
+            @Suppress("UNCHECKED_CAST")
+            assertFailsWith<UnsupportedOperationException> { (tier.caseIds as MutableList<String>).clear() }
+            @Suppress("UNCHECKED_CAST")
+            assertFailsWith<UnsupportedOperationException> {
+                (tier.events as MutableSet<LlvmBehaviorQualificationEvent>).add(LlvmBehaviorQualificationEvent.SCHEDULE)
+            }
+            @Suppress("UNCHECKED_CAST")
+            assertFailsWith<UnsupportedOperationException> {
+                (tier.caseLimits as MutableMap<String, Long>)["timeoutMilliseconds"] = Long.MAX_VALUE
+            }
+        }
+        @Suppress("UNCHECKED_CAST")
+        assertFailsWith<UnsupportedOperationException> { (policy.corpusCaseIds as MutableList<String>).removeAt(0) }
+        // The smoke tier still selects for both CI events after the attempted tampering.
+        assertEquals(LlvmBehaviorQualificationTierKind.CI_SMOKE, policy.tierFor(LlvmBehaviorQualificationEvent.PUSH).kind)
+        assertEquals(8, policy.smoke.caseIds.size)
+        assertEquals(48, policy.corpusCaseIds.size)
+
+        assertTrue(LlvmBehaviorQualificationTierPolicy::class.java.isInterface)
+        assertTrue(LlvmBehaviorQualificationTier::class.java.isInterface)
+        listOf(policy.javaClass, policy.smoke.javaClass).forEach { implementation ->
+            assertFalse(Modifier.isPublic(implementation.modifiers), implementation.name)
+        }
+        // The policy implementation accepts only raw paths and authenticated reference evidence, and
+        // its constructor re-runs verification, so reflection cannot forge a verified policy.
+        val constructor = policy.javaClass.declaredConstructors.single().also { it.isAccessible = true }
+        assertEquals(
+            listOf(Path::class.java, Path::class.java, LlvmBehaviorReferenceEvidence::class.java),
+            constructor.parameterTypes.toList(),
+        )
+        val checked = OracleJson.parse(PROFILE.resolve("behavior-qualification-tiers.json").readBytes()).jsonObject()
+        val forged = writePolicy("reflective-forgery", checked.setSmoke("repetitions", JsonPrimitive(5)))
+        val failure = assertFailsWith<InvocationTargetException> {
+            constructor.newInstance(forged, PROFILE.resolve("behavior-corpus.json"), reference)
+        }
+        assertTrue(failure.targetException is LlvmBehaviorQualificationTierException)
+        val reconstructed = constructor.newInstance(
+            PROFILE.resolve("behavior-qualification-tiers.json"),
+            PROFILE.resolve("behavior-corpus.json"),
+            reference,
+        ) as LlvmBehaviorQualificationTierPolicy
+        assertEquals(policy.policySha256, reconstructed.policySha256)
     }
 
     @Test
@@ -215,6 +279,10 @@ class LlvmBehaviorQualificationTiersTest {
         val lane = workflow.substringAfter("  provenance-artifacts-and-ground-truth:\n").substringBefore("\n  llvm-required-contract:")
         assertTrue(lane.startsWith("    if: github.event_name != 'workflow_dispatch'\n"))
         assertTrue(lane.contains(step))
+        val allowlist = lane.substringAfter("case \"\$QUALIFICATION_EVENT\" in\n").substringBefore("esac")
+        assertTrue(allowlist.contains("push|pull_request) ;;"))
+        assertTrue(allowlist.contains("*) echo"))
+        assertTrue(lane.indexOf("push|pull_request) ;;") < lane.indexOf(step))
     }
 
     private fun verify(policyPath: Path): LlvmBehaviorQualificationTierPolicy =
@@ -255,6 +323,9 @@ private fun JsonObject.setTier(tier: String, key: String, value: JsonElement): J
     JsonObject(this + ("tiers" to JsonObject(tiers() + (tier to JsonObject(tiers()[tier]!!.jsonObject() + (key to value))))))
 
 private fun JsonObject.setSmoke(key: String, value: JsonElement) = setTier("ci-smoke", key, value)
+
+private fun JsonObject.setSmokeLimit(key: String, value: Long): JsonObject =
+    setSmoke("caseLimits", JsonObject(smoke()["caseLimits"]!!.jsonObject() + (key to JsonPrimitive(value))))
 
 private fun JsonObject.setFull(key: String, value: JsonElement) = setTier("full-qualification", key, value)
 
