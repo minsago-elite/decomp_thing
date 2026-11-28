@@ -128,7 +128,7 @@ public final class OwnedExporterPrototypeProbe {
         Constructor<?> constructor = nested("FunctionMetadata").getDeclaredConstructors()[0]; constructor.setAccessible(true);
         return constructor.newInstance(null, "    {\n      \"id\": \"fn_0000000000001000\",\n      \"name\": \"probe\",\n      \"address\": \"0x1000\",\n",
             "probe", "void probe(void)", "      \"recoveryAssessment\": \"unassessed\",\n      \"calls\": [],\n      \"referencedGlobals\": [],\n      \"strings\": [],\n",
-            complete ? null : "metadataRefusal=AUTHORED_INCOMPLETE", complete, coverage, target, List.of());
+            complete ? null : "metadataRefusal=AUTHORED_INCOMPLETE", complete, coverage, target);
     }
     static Object render(Object metadata, ExportProgramModelOwned.NativeOutcome outcome, boolean full) throws Exception {
         return OwnedExporterReferencedBytesProbe.invoke(new ExportProgramModelOwned(), "renderFunction",

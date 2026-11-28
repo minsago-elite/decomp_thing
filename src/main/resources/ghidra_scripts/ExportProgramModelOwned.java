@@ -1479,235 +1479,6 @@ public class ExportProgramModelOwned extends GhidraScript {
             currentProgram.getFunctionManager().getFunctionContaining(target) == null &&
             currentProgram.getListing().getInstructionContaining(target) == null;
     }
-    // Each function gets one listing allowance and one decompiler allowance of this size.
-    static final int MAXIMUM_SWITCH_PROVENANCE_WORK = 4096;
-    /** A per-function provenance allowance. Every lookup is charged before it is consumed. Once the
-     * allowance runs out it stays exhausted, so every later slot in the function keeps its refusal. */
-    static final class SwitchProvenanceBudget {
-        private final long limit;
-        private long remaining;
-        SwitchProvenanceBudget(int limit) { this.limit = limit; remaining = limit; }
-        boolean charge(long units) {
-            if (units < 0 || units > remaining) { remaining = -1; return false; }
-            remaining -= units;
-            return true;
-        }
-        /** Returns the unused part of a bound charged before a copy. A copy longer than its bound exhausts the allowance. */
-        boolean settle(long reserved, long actual) {
-            if (remaining < 0 || actual < 0 || actual > reserved) { remaining = -1; return false; }
-            remaining += reserved - actual;
-            return true;
-        }
-        long used() { return remaining < 0 ? -1 : limit - remaining; }
-    }
-    /** An untyped-pointer slot whose missing-type refusal is deferred until the decompiler confirms the table. */
-    static final class SwitchSlotCandidate {
-        final Address reader, slot, value, jump;
-        final int length;
-        final String refusal;
-        SwitchSlotCandidate(Address reader, Address slot, Address value, Address jump, int length, String refusal) {
-            this.reader = java.util.Objects.requireNonNull(reader); this.slot = java.util.Objects.requireNonNull(slot);
-            this.value = java.util.Objects.requireNonNull(value); this.jump = java.util.Objects.requireNonNull(jump);
-            this.length = length; this.refusal = java.util.Objects.requireNonNull(refusal);
-        }
-        @Override public boolean equals(Object other) {
-            if (!(other instanceof SwitchSlotCandidate)) return false;
-            SwitchSlotCandidate that = (SwitchSlotCandidate)other;
-            return reader.equals(that.reader) && slot.equals(that.slot) && value.equals(that.value) &&
-                jump.equals(that.jump) && length == that.length && refusal.equals(that.refusal);
-        }
-        @Override public int hashCode() { return java.util.Objects.hash(reader, slot, value, jump, length, refusal); }
-    }
-    // An untyped-pointer slot is exempt from typed coverage only when it is a jump-table entry that the
-    // decompiler's switch recovery consumes as control flow. It is not a C-visible object. Labels, names
-    // and reachability are not used, because importers and users can set them. This listing half of the
-    // proof binds the specific load. The referencing instruction R must itself LOAD the slot's width at
-    // slotBase + width * index, where slotBase is the referenced slot address as a constant in R's own
-    // p-code (loadAddressBindsSlot). That LOAD's output must be the input of the BRANCHIND of the
-    // computed jump J that ends R's basic block, either directly or through COPYs only. The path from R to J must be fall-through only, with no reference into (R, J]
-    // and no call, store, branch or other definition in between. In one basic block, the raw p-code
-    // reaching definition is the definition the decompiler's SSA builds. So this LOAD is the final load
-    // on the path that switch recovery emulates backward from J's BRANCHIND, which is where its
-    // LoadTables come from. The refusal is lifted only after decompilerSwitchSlotsProven also confirms
-    // J's JumpTable. Every lookup is charged to the function's allowance.
-    private SwitchSlotCandidate switchSlotCandidate(Function function, Instruction reader, Reference read, Data data,
-                                                    String refusal, SwitchProvenanceBudget budget) throws Exception {
-        DataType type = data.getDataType();
-        if (!(type instanceof Pointer) || ((Pointer)type).getDataType() != null) return null;
-        Object value = data.getValue();
-        Address slot = data.getAddress();
-        int length = data.getLength();
-        ghidra.program.model.symbol.RefType kind = read.getReferenceType();
-        if (!(value instanceof Address) || !function.getBody().contains((Address)value) || length <= 0 ||
-            !read.getToAddress().equals(slot) || !read.getFromAddress().equals(reader.getAddress()) ||
-            !(kind == ghidra.program.model.symbol.RefType.READ || kind == ghidra.program.model.symbol.RefType.DATA))
-            return null;
-        List<PcodeOp[]> run = new ArrayList<>();
-        Instruction step = reader, jump = null;
-        int branch = -1;
-        while (jump == null) {
-            checkByteCancellation();
-            if (!budget.charge(1)) return null;
-            if (step == null || !function.getBody().contains(step.getAddress()) || step.isInDelaySlot() ||
-                step.getDelaySlotDepth() != 0) return null;
-            if (!run.isEmpty() && currentProgram.getReferenceManager().hasReferencesTo(step.getAddress())) return null;
-            PcodeOp[] ops = step.getPcode();
-            if (ops == null || !budget.charge(ops.length)) return null;
-            run.add(ops);
-            for (int index = 0; index < ops.length && branch < 0; index++)
-                if (ops[index].getOpcode() == PcodeOp.BRANCHIND) branch = index;
-            if (branch >= 0) jump = step;
-            else if (!step.getFlowType().isFallthrough() || step.getFallThrough() == null) return null;
-            else step = currentProgram.getListing().getInstructionAt(step.getFallThrough());
-        }
-        ghidra.program.model.symbol.FlowType flow = jump.getFlowType();
-        PcodeOp[] jumpOps = run.get(run.size() - 1);
-        if (branch != jumpOps.length - 1 || !flow.isJump() || !flow.isComputed() || flow.isConditional()) return null;
-        Varnode target = jumpOps[branch].getInput(0);
-        for (int at = run.size() - 1; at >= 0; at--) {
-            PcodeOp[] ops = run.get(at);
-            for (int index = (at == run.size() - 1 ? branch : ops.length) - 1; index >= 0; index--) {
-                checkByteCancellation();
-                if (!budget.charge(1) || target == null || target.isConstant()) return null;
-                PcodeOp op = ops[index];
-                int opcode = op.getOpcode();
-                if (opcode == PcodeOp.BRANCH || opcode == PcodeOp.CBRANCH || opcode == PcodeOp.BRANCHIND ||
-                    opcode == PcodeOp.CALL || opcode == PcodeOp.CALLIND || opcode == PcodeOp.CALLOTHER ||
-                    opcode == PcodeOp.RETURN || opcode == PcodeOp.STORE) return null;
-                Varnode output = op.getOutput();
-                if (output == null || !output.intersects(target)) continue;
-                if (!output.getAddress().equals(target.getAddress()) || output.getSize() != target.getSize()) return null;
-                if (opcode == PcodeOp.COPY) { target = op.getInput(0); continue; }
-                if (opcode != PcodeOp.LOAD || at != 0 || !loadAddressBindsSlot(ops, index, slot, length, budget)) return null;
-                return new SwitchSlotCandidate(reader.getAddress(), slot, (Address)value, jump.getAddress(), length, refusal);
-            }
-            // Unique temporaries are local to one instruction's p-code.
-            if (target == null || target.isUnique()) return null;
-        }
-        return null;
-    }
-    /** An address of the form constant + scale * index, where index is a register R reads on entry (or absent). */
-    static final class AffineAddress {
-        final long constant, scale;
-        final Varnode index;
-        AffineAddress(long constant, Varnode index, long scale) { this.constant = constant; this.index = index; this.scale = scale; }
-    }
-    // R's LOAD must read the slot's address space and width at slotBase + width * index. That address must be
-    // computed entirely inside R's own p-code, before the LOAD. Only COPY, and INT_ADD, INT_MULT and INT_LEFT
-    // with constants, are allowed. The inputs are the constant slot base and one index register that R reads
-    // on entry. Each varnode resolves through its reaching definition inside R, so a constant that a later
-    // op overwrote does not count. Any of these keeps the refusal: a partial overlap, an operand from memory
-    // or from a unique not defined in R, a base held in a register from before R, a second index, a scale
-    // other than the width, or any other operator.
-    private boolean loadAddressBindsSlot(PcodeOp[] ops, int load, Address slot, int length, SwitchProvenanceBudget budget) throws Exception {
-        PcodeOp op = ops[load];
-        Varnode space = op.getInput(0), pointer = op.getInput(1), output = op.getOutput();
-        if (op.getOpcode() != PcodeOp.LOAD || output == null || output.getSize() != length || space == null || !space.isConstant() ||
-            pointer == null || pointer.getSize() <= 0 || pointer.getSize() > 8 ||
-            space.getOffset() != slot.getAddressSpace().getSpaceID()) return false;
-        AffineAddress address = affineAddress(ops, pointer, load, 0, budget);
-        long mask = pointer.getSize() == 8 ? -1L : (1L << (8 * pointer.getSize())) - 1;
-        return address != null && address.index != null && address.scale == length &&
-            (address.constant & mask) == (slot.getOffset() & mask);
-    }
-    private AffineAddress affineAddress(PcodeOp[] ops, Varnode value, int before, int depth, SwitchProvenanceBudget budget) throws Exception {
-        checkByteCancellation();
-        if (value == null || depth > 16 || !budget.charge(1)) return null;
-        if (value.isConstant()) return new AffineAddress(value.getOffset(), null, 0);
-        for (int index = before - 1; index >= 0; index--) {
-            if (!budget.charge(1)) return null;
-            PcodeOp definition = ops[index];
-            Varnode output = definition.getOutput();
-            if (output == null || !output.intersects(value)) continue;
-            if (!output.getAddress().equals(value.getAddress()) || output.getSize() != value.getSize()) return null;
-            int opcode = definition.getOpcode();
-            if (opcode == PcodeOp.COPY) return affineAddress(ops, definition.getInput(0), index, depth + 1, budget);
-            if (definition.getNumInputs() != 2 ||
-                (opcode != PcodeOp.INT_ADD && opcode != PcodeOp.INT_MULT && opcode != PcodeOp.INT_LEFT)) return null;
-            AffineAddress left = affineAddress(ops, definition.getInput(0), index, depth + 1, budget);
-            AffineAddress right = left == null ? null : affineAddress(ops, definition.getInput(1), index, depth + 1, budget);
-            if (right == null || (left.index != null && right.index != null)) return null;
-            if (opcode == PcodeOp.INT_ADD) {
-                AffineAddress term = left.index != null ? left : right;
-                return new AffineAddress(left.constant + right.constant, term.index, term.scale);
-            }
-            if (opcode == PcodeOp.INT_MULT) {
-                AffineAddress term = left.index != null ? left : right, factor = left.index != null ? right : left;
-                return new AffineAddress(term.constant * factor.constant, term.index, term.scale * factor.constant);
-            }
-            if (right.index != null || right.constant < 0 || right.constant > 63) return null;
-            return new AffineAddress(left.constant << right.constant, left.index, left.scale << right.constant);
-        }
-        // Not defined inside R before this use. Only a register that R reads on entry may be the index.
-        return value.isRegister() ? new AffineAddress(0, value, 1) : null;
-    }
-    /** One jump's decoded switch evidence, fetched once per function and reused for every candidate at that jump. */
-    static final class JumpEvidence {
-        static final JumpEvidence REFUSED = new JumpEvidence(null, 0, 0, 0, null);
-        final Address start, firstCase;
-        final int size, num, cases;
-        JumpEvidence(Address start, int size, int num, int cases, Address firstCase) {
-            this.start = start; this.size = size; this.num = num; this.cases = cases; this.firstCase = firstCase;
-        }
-    }
-    // This is the decompiler half of the proof. The decompile that renders the function must hold exactly one
-    // JumpTable whose switch address is J. That table must hold exactly one LoadTable, of the slot's width and
-    // starting at the slot, which is the base that R's own address computation names. The slot is therefore
-    // entry 0, and its value must be the table's first case destination. Ghidra merges load records along the
-    // recovery path without keeping the instruction that made each one. So a second LoadTable, or a range not
-    // anchored at R's base, is ambiguous and keeps the refusal. A missing, failed or timed-out decompile, or an
-    // exhausted allowance, also keeps it.
-    // Charging: bundled Ghidra 12.1.3 exposes these arrays only as fresh copies. getJumpTables() is copied once
-    // per function, and no public accessor reports its length first. That length is at most the number of
-    // indirect branches in a decompile limited to MAXIMUM_DECOMPILE_INSTRUCTIONS, and it is charged before any
-    // table is read. The LoadTables and cases of the one table at J are copied once per jump and cached for every
-    // candidate at that jump. Before each copy, the decompile's configured jump-table entry limit plus its
-    // appended default case is reserved. The unused part is returned afterwards, and a longer array refuses.
-    static boolean decompilerSwitchSlotsProven(HighFunction high, List<SwitchSlotCandidate> slots, int entryLimit,
-                                               SwitchProvenanceBudget budget, TaskMonitor taskMonitor) throws Exception {
-        if (high == null || slots.isEmpty() || entryLimit <= 0) return false;
-        prototypeCancellation(taskMonitor);
-        ghidra.program.model.pcode.JumpTable[] tables = high.getJumpTables();
-        if (tables == null || !budget.charge(tables.length)) return false;
-        Map<Address, JumpEvidence> byJump = new java.util.HashMap<>();
-        for (SwitchSlotCandidate slot : slots) {
-            prototypeCancellation(taskMonitor);
-            if (!budget.charge(1)) return false;
-            JumpEvidence evidence = byJump.get(slot.jump);
-            if (evidence == null) {
-                evidence = jumpEvidence(tables, slot.jump, entryLimit, budget, taskMonitor);
-                if (evidence == null) return false;
-                byJump.put(slot.jump, evidence);
-            }
-            if (evidence == JumpEvidence.REFUSED || !slot.slot.equals(evidence.start) || evidence.size != slot.length ||
-                evidence.num <= 0 || evidence.num > evidence.cases || !slot.value.equals(evidence.firstCase)) return false;
-        }
-        return true;
-    }
-    /** Null when the allowance is exhausted; REFUSED when J's decoded evidence is absent or ambiguous. */
-    private static JumpEvidence jumpEvidence(ghidra.program.model.pcode.JumpTable[] tables, Address jump, int entryLimit,
-                                             SwitchProvenanceBudget budget, TaskMonitor taskMonitor) throws Exception {
-        ghidra.program.model.pcode.JumpTable match = null;
-        for (ghidra.program.model.pcode.JumpTable table : tables) {
-            prototypeCancellation(taskMonitor);
-            if (!budget.charge(1)) return null;
-            if (table == null || !jump.equals(table.getSwitchAddress())) continue;
-            if (match != null) return JumpEvidence.REFUSED;
-            match = table;
-        }
-        if (match == null) return JumpEvidence.REFUSED;
-        long bound = (long)entryLimit + 1;
-        if (!budget.charge(bound)) return null;
-        ghidra.program.model.pcode.JumpTable.LoadTable[] loads = match.getLoadTables();
-        if (loads == null || !budget.settle(bound, loads.length)) return null;
-        if (loads.length != 1 || loads[0] == null || loads[0].getAddress() == null) return JumpEvidence.REFUSED;
-        prototypeCancellation(taskMonitor);
-        if (!budget.charge(bound)) return null;
-        Address[] cases = match.getCases();
-        if (cases == null || !budget.settle(bound, cases.length)) return null;
-        if (cases.length == 0 || cases[0] == null) return JumpEvidence.REFUSED;
-        return new JumpEvidence(loads[0].getAddress(), loads[0].getSize(), loads[0].getNum(), cases.length, cases[0]);
-    }
     private ResolvedData resolveAddressedData(Address target) throws Exception {
         checkByteCancellation();
         byteAddress(target);
@@ -2010,16 +1781,10 @@ public class ExportProgramModelOwned extends GhidraScript {
     static final class NativeOutcome {
         final String source, nativeFailure;
         final PrototypeResult prototype;
-        // The exact deferred switch-slot candidates this decompile confirmed. It is empty when none were proven.
-        final List<?> provenSwitchSlots;
         NativeOutcome(String source, String nativeFailure, PrototypeResult prototype) {
-            this(source, nativeFailure, prototype, java.util.List.of());
-        }
-        NativeOutcome(String source, String nativeFailure, PrototypeResult prototype, List<?> provenSwitchSlots) {
             this.source = source;
             this.nativeFailure = nativeFailure;
             this.prototype = java.util.Objects.requireNonNull(prototype);
-            this.provenSwitchSlots = java.util.List.copyOf(provenSwitchSlots);
         }
     }
     static Refusal checkCoverage(TypedPrototype typed, PlannedTypeCoverage planned) {
@@ -2056,12 +1821,8 @@ public class ExportProgramModelOwned extends GhidraScript {
         final boolean evidenceComplete;
         final PlannedTypeCoverage coverage;
         final TargetContext target;
-        // Rendering applies the first slot's refusal unless the decompile proves every slot.
-        final List<SwitchSlotCandidate> switchSlots;
         FunctionMetadata(Function function, String identity, String name, String listingPrototype, String evidence,
-                         String failure, boolean evidenceComplete, PlannedTypeCoverage coverage, TargetContext target,
-                         List<SwitchSlotCandidate> switchSlots) {
-            this.switchSlots = java.util.List.copyOf(switchSlots);
+                         String failure, boolean evidenceComplete, PlannedTypeCoverage coverage, TargetContext target) {
             this.function = function;
             this.identity = identity;
             this.name = name;
@@ -2740,8 +2501,6 @@ public class ExportProgramModelOwned extends GhidraScript {
         boolean evidenceComplete = true;
         boolean reportedDataTypeConstructor = false;
         Map<String, TypeRequirement> coverage = new TreeMap<>();
-        List<SwitchSlotCandidate> switchSlots = new ArrayList<>();
-        SwitchProvenanceBudget switchBudget = new SwitchProvenanceBudget(MAXIMUM_SWITCH_PROVENANCE_WORK);
 
         try {
             for (Function target : function.getCalledFunctions(monitor)) {
@@ -2801,15 +2560,6 @@ public class ExportProgramModelOwned extends GhidraScript {
                                 dataCoverage = planTypeCoverage(dataTypes, typesDirectory, planningEvidence, global.address, catalogOnly);
                             } catch (PrototypeRejected problem) {
                                 rethrowInfrastructureFailure(problem);
-                                // Rendering applies this deferred refusal unless the decompile proves the slot.
-                                if (problem.refusal.code == PrototypeRefusalCode.NULL_TYPE) {
-                                    SwitchSlotCandidate slot = switchSlotCandidate(function, instruction, reference, data,
-                                        exceptionMessage("data-reference recovery", problem), switchBudget);
-                                    if (slot != null) {
-                                        switchSlots.add(slot);
-                                        continue;
-                                    }
-                                }
                                 if (problem.refusal.code != PrototypeRefusalCode.UNSUPPORTED_SHAPE ||
                                     !"TYPE_CONSTRUCTOR".equals(problem.refusal.detail)) throw problem;
                                 evidenceComplete = false;
@@ -2865,7 +2615,7 @@ public class ExportProgramModelOwned extends GhidraScript {
             throw new PlanningIntegrityException("function metadata exceeds its byte bound: " + functionId(function));
         }
         return new FunctionMetadata(function, prefix.toString(), function.getName(), listingPrototype, evidence.toString(),
-            failure, evidenceComplete, new PlannedTypeCoverage(coverage), targetContext(), switchSlots);
+            failure, evidenceComplete, new PlannedTypeCoverage(coverage), targetContext());
     }
 
     /** Replay only in address order, interleaved with new preparation for sparse full checkpoints.
@@ -2896,12 +2646,10 @@ public class ExportProgramModelOwned extends GhidraScript {
         DecompInterface decompiler,
         int timeoutSeconds,
         TaskMonitor taskMonitor,
-        TargetContext target,
-        List<SwitchSlotCandidate> switchSlots
+        TargetContext target
     ) throws Exception {
         String source = null;
         String failure = null;
-        List<SwitchSlotCandidate> provenSwitchSlots = java.util.List.of();
         PrototypeResult prototype = new PrototypeResult(null, new Refusal(PrototypeRefusalCode.NO_HIGH_FUNCTION, "NO_NATIVE_RESULT"));
         try {
             if (taskMonitor.isCancelled() || Thread.currentThread().isInterrupted()) {
@@ -2924,11 +2672,6 @@ public class ExportProgramModelOwned extends GhidraScript {
                 failure = appendFailure(null, "decompilation failed or timed out" +
                     (detail == null || detail.trim().isEmpty() ? "" : ": " + detail));
             }
-            DecompileOptions configured = switchSlots.isEmpty() ? null : decompiler.getOptions();
-            if (configured != null && result != null && result.decompileCompleted() &&
-                decompilerSwitchSlotsProven(result.getHighFunction(), switchSlots, configured.getMaxJumpTableEntries(),
-                    new SwitchProvenanceBudget(MAXIMUM_SWITCH_PROVENANCE_WORK), taskMonitor))
-                provenSwitchSlots = switchSlots;
             prototype = extractTypedPrototype(result, functionName, taskMonitor, target);
             observeTypes("high", functionName, prototype.observations +
                 (prototype.refusal == null ? ";admitted-extraction" : ";" + prototype.refusal.evidence()), taskMonitor);
@@ -2939,26 +2682,19 @@ public class ExportProgramModelOwned extends GhidraScript {
             failure = appendFailure(failure, exceptionMessage("decompilation", problem));
         }
         prototypeCancellation(taskMonitor);
-        return new NativeOutcome(source, failure, prototype, provenSwitchSlots);
+        return new NativeOutcome(source, failure, prototype);
     }
 
     private static FunctionExport renderFunction(FunctionMetadata metadata, NativeOutcome nativeOutcome, boolean full) {
         if (full && nativeOutcome == null) throw new IllegalArgumentException("full rendering requires native outcome");
         String source = nativeOutcome == null ? null : nativeOutcome.source;
-        // Without a decompile that proves these exact slots, the deferred missing-type refusal stands.
-        boolean switchSlotsProven = metadata.switchSlots.isEmpty() ||
-            (nativeOutcome != null && nativeOutcome.provenSwitchSlots.equals(metadata.switchSlots));
-        String switchRefusal = switchSlotsProven ? null : metadata.switchSlots.get(0).refusal;
-        String metadataFailure = switchRefusal == null || (metadata.failure != null && metadata.failure.contains(switchRefusal))
-            ? metadata.failure : appendFailure(metadata.failure, switchRefusal);
-        boolean metadataComplete = metadata.evidenceComplete && switchSlotsProven;
-        String failure = nativeOutcome == null ? metadataFailure : appendFailure(metadataFailure, nativeOutcome.nativeFailure);
+        String failure = nativeOutcome == null ? metadata.failure : appendFailure(metadata.failure, nativeOutcome.nativeFailure);
         Refusal refusal = nativeOutcome == null ? null : nativeOutcome.prototype.refusal;
         if (full && refusal == null) refusal = checkCoverage(nativeOutcome.prototype.typed, metadata.coverage);
         PrototypeOrigin origin = full && refusal == null ? PrototypeOrigin.HIGH_FUNCTION : PrototypeOrigin.LISTING;
         String prototype = origin == PrototypeOrigin.HIGH_FUNCTION ? nativeOutcome.prototype.typed.declaration : metadata.listingPrototype;
         if (full && refusal != null) failure = appendFailure(failure, refusal.evidence());
-        String status = prototypeStatus(full, source, metadataComplete, refusal);
+        String status = prototypeStatus(full, source, metadata.evidenceComplete, refusal);
         String record = metadata.identity + "      \"prototype\": " + json(prototype) + ",\n" + "      \"extractionStatus\": " + json(status) + ",\n" +
             metadata.evidence + "      \"decompiledC\": " + json(source) + "\n    }";
         if (record.getBytes(StandardCharsets.UTF_8).length > MAXIMUM_FULL_FUNCTION_RECORD_BYTES) {
@@ -2978,7 +2714,7 @@ public class ExportProgramModelOwned extends GhidraScript {
     ) throws Exception {
         FunctionMetadata metadata = collectFunctionMetadata(function, globalsDirectory, typesDirectory, planningEvidence);
         NativeOutcome nativeOutcome = includeDecompiledC
-            ? decompileFunction(function, metadata.name, decompiler, decompileTimeoutSeconds, monitor, metadata.target, metadata.switchSlots) : null;
+            ? decompileFunction(function, metadata.name, decompiler, decompileTimeoutSeconds, monitor, metadata.target) : null;
         return renderFunction(metadata, nativeOutcome, includeDecompiledC);
     }
 
@@ -2996,11 +2732,8 @@ public class ExportProgramModelOwned extends GhidraScript {
             try {
                 DecompileOptions decompileOptions = new DecompileOptions();
                 decompileOptions.setMaxInstructions(MAXIMUM_DECOMPILE_INSTRUCTIONS);
-                // Explicitly Ghidra's default. Switch-slot provenance reserves this bound before copying a table's arrays.
-                decompileOptions.setMaxJumpTableEntries(DecompileOptions.SUGGESTED_MAX_JUMPTABLE_ENTRIES);
                 decompiler.setOptions(decompileOptions);
-                // Jump loads make switch recovery report the LoadTables that switch-slot provenance checks.
-                if (!decompiler.toggleSyntaxTree(true) || !decompiler.toggleCCode(true) || !decompiler.toggleJumpLoads(true)) {
+                if (!decompiler.toggleSyntaxTree(true) || !decompiler.toggleCCode(true)) {
                     throw new IllegalStateException("Ghidra decompiler rejected source/syntax-tree configuration");
                 }
                 if (!decompiler.openProgram(currentProgram)) {
@@ -3020,7 +2753,7 @@ public class ExportProgramModelOwned extends GhidraScript {
             long started = observation.begin(nativePhase);
             NativeOutcome outcome;
             try { outcome = decompileFunction(metadata.function, metadata.name, decompiler,
-                retry ? DECOMPILE_RETRY_TIMEOUT_SECONDS : DECOMPILE_TIMEOUT_SECONDS, taskMonitor, metadata.target, metadata.switchSlots); }
+                retry ? DECOMPILE_RETRY_TIMEOUT_SECONDS : DECOMPILE_TIMEOUT_SECONDS, taskMonitor, metadata.target); }
             finally { observation.end(nativePhase, started); }
             long rendering = observation.begin(ExporterPhaseObservationOwnedV1.Phase.RENDER);
             try { return renderFunction(metadata, outcome, true); }
