@@ -1,5 +1,6 @@
 package decompengine.acp
 
+import decompengine.testing.ChildJvm
 import org.junit.jupiter.api.extension.ExtendWith
 import decompengine.agent.AgentAccessPolicy
 import decompengine.agent.AgentCancellation
@@ -1520,12 +1521,12 @@ class LinuxBubblewrapBoundaryTest {
     fun `pre-execution scopes restart after unrelated mount churn and refuse churn that reaches the closure`() {
         withRepositoryTemporaryDirectory("acp-mount-churn-") { base ->
             val temporary = Files.createDirectory(base.resolve("tmp"))
-            val java = Path.of(System.getProperty("java.home"), "bin", "java")
             // A private user+mount namespace makes the probe's own mount(2) calls real kernel events
-            // on the JVM's /proc/self/mountinfo without touching the host table.
+            // on the JVM's /proc/self/mountinfo without touching the host table. The probe's own temporary
+            // root follows ChildJvm's options, so it wins.
             val process = ProcessBuilder(
                 "unshare", "--user", "--map-root-user", "--mount", "--fork", "--",
-                java.toString(), "-XX:-UsePerfData", "-Djava.io.tmpdir=$temporary", "-Djna.tmpdir=$temporary",
+                *ChildJvm.command().toTypedArray(), "-Djava.io.tmpdir=$temporary", "-Djna.tmpdir=$temporary",
                 "-cp", System.getProperty("java.class.path"),
                 LinuxBubblewrapBoundaryTest::class.java.name, "host-mount-churn-restart-probe", base.toString(),
             ).redirectErrorStream(true).redirectOutput(base.resolve("mount-churn-probe.log").toFile()).start()
@@ -3159,12 +3160,12 @@ class LinuxBubblewrapBoundaryTest {
         requireLiveHost()
         withRepositoryTemporaryDirectory("acp-restart-barrier-") { base ->
             val temporary = Files.createDirectory(base.resolve("tmp"))
-            val java = Path.of(System.getProperty("java.home"), "bin", "java")
             // A child JVM keeps this deliberately injected restart out of the run's natural restart count.
             val forwarded = listOf("decompengine.acp.gateHelperExecutable", "decompengine.acp.gateHelperChecksum")
                 .mapNotNull { name -> System.getProperty(name)?.let { "-D$name=$it" } }
+            // The probe's own temporary root follows ChildJvm's options, so it wins.
             val process = ProcessBuilder(
-                listOf(java.toString(), "-XX:-UsePerfData", "-Djava.io.tmpdir=$temporary", "-Djna.tmpdir=$temporary") +
+                ChildJvm.command("-Djava.io.tmpdir=$temporary", "-Djna.tmpdir=$temporary") +
                     forwarded + listOf("-cp", System.getProperty("java.class.path"),
                     LinuxBubblewrapBoundaryTest::class.java.name, "setup-restart-barrier-probe", base.toString()),
             ).redirectErrorStream(true).redirectOutput(base.resolve("barrier-probe.log").toFile()).start()
