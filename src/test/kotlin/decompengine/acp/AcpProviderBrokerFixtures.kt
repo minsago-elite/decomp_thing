@@ -56,6 +56,35 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.SSLSocket
 
+/**
+ * Opens a broker through its private entry point with substitutable parts (connector, credential clock, relay
+ * channel factory and delivery clock). Production code cannot reach that entry point; only these credential-free
+ * controls do, by reflection, as the #958 TLS probe reaches the private layered handshake.
+ */
+internal fun openBrokerForControl(
+    policy: AcpProviderTransportPolicy,
+    request: AgentExecutionRequest,
+    credentialSource: AcpProviderCredentialSource,
+    resolver: AcpProviderDestinationResolver,
+    connector: AcpProviderUpstreamConnector?,
+    clock: java.time.Clock,
+    relayChannels: AcpProviderRelayChannelFactory = AcpProviderRelayChannelFactory.PIPE,
+    deliveryNanoTime: () -> Long = System::nanoTime,
+): AcpProviderBroker {
+    val entry = AcpProviderBroker.Companion::class.java.getDeclaredMethod(
+        "openWith", AcpProviderTransportPolicy::class.java, AgentExecutionRequest::class.java,
+        AcpProviderCredentialSource::class.java, AcpProviderDestinationResolver::class.java,
+        AcpProviderUpstreamConnector::class.java, java.time.Clock::class.java, AcpProviderRelayChannelFactory::class.java,
+        kotlin.jvm.functions.Function0::class.java,
+    ).apply { isAccessible = true }
+    return try {
+        entry.invoke(AcpProviderBroker.Companion, policy, request, credentialSource, resolver, connector, clock,
+            relayChannels, deliveryNanoTime) as AcpProviderBroker
+    } catch (invocation: InvocationTargetException) {
+        throw invocation.targetException
+    }
+}
+
 /** Every fixture file lives under build/, so tests never write outside the repository. */
 internal fun providerFixtureDirectory(label: String): Path {
     val parent = Files.createDirectories(Path.of("build", "test-tmp", "acp-provider-broker").toAbsolutePath())

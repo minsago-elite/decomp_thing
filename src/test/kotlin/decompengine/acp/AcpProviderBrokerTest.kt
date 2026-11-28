@@ -15,6 +15,11 @@ import kotlin.test.assertTrue
  * code. This test JVM's trust configuration is never changed.
  */
 class AcpProviderBrokerTest {
+    private companion object {
+        /** Tests in this class that do not run a scenario JVM. */
+        const val IN_PROCESS_TESTS = 2
+    }
+
     private val trustedTls = ProviderTestTls("chatgpt.com")
     private val stores = listOf(
         trustedTls.serverStore,
@@ -50,8 +55,27 @@ class AcpProviderBrokerTest {
 
     @Test
     fun `every scenario has a test`() {
-        val covered = AcpProviderBrokerTest::class.java.declaredMethods.count { it.isAnnotationPresent(Test::class.java) } - 1
+        val covered = AcpProviderBrokerTest::class.java.declaredMethods.count { it.isAnnotationPresent(Test::class.java) } - IN_PROCESS_TESTS
         assertEquals(AcpProviderBrokerScenarios.SCENARIOS.size, covered)
+    }
+
+    @Test
+    fun `production code cannot reach the substitutable entry point`() {
+        // The relay channel factory, the clocks and the connector are seams for credential-free controls only. No
+        // member that production code could call may accept one; Kotlin's synthetic accessors are not callable.
+        val seams = setOf(
+            AcpProviderRelayChannelFactory::class.java, AcpProviderUpstreamConnector::class.java,
+            kotlin.jvm.functions.Function0::class.java, java.time.Clock::class.java,
+        )
+        listOf(AcpProviderBroker::class.java, AcpProviderBroker.Companion::class.java).forEach { owner ->
+            (owner.declaredMethods.toList() + owner.declaredConstructors.toList())
+                .filter { !it.isSynthetic && !java.lang.reflect.Modifier.isPrivate(it.modifiers) }
+                .forEach { member ->
+                    assertTrue(member.parameterTypes.none { it in seams }, "${owner.simpleName}.${member.name} accepts a control seam")
+                }
+        }
+        val entry = AcpProviderBroker.Companion::class.java.declaredMethods.single { it.name == "openWith" }
+        assertTrue(java.lang.reflect.Modifier.isPrivate(entry.modifiers))
     }
 
     /** Runs one scenario in a fresh JVM and requires its single success line. */
@@ -64,9 +88,11 @@ class AcpProviderBrokerTest {
             )
         } else emptyList()
         val temporary = Files.createDirectories(trustedTls.directory.resolve("tmp"))
+        // setsid makes the scenario JVM the leader of its own process group, so cleanup can find every process it
+        // started, even one reparented after the JVM exits.
         val process = ProcessBuilder(
             listOf(
-                Path.of(System.getProperty("java.home"), "bin", "java").toString(), "-Xmx512m", "-XX:-UsePerfData",
+                "setsid", Path.of(System.getProperty("java.home"), "bin", "java").toString(), "-Xmx512m", "-XX:-UsePerfData",
                 "-Djava.io.tmpdir=$temporary",
             ) + trustProperties +
                 listOf("-cp", System.getProperty("java.class.path"), AcpProviderBrokerScenarios::class.java.name, scenario) +
@@ -85,23 +111,40 @@ class AcpProviderBrokerTest {
         } finally {
             // Whatever ended the wait (a timeout, an interrupt or a failed assertion), never leave a scenario JVM or
             // its children behind, and fail when their termination cannot be confirmed.
-            requireTerminated(process.toHandle(), scenario)
+            requireGroupTerminated(process, scenario)
         }
     }
 
-    private fun requireTerminated(root: ProcessHandle, scenario: String) {
-        val tree = root.descendants().toList() + root
-        tree.forEach { it.destroyForcibly() }
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+    /**
+     * Kills the scenario's whole process group (its leader has the scenario JVM's pid) and waits until no member is
+     * left alive, whether the JVM exited, timed out or the wait was interrupted. Fails when that cannot be confirmed.
+     */
+    private fun requireGroupTerminated(process: Process, scenario: String) {
+        val group = process.pid()
         val interrupted = Thread.interrupted()
         try {
-            while (tree.any(ProcessHandle::isAlive) && System.nanoTime() < deadline) {
-                java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(20))
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+            while (true) {
+                val members = liveGroupMembers(group) + listOfNotNull(process.toHandle().takeIf { it.isAlive }?.pid())
+                if (members.isEmpty() || System.nanoTime() - deadline >= 0) break
+                members.distinct().forEach { pid -> ProcessHandle.of(pid).ifPresent { it.destroyForcibly() } }
+                process.waitFor(20, TimeUnit.MILLISECONDS)
             }
         } finally {
             if (interrupted) Thread.currentThread().interrupt()
         }
-        val survivors = tree.filter(ProcessHandle::isAlive).map(ProcessHandle::pid)
+        val survivors = liveGroupMembers(group) + listOfNotNull(process.toHandle().takeIf { it.isAlive }?.pid())
         if (survivors.isNotEmpty()) throw AssertionError("scenario $scenario left processes that could not be terminated: $survivors")
+    }
+
+    /** Live (non-zombie) processes whose process group is [group], read from /proc. */
+    private fun liveGroupMembers(group: Long): List<Long> = Files.list(Path.of("/proc")).use { entries ->
+        entries.toList().mapNotNull { entry ->
+            val pid = entry.fileName.toString().toLongOrNull() ?: return@mapNotNull null
+            val stat = runCatching { Files.readString(entry.resolve("stat")) }.getOrNull() ?: return@mapNotNull null
+            // Fields after the parenthesized command: state, ppid, pgrp, ...
+            val fields = stat.substringAfterLast(')').trim().split(' ')
+            pid.takeIf { fields.size > 2 && fields[0] != "Z" && fields[2].toLongOrNull() == group }
+        }
     }
 }

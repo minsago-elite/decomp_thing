@@ -61,7 +61,7 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
             val resolver = FixedProviderResolver(listOf(pinned))
             val connector = connector(server)
             val failure = assertRefused(AcpProviderBrokerFailureKind.CREDENTIAL_UNAVAILABLE) {
-                AcpProviderBroker.open(policy, providerFixtureRequest(), AcpProviderCredentialSource.LocalCodexCachedAuth(home),
+                openBrokerForControl(policy, providerFixtureRequest(), AcpProviderCredentialSource.LocalCodexCachedAuth(home),
                     resolver, connector, clock)
             }
             assertEquals(expected, failure.credentialFailure)
@@ -574,6 +574,23 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
         assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { slow.deliverChannelCapability() }
         assertEquals(32, slowWrite.bytes().size, "the late write did complete")
         assertTrue(slowWrite.closed)
+
+        // The writer passes its last check before expiry but reaches the commit only after it, as if it were
+        // descheduled or waited for the broker lock: the in-lock sample refuses the commit.
+        clock.set(0)
+        advancing.set(false)
+        val scripted = ArrayDeque<Long>()
+        val scriptedClock = { scripted.removeFirstOrNull() ?: clock.get() }
+        val delayedCommit = RecordingSink(onWrite = {
+            scripted.addLast(bound - TimeUnit.MILLISECONDS.toNanos(1))
+            scripted.addLast(bound + TimeUnit.MILLISECONDS.toNanos(1))
+        })
+        val delayed = broker(connector = connector(server), brokerPolicy = approvedProviderPolicy("idleTimeoutMillis" to "200"),
+            relayChannels = relayWith(delayedCommit), deliveryNanoTime = scriptedClock)
+        assertRefused(AcpProviderBrokerFailureKind.CHANNEL_REFUSED) { delayed.deliverChannelCapability() }
+        assertEquals(32, delayedCommit.bytes().size, "every byte was written before the last in-loop check")
+        assertTrue(delayedCommit.closed)
+        assertTrue(scripted.isEmpty(), "both scripted samples were taken")
     }
 
     fun sourceWalkFailsClosedAndChecksBelowTheRoot() {
@@ -821,7 +838,7 @@ internal class AcpProviderBrokerScenario(private val stores: ProviderScenarioSto
         brokerPolicy: AcpProviderTransportPolicy.Approved = policy,
         relayChannels: AcpProviderRelayChannelFactory = AcpProviderRelayChannelFactory.PIPE,
         deliveryNanoTime: () -> Long = System::nanoTime,
-    ): AcpProviderBroker = AcpProviderBroker.open(
+    ): AcpProviderBroker = openBrokerForControl(
         brokerPolicy, providerFixtureRequest(), AcpProviderCredentialSource.LocalCodexCachedAuth(codexHome), resolver, connector, clock,
         relayChannels, deliveryNanoTime,
     ).also(closeables::add).also { diagnostics += it.toString() }

@@ -78,8 +78,11 @@ cache owned by someone else is refused; production always uses the process's own
 
 The broker creates a fresh 32-byte random channel capability. `deliverChannelCapability` creates the private
 relay channel itself, writes the capability into it once, and returns the channel's read end for the boundary to
-hand to the contained relay. The relay channel is an OS pipe made by a broker-side factory. No caller-supplied
-stream or channel is accepted, and sockets are not supported, so socket linger never applies.
+hand to the contained relay. The caller owns that read end and must close it. The broker closes only its own
+write end. The relay channel is always a fresh OS pipe: production can reach only `AcpProviderBroker.open`, and the
+entry point that substitutes the relay factory, the clocks or the upstream connector is private and is reached
+only by the credential-free controls, by reflection. No caller-supplied stream or channel is accepted, and sockets
+are not supported, so socket linger never applies.
 
 - Delivery is reserved under the broker lock before anything else, so a failed delivery can never be retried. A
   second delivery, or one after close, is refused with `CHANNEL_REFUSED`.
@@ -93,8 +96,10 @@ stream or channel is accepted, and sockets are not supported, so socket linger n
 - The write runs outside the lock that `close` needs. The writer polls until every byte is written, the policy
   idle bound passes, the broker closes, the writer is interrupted, or the channel fails. It never blocks inside the
   pipe, so a pipe that never drains cannot stop `close`.
-- The deadline is checked before every write and again before completion is accepted, so an end that first
-  becomes writable after expiry never commits.
+- The deadline is checked before every write and before completion is accepted, and the same deadline is sampled
+  once more under the broker lock, right before delivery is committed. An end that first becomes writable after
+  expiry never commits, and neither does a writer that passed its last check but was descheduled, or waited for
+  the lock, past the deadline.
 - An interrupted writer is refused at once, with its interrupt flag kept, instead of spinning until the deadline.
 - Abort is a plain close of the write end, with nothing to flush and no watchdog thread.
 - Delivery commits only if every byte was written before the deadline while the broker was still open.
@@ -103,8 +108,12 @@ stream or channel is accepted, and sockets are not supported, so socket linger n
 The capability is never an environment variable, argument or file. Analyzed programs, candidate build and
 validation processes and ACP terminal children therefore cannot inherit it through process ancestry or find it
 through filesystem visibility. Even a copied capability authorizes nothing without the private channel. Until
-the contained-side relay is wired, the private channel is whatever the caller passes; this checkpoint does not
-yet attach it to a real sandbox descriptor.
+the contained-side relay is wired, nothing hands the returned read end to a sandbox; this checkpoint does not yet
+attach it to a real sandbox descriptor.
+
+A presented capability is compared in constant time against the frame's stored field, without copying it. One
+known gap remains: the capability's hex form, used for the secret scans, is an immutable string that cannot be
+wiped. Moving the scans to a wipeable form is a follow-up.
 
 `identity.invocationBindingSha256` binds the policy descriptor digest, the admitted request binding and a fresh
 nonce. Two brokers for the same request have different bindings.
@@ -267,8 +276,8 @@ path or socket.
 
 ## Closing
 
-`close` drops the credential, zeroes the capability, closes the private channel stream and closes any in-flight
-upstream connection. A request on
+`close` drops the credential, zeroes the capability, closes the broker's write end of the relay pipe and closes
+any in-flight upstream connection. A request on
 a closed broker is refused with `CHANNEL_REFUSED`. An in-flight exchange also fails with `CHANNEL_REFUSED`,
 whatever I/O error or early EOF the close caused. A close during the TLS handshake takes effect when the
 handshake returns or reaches its timeout; prompt revocation is #961.
@@ -276,8 +285,8 @@ handshake returns or reaches its timeout; prompt revocation is #961.
 ## Evidence
 
 `identity` holds only the policy descriptor digest, the invocation binding, the request binding digest, the
-authentication mechanism and the credential reference. Evidence may retain these. Broker, grant, request and
-result `toString` values are redacted.
+authentication mechanism and the credential reference. Evidence may retain these. Broker, request and result
+`toString` values are redacted.
 
 ## Tests
 
@@ -286,8 +295,9 @@ The tests use no real credentials and make no external connection. Hosted CI sta
 - `AcpProviderCredentialSourceTest` covers each credential failure against synthetic `auth.json` files under
   `build/test-tmp/acp-provider-broker/`. Its race controls swap the name after the pinned checks, for a
   world-readable replacement file and for a FIFO, and show that the pinned bytes are read without blocking.
-- `AcpProviderBrokerTest` is the integration control. Each scenario runs in a fresh JVM with an empty
-  environment apart from a fixed `PATH`, its temporary directory under `build/`, and one trust customization:
+- `AcpProviderBrokerTest` is the integration control. Each scenario runs in a fresh JVM in its own process
+  group, which is killed and checked empty afterwards, with an empty environment apart from a fixed `PATH`, its
+  temporary directory under `build/`, and one trust customization:
   the standard `javax.net.ssl.trustStore` properties. They name a test CA generated at run
   time under `build/test-tmp/acp-provider-broker/`, so the broker uses the module TLS client's production
   platform-trust code, and the test JVM's own trust is never changed. Each scenario uses a synthetic Codex
