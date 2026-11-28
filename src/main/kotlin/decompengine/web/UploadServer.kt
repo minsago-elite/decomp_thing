@@ -340,10 +340,14 @@ class UploadServer(
         harnessReadiness = harnessReadiness, agentPreflight = agentPreflight, archiveEvidence = archiveEvidence,
         git = WebGitCapability(gitAvailability, gitRepositories), audit = audit, capacity = ::capacitySnapshot,
         logDownloadPhases = logDownloadPhases, postResponseAuditAppend = ::postResponseAuditAppend) }
+    /**
+     * Runs [action] once no audit append is in progress and while none can start: a storage snapshot taken here
+     * never observes the audit loss marker or segment mid-append. Test evidence barrier; entries of responses
+     * already sent may still be appended afterwards.
+     */
+    internal fun <T> withAuditAppendsQuiesced(action: () -> T): T = audit.excludingAppends(action)
     /** Admitted artifact downloads that have not yet released their stream; test evidence helper. */
     internal fun activeArtifactDownloads(): Int = api?.artifactDownloads?.activeCount() ?: 0
-    /** Admitted HTTP handlers still running, including post-response audit appends; for test quiescence only. */
-    internal fun activeRequestCount(): Int = synchronized(lifecycleLock) { requestDrain.active }
     // A request that finds every worker and queue slot taken is answered by this tiny pool with a stable 429
     // instead of a reset connection. It has no queue, so overload still never buffers more than the main pool does;
     // when it too is busy the rejection propagates and the dispatcher closes the connection, as before.

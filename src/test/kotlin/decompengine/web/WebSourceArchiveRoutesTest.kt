@@ -72,11 +72,11 @@ class WebSourceArchiveRoutesTest {
             val csrf = Json.parseToJsonElement(session.body()).jsonObject.getValue("data").jsonObject.getValue("csrfToken").jsonPrimitive.content
             block(Fixture(server, root, job.id, created.runId, tree, session.headers().firstValue("Set-Cookie").orElseThrow().substringBefore(';'), csrf, origin))
         } finally {
-            // Audited responses are followed by an fsync'd append on the request thread; let admitted handlers
-            // finish before the server's bounded one-second request drain so slow storage cannot fail the stop.
-            val idle = System.nanoTime() + 30_000_000_000
-            while (server.activeRequestCount() != 0 && System.nanoTime() < idle) Thread.sleep(10)
-            server.stop(); root.toFile().deleteRecursively()
+            // stop() itself waits for post-response audit appends. If one outlives that bound on slow storage,
+            // the server still owns the store: wait for its release and never delete an owned data directory.
+            server.stop()
+            assertTrue(server.awaitStoreRelease(30_000), "the stopped server still owns its store")
+            root.toFile().deleteRecursively()
         }
     }
 
