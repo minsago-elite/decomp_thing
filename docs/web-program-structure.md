@@ -148,7 +148,9 @@ the packaged JVM, creates a fresh Chrome process and profile, exchanges a new lo
 session handoff, then measures the existing click-to-first-100-rendered-rows boundary.
 Bootstrap, JVM startup, fixture seeding and navigation to the attempt page are outside
 that interval. The 20 child reports retain every timing and failure; no failed sample
-is replaced. The aggregate gates nearest-rank p95 and requires 20 complete samples,
+is replaced. A child report over 512 KiB keeps its largest facts in digest-bound parts.
+The runner rebuilds those parts, checks every part and reference digest against
+`report.json`, and only then reads the sample; an inconsistent report fails the sample. The aggregate gates nearest-rank p95 and requires 20 complete samples,
 zero raw inventory loading failures, matching source/archive/JAR identities, unique
 run directories and observed JVM/Chrome process identities.
 Before a cold sample or a profiled structure run launches the package, the driver verifies that every

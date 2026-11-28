@@ -9,7 +9,8 @@ import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { COLD_PROFILES, STRUCTURE_QUALIFICATION_SOURCE_FILES, applyStructureProfile, makeChromeThrottlingCommands, summarizeColdSamples, runColdSamples,
   verifyStructureQualificationSource, verifyStructureSourceRevision, verifyStructureBrowser } from './packaged-browser-structure-cold.mjs';
-import { liveProcessGroupMembers, waitForProcessGroupExit } from './packaged-browser-structure-cold.mjs';
+import { liveProcessGroupMembers, readChildReport, waitForProcessGroupExit } from './packaged-browser-structure-cold.mjs';
+import { publishReport } from './packaged-browser-restart.mjs';
 
 function gitBlob(bytes) { return createHash('sha1').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex'); }
 const approvedBrowserIdentity = Object.freeze({verified:true,product:'chrome',platform:'linux64',version:'149.0.7827.55',archiveSha256:'b'.repeat(64),
@@ -282,6 +283,97 @@ test('runner refuses a child report attributed to a different pull-request head 
       structureCold:{passed:true,firstPageMs:10,failedInventoryRequestCount:0,profileApplied:'loopback'}}})});
   assert.equal(baseMismatch.successfulSamples,0);
   assert.match(baseMismatch.samples[0].error,/declared pull-request base SHA/);
+});
+
+// R5: a #1882 report over 512 KiB moves its largest facts, such as structureCold, into digest-bound parts.
+async function publishedColdReport(t, { firstPageMs = 123 } = {}) {
+  await mkdir(resolve(repoRoot, 'build'), { recursive: true });
+  const directory = await mkdtemp(resolve(repoRoot, 'build', 'cold-report-parts-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const actions = Array.from({ length: 52 }, (_, index) => ({ label: `page${index}`, reasons: [], padding: 'x'.repeat(14_000) }));
+  const report = { status: 'passed', mode: 'structure-cold', driverCommit: 'a'.repeat(40),
+    structureCold: { passed: true, firstPageMs, failedInventoryRequestCount: 0, profileApplied: 'loopback', inventoryConsumption: { actions } } };
+  const { evidence } = await publishReport(directory, report, []);
+  assert.ok(evidence?.referencedKeys.includes('structureCold'), 'the control must exercise a referenced structureCold');
+  const path = resolve(directory, 'report.json');
+  return { directory, path, stdout: `Evidence directory: ${directory}\nReport: ${path}\n`, report, evidence };
+}
+
+test('cold reader rebuilds structureCold from verified report parts instead of a digest reference (R5)', async (t) => {
+  const { path, stdout, report, evidence } = await publishedColdReport(t);
+  const primary = JSON.parse(await readFile(path, 'utf8'));
+  assert.equal(primary.structureCold.reportEvidence, 'structureCold');
+  assert.equal(primary.structureCold.firstPageMs, undefined, 'report.json alone would lose the latency sample');
+  const read = await readChildReport(stdout);
+  assert.deepEqual(read.report, report);
+  assert.equal(read.report.structureCold.firstPageMs, 123);
+  assert.equal(read.fullSha256, evidence.sha256);
+  assert.equal(read.sha256, createHash('sha256').update(await readFile(path)).digest('hex'));
+  const small = await publishedColdReport(t).then(async ({ directory }) => {
+    const smallPath = resolve(directory, 'small', 'report.json');
+    await mkdir(dirname(smallPath));
+    await writeFile(smallPath, JSON.stringify({ status: 'passed', structureCold: { firstPageMs: 5 } }));
+    return readChildReport(`Report: ${smallPath}\n`);
+  });
+  assert.equal(small.report.structureCold.firstPageMs, 5);
+  assert.equal(small.fullSha256, undefined, 'an inline report needs no parts');
+});
+
+test('cold reader refuses tampered, missing, renamed or unbound report parts (R5)', async (t) => {
+  const { directory, path, stdout } = await publishedColdReport(t);
+  const original = await readFile(path, 'utf8');
+  const part = resolve(directory, 'report.full.part-000');
+  const partBytes = await readFile(part);
+  const withPrimary = async (edit, expected) => {
+    const primary = JSON.parse(original);
+    edit(primary);
+    await writeFile(path, JSON.stringify(primary, null, 2) + '\n');
+    await assert.rejects(readChildReport(stdout), expected);
+    await writeFile(path, original);
+  };
+  await withPrimary(primary => { primary.status = 'failed'; }, /inline status/);
+  await withPrimary(primary => { primary.structureCold.sha256 = 'f'.repeat(64); }, /reference structureCold/);
+  await withPrimary(primary => { primary.extra = true; }, /top-level keys/);
+  await withPrimary(primary => { primary.reportEvidence.referencedKeys.push('status'); }, /referenced keys/);
+  await withPrimary(primary => { primary.reportEvidence.partBytes = 1; }, /publication limits/);
+  await withPrimary(primary => { primary.reportEvidence.parts.pop(); }, /part count/);
+  const reads = [];
+  const spy = async (target, ...rest) => { reads.push(target); return readFile(target, ...rest); };
+  await withPrimary(primary => { primary.reportEvidence.parts[0].file = '../report.full.part-000'; }, /part 0 name/);
+  await writeFile(path, JSON.stringify({ ...JSON.parse(original), reportEvidence: { ...JSON.parse(original).reportEvidence,
+    parts: [{ ...JSON.parse(original).reportEvidence.parts[0], file: '../../etc/passwd' }] } }, null, 2) + '\n');
+  await assert.rejects(readChildReport(stdout, { readFile: spy }), /part 0 name/);
+  assert.deepEqual(reads, [path], 'an invalid part name is refused before any part is read');
+  await writeFile(path, original);
+  const tampered = Buffer.from(partBytes);
+  tampered[tampered.length - 2] ^= 1;
+  await writeFile(part, tampered);
+  await assert.rejects(readChildReport(stdout), /part 0 bytes/);
+  await rm(part);
+  await assert.rejects(readChildReport(stdout), /ENOENT/);
+  await writeFile(part, partBytes);
+  assert.equal((await readChildReport(stdout)).report.structureCold.firstPageMs, 123);
+  await writeFile(path, Buffer.alloc(512 * 1024 + 1, 0x20));
+  await assert.rejects(readChildReport(stdout), /exceeds its published byte bound/);
+});
+
+test('runner retains the latency of a sample whose structureCold was published in parts (R5)', async (t) => {
+  const { stdout, evidence } = await publishedColdReport(t, { firstPageMs: 432 });
+  const result = await runColdSamples({ driver:'/unused/driver.mjs', driverArgs:[], profile:'loopback',
+    expectedHeadCommit:null, expectedBaseCommit:null,
+    spawnImpl:() => {
+      const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.pid = 999999999;
+      child.kill = () => true;
+      setImmediate(() => { child.stdout.end(stdout); child.stderr.end(); child.emit('close', 0); });
+      return child;
+    } });
+  assert.equal(result.samples.length, 20);
+  for (const sample of result.samples) {
+    assert.equal(sample.firstPageMs, 432, 'the default reader must not lose the latency sample');
+    assert.equal(sample.reportFullSha256, evidence.sha256);
+  }
+  assert.equal(result.timedSamples, 20);
+  assert.equal(result.nearestRankP95FirstPageMs, 432);
 });
 
 // R4: kill(-group, 0) succeeds for zombie-only groups under a non-reaping PID 1; only live members may block cleanup.

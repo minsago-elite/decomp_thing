@@ -1,9 +1,10 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { basename, dirname, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { createReadStream } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { MAX_REPORT_BYTES, MAX_REPORT_PARTS, REPORT_PART_BYTES } from './packaged-browser-restart.mjs';
 
 export const COLD_SAMPLE_COUNT = 20;
 export const COLD_SAMPLE_TIMEOUT_MS = 45_000;
@@ -391,7 +392,7 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
         browserHeapBytes: evidence?.browserHeapMemory?.sampledPeakBytes ?? null,
         jvmRssIncrementBytes: evidence?.jvmMemory?.incrementalPeakBytes ?? null,
         profileApplied: evidence?.profileApplied ?? null,
-        reportPath: childReport?.path ?? null, reportSha256: childReport?.sha256 ?? null, driverCommit: report?.driverCommit ?? null,
+        reportPath: childReport?.path ?? null, reportSha256: childReport?.sha256 ?? null, reportFullSha256: childReport?.fullSha256 ?? null, driverCommit: report?.driverCommit ?? null,
         driverPullRequestHeadCommit: report?.driverPullRequestHeadCommit ?? null,
         driverPullRequestBaseCommit: report?.driverPullRequestBaseCommit ?? null,
         sourceIdentity: report?.sourceIdentity ?? null,
@@ -463,13 +464,66 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
       && Number.isFinite(summary.nearestRankP95FirstPageMs) && summary.nearestRankP95FirstPageMs <= profile.firstPageLimitMs };
 }
 
-async function readChildReport(stdout) {
+const reportDigest = bytes => createHash('sha256').update(bytes).digest('hex');
+
+/**
+ * Reads a child's report. When #1882 publication moved facts out of report.json into digest references, the full
+ * scrubbed report is rebuilt from its parts and bound back to report.json, so aggregation never reads structureCold or
+ * any other field from a reference (R5). Every inconsistency throws, which fails that sample.
+ */
+export async function readChildReport(stdout, { readFile = fs.readFile } = {}) {
   const match = stdout.match(/Report: (.+\/report\.json)\s*$/m);
   if (!match) return null;
   const path = resolve(match[1]);
-  const bytes = await fs.readFile(path);
-  const report = JSON.parse(bytes.toString('utf8'));
-  return { path, report, sha256: createHash('sha256').update(bytes).digest('hex') };
+  const bytes = await readFile(path);
+  if (bytes.length > MAX_REPORT_BYTES) throw new Error('Child report.json exceeds its published byte bound');
+  const primary = JSON.parse(bytes.toString('utf8'));
+  if (!primary || typeof primary !== 'object' || Array.isArray(primary)) throw new Error('Child report.json is not a report object');
+  if (!Object.hasOwn(primary, 'reportEvidence')) return { path, report: primary, sha256: reportDigest(bytes) };
+  const { report, fullSha256 } = await reconstructChildReport(dirname(path), primary, readFile);
+  return { path, report, sha256: reportDigest(bytes), fullSha256 };
+}
+
+async function reconstructChildReport(directory, primary, readFile) {
+  const fail = (message) => { throw new Error(`Child report parts are inconsistent: ${message}`); };
+  const evidence = primary.reportEvidence;
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) fail('reportEvidence is not an object');
+  const { parts, bytes: fullLength, sha256: fullSha256, referencedKeys } = evidence;
+  if (evidence.partBytes !== REPORT_PART_BYTES || evidence.maxParts !== MAX_REPORT_PARTS || evidence.primaryMaxBytes !== MAX_REPORT_BYTES) {
+    fail('unexpected publication limits');
+  }
+  if (!Number.isSafeInteger(fullLength) || fullLength <= MAX_REPORT_BYTES || fullLength > REPORT_PART_BYTES * MAX_REPORT_PARTS) fail('full size');
+  if (!/^[0-9a-f]{64}$/.test(fullSha256 ?? '')) fail('full digest');
+  if (!Array.isArray(parts) || parts.length !== Math.ceil(fullLength / REPORT_PART_BYTES)) fail('part count');
+  const chunks = [];
+  let offset = 0;
+  for (const [index, part] of parts.entries()) {
+    // Names are checked before any read, so a part can never name a path outside the report directory.
+    if (part?.file !== `report.full.part-${String(index).padStart(3, '0')}`) fail(`part ${index} name`);
+    if (part.bytes !== Math.min(REPORT_PART_BYTES, fullLength - offset) || !/^[0-9a-f]{64}$/.test(part.sha256 ?? '')) fail(`part ${index} size`);
+    const data = await readFile(join(directory, part.file));
+    if (data.length !== part.bytes || reportDigest(data) !== part.sha256) fail(`part ${index} bytes`);
+    chunks.push(data);
+    offset += data.length;
+  }
+  const fullBytes = Buffer.concat(chunks);
+  if (fullBytes.length !== fullLength || reportDigest(fullBytes) !== fullSha256) fail('reassembled bytes');
+  const report = JSON.parse(fullBytes.toString('utf8'));
+  if (!report || typeof report !== 'object' || Array.isArray(report) || Object.hasOwn(report, 'reportEvidence')) fail('full report shape');
+  // report.json must be exactly the full report with only its listed keys replaced by their digest references.
+  const keys = Object.keys(primary).filter(key => key !== 'reportEvidence');
+  if (JSON.stringify(keys) !== JSON.stringify(Object.keys(report))) fail('top-level keys');
+  if (!Array.isArray(referencedKeys) || new Set(referencedKeys).size !== referencedKeys.length
+    || referencedKeys.some(key => key === 'status' || !keys.includes(key))) fail('referenced keys');
+  for (const key of keys) {
+    const valueBytes = Buffer.from(JSON.stringify(report[key]), 'utf8');
+    if (referencedKeys.includes(key)) {
+      const reference = primary[key];
+      if (reference?.reportEvidence !== key || reference.bytes !== valueBytes.length || reference.sha256 !== reportDigest(valueBytes)
+        || Object.keys(reference).length !== 3) fail(`reference ${key}`);
+    } else if (JSON.stringify(primary[key]) !== JSON.stringify(report[key])) fail(`inline ${key}`);
+  }
+  return { report, fullSha256 };
 }
 
 export async function writeColdAggregate(path, result) {
