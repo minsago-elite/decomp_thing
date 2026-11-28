@@ -634,6 +634,34 @@ test('a failed continuation fails closed and a navigation failure still releases
   assert.equal(released.error, fault, 'release failure never replaces the original failure');
 });
 
+test('module readiness and pre-navigation CDP failures keep bounded identifier-free observations', async () => {
+  const leaks = (evidence) => {
+    const text = JSON.stringify(evidence);
+    return [REQUEST, SESSION, origin, '127.0.0.1', fixture.jobId, module, 'nested', 'http', 'canary'].filter((secret) => text.includes(secret));
+  };
+  for (const real of [false, true]) {
+    const fault = new Error('module readiness canary');
+    const { error } = await run({ real, readyFault: { label: 'owning module detail', error: fault } });
+    assert.equal(error, fault, `the readiness failure propagates unchanged (real=${real})`);
+    const evidence = structureFailureEvidence(fault);
+    assert.ok(evidence && Object.isFrozen(evidence), `readiness failure gains frozen evidence (real=${real})`);
+    assert.equal(evidence.stage, 'before-lookup');
+    assert.equal(evidence.selected, null, 'no response is selected before the module view is ready');
+    assert.deepEqual([evidence.moduleRequests, evidence.moduleResponses, evidence.moduleOkResponses], [1, 1, 1]);
+    assert.equal(evidence.trackedIncomplete, false);
+    assert.deepEqual(leaks(evidence), []);
+  }
+  // A protocol error reply at the interception call site, before the module click, through actual TargetProtocol dispatch.
+  const { h, error } = await run({ real: true, replies: { 'Fetch.enable': { error: { code: -32000, message: 'enable canary' } } } });
+  assert.equal(error?.message, 'enable canary');
+  assert.equal(count(h, 'Fetch.getResponseBody'), 0);
+  const evidence = structureFailureEvidence(error);
+  assert.equal(evidence.stage, 'before-lookup');
+  assert.equal(evidence.selected, null);
+  assert.deepEqual([evidence.moduleRequests, evidence.moduleResponses], [0, 0]);
+  assert.deepEqual(leaks(evidence), []);
+});
+
 test('ordering flags are sampled at the read: realistic response-stage order is read-before-response', async () => {
   const realistic = await run({ moduleEvents: 'canceled', body: noData });
   const late = await run({ moduleEvents: 'canceled', body: noData, pause: { late: true } });
