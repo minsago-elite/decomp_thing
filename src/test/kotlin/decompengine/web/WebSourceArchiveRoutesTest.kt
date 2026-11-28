@@ -74,7 +74,7 @@ class WebSourceArchiveRoutesTest {
         } finally {
             // Audited responses are followed by an fsync'd append on the request thread; let admitted handlers
             // finish before the server's bounded one-second request drain so slow storage cannot fail the stop.
-            server.stopWhenIdle(Duration.ofSeconds(30)); root.toFile().deleteRecursively()
+            server.stopWhenIdle(); root.toFile().deleteRecursively()
         }
     }
 
