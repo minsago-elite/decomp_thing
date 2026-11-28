@@ -23,6 +23,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantReadWriteLock
 
 /** Failure-only display data from a closed producer; never execution, identity or cleanup authority. */
 internal sealed interface AcpMountEventWitness {
@@ -528,9 +529,34 @@ internal class LinuxBubblewrapBoundary private constructor(
      * Set, never cleared, before this boundary's first authorization commit. Until then no target of
      * this boundary can run, so its setup scopes may restart after their own host mount EVENT refusal
      * (#1799); from then on every refusal is final for every launch, including terminal launches.
+     * Restarted attempts hold the barrier's shared side for their whole duration; revocation takes
+     * its exclusive side, so every restarted attempt completes before the first authorization.
      */
     private val authorizationMayHaveCommitted = AtomicBoolean(false)
-    private val setupRestart = AcpSetupRestartPermit { !authorizationMayHaveCommitted.get() }
+    private val setupRestartBarrier = ReentrantReadWriteLock()
+    private val setupRestart = AcpSetupRestartPermit {
+        val shared = setupRestartBarrier.readLock()
+        shared.lock()
+        if (authorizationMayHaveCommitted.get()) {
+            shared.unlock()
+            null
+        } else AutoCloseable { shared.unlock() }
+    }
+
+    /** Waits, cancellably, for in-flight restarted attempts, then revokes restarts permanently. */
+    private fun revokeSetupRestarts(cancellationCheck: () -> Unit) {
+        if (authorizationMayHaveCommitted.get()) return
+        if (setupRestartBarrier.readHoldCount > 0) {
+            throw IOException("sandbox authorization cannot begin inside a restarted setup attempt")
+        }
+        val exclusive = setupRestartBarrier.writeLock()
+        while (!exclusive.tryLock(SETUP_RESTART_BARRIER_WAIT_MILLISECONDS, TimeUnit.MILLISECONDS)) cancellationCheck()
+        try {
+            authorizationMayHaveCommitted.set(true)
+        } finally {
+            exclusive.unlock()
+        }
+    }
 
     fun validateReadOnlyMounts(
         mounts: Collection<AcpSandboxReadOnlyMount>,
@@ -990,7 +1016,7 @@ internal class LinuxBubblewrapBoundary private constructor(
             val reservation = reserveSuccessfulLaunchEvidence(launchEvidence)
             launchEvidenceReservation = reservation
             // From here a target may be authorized; no later setup in this boundary may restart.
-            authorizationMayHaveCommitted.set(true)
+            revokeSetupRestarts(cancellationCheck)
             cancellationCheck()
             beforeAuthorizationCommit()
             // No fallible operation or cancellation/policy check follows the broker's
@@ -1770,6 +1796,7 @@ private enum class PrivateControlLifecycle { LIVE, PROVED_DELETED }
 /** Test-only observation points execute within the real registry transaction. */
 internal enum class PrivateControlTransactionStage {
     CREATED_UNPINNED, BEFORE_PUBLICATION, BEFORE_QUARANTINE, AFTER_UNLINK_PROOF, BEFORE_MANIFEST_RETAIN,
+    AFTER_MANIFEST_DETACH,
 }
 private var privateControlTransactionObserver: ((PrivateControlTransactionStage) -> Unit)? = null
 private var privateControlTestUuid: UUID? = null
@@ -2149,19 +2176,27 @@ private fun physicalLocationsOverlap(a: HostPhysicalLocation, b: HostPhysicalLoc
 
 /**
  * Permission to restart one complete runtime-manifest or snapshot scope after that scope's own
- * sticky host mount EVENT refusal (#1799). It is consulted only after such a refusal, so its owner
- * can revoke it permanently once untrusted execution may have begun. It tolerates no event: every
- * attempt still refuses on any event in its own window, and a restart reuses nothing it computed.
+ * sticky host mount EVENT refusal (#1799). It tolerates no event: every attempt still refuses on
+ * any event in its own window, and a restart reuses nothing it computed.
  */
 internal fun interface AcpSetupRestartPermit {
-    fun beforeUntrustedExecution(): Boolean
+    /**
+     * Returns a hold that keeps the owner's untrusted execution from beginning until it is closed,
+     * or null once that execution may have begun. One hold spans one complete restarted attempt.
+     */
+    fun holdBeforeUntrustedExecution(): AutoCloseable?
 }
 
+private val NOTHING_TO_HOLD = AutoCloseable {}
+
 /** Trusted provisioning and boundary construction precede every target they could serve. */
-private val BEFORE_ANY_UNTRUSTED_EXECUTION = AcpSetupRestartPermit { true }
+private val BEFORE_ANY_UNTRUSTED_EXECUTION = AcpSetupRestartPermit { NOTHING_TO_HOLD }
 
 /** The original attempt plus two complete restarts. */
 private const val MAXIMUM_HOST_MOUNT_CHURN_ATTEMPTS = 3
+
+/** Revocation polls the caller's cancellation checkpoint while restarted attempts drain. */
+private const val SETUP_RESTART_BARRIER_WAIT_MILLISECONDS = 50L
 
 /** Identity-only record of the refusals built by the latches of scopes opened for one attempt. */
 private class ManifestScopeAttempt {
@@ -2199,9 +2234,10 @@ internal object AcpHostMountChurnRestarts {
 
 /**
  * Runs one complete scope-owned unit, restarting it from nothing only after its own scope latch
- * refused on a host mount EVENT, while [restart] still permits it and the bound remains (#1799).
- * Any other failure, a refusal carrying unwinding/cleanup failures, or a revoked permit is final.
- * Each discarded refusal's closed witness is recorded on success or attached to the final failure.
+ * refused on a host mount EVENT, while [restart] still grants a hold and the bound remains (#1799).
+ * The hold spans the whole restarted attempt, so the owner's first untrusted execution is ordered
+ * after it. Any other failure, a refusal carrying unwinding/cleanup failures, or a refused hold is
+ * final. Each discarded refusal's witness is recorded on success or attached to the final failure.
  */
 private inline fun <T> restartAfterOwnHostMountEvent(
     restart: AcpSetupRestartPermit?,
@@ -2210,16 +2246,19 @@ private inline fun <T> restartAfterOwnHostMountEvent(
 ): T {
     if (restart == null) return attempt(null)
     val refused = ArrayList<Throwable>(MAXIMUM_HOST_MOUNT_CHURN_ATTEMPTS - 1)
+    var hold: AutoCloseable? = null
     while (true) {
         val owner = ManifestScopeAttempt()
         val failure = try {
-            val result = attempt(owner)
+            val result = try { attempt(owner) } finally { hold?.close(); hold = null }
             AcpHostMountChurnRestarts.record(refused)
             return result
         } catch (failure: Throwable) { failure }
-        val restartable = refused.size + 1 < MAXIMUM_HOST_MOUNT_CHURN_ATTEMPTS && owner.ownsRefusal(failure) &&
-            try { restart.beforeUntrustedExecution() } catch (_: Throwable) { false }
-        if (!restartable) {
+        if (refused.size + 1 < MAXIMUM_HOST_MOUNT_CHURN_ATTEMPTS && owner.ownsRefusal(failure)) {
+            hold = try { restart.holdBeforeUntrustedExecution() } catch (_: Throwable) { null }
+        }
+        val held = hold
+        if (held == null) {
             refused.forEach(failure::addSuppressed)
             throw failure
         }
@@ -2227,6 +2266,7 @@ private inline fun <T> restartAfterOwnHostMountEvent(
         try {
             cancellationCheck()
         } catch (stopped: Throwable) {
+            try { held.close() } catch (release: Throwable) { if (release !== stopped) stopped.addSuppressed(release) }
             refused.forEach { if (it !== stopped) stopped.addSuppressed(it) }
             throw stopped
         }
@@ -2247,6 +2287,8 @@ private class RuntimePrivateControlScope private constructor(
     private val cancellationCheck: () -> Unit,
 ) : AutoCloseable {
     private var closed = false
+    /** Guarded by ACTIVE_PRIVATE_CONTROLS; set only by [finish] after its final successful poll. */
+    private var finished = false
     private val mountEventCheck = MountEventCheck(mountPoll)
     private var fast = fastEligible(controls)
 
@@ -2439,6 +2481,9 @@ private class RuntimePrivateControlScope private constructor(
     }
 
     fun requireCreationUnexposed(candidate: HostPhysicalLocation, currentMounts: List<HostPhysicalMount>) {
+        // A finished scope has made its final poll and returned its result; it neither leases its root
+        // nor accepts polls, so a later event cannot latch it after its result is accepted (#1799).
+        if (finished) return
         requireMountsUnchanged(MountEventPhase.CONTROL_ADMISSION)
         if (mounts != currentMounts) throw IOException("host mounts changed during control admission")
         val current = currentRoot(NO_SANDBOX_CHECKPOINT)
@@ -2570,7 +2615,13 @@ private class RuntimePrivateControlScope private constructor(
     fun finish() {
         checkpoint()
         if (mounts != hostPhysicalMounts(cancellationCheck)) throw IOException("host mount coordinates changed during runtime manifest")
-        checkpoint()
+        // The final poll and detachment from concurrent admission polls are one registry transaction:
+        // an event any thread latched before it fails this attempt, and none can latch it afterwards.
+        synchronized(ACTIVE_PRIVATE_CONTROLS) {
+            checkpointLocked()
+            finished = true
+        }
+        observePrivateControlTransaction(PrivateControlTransactionStage.AFTER_MANIFEST_DETACH)
     }
 
     override fun close() {

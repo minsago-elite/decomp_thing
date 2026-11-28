@@ -1,5 +1,6 @@
 package decompengine.acp
 
+import org.junit.jupiter.api.extension.ExtendWith
 import decompengine.agent.AgentExecutionException
 import decompengine.agent.AgentExecutionOutcome
 import decompengine.agent.AgentFailure
@@ -33,6 +34,7 @@ import kotlinx.serialization.json.putJsonObject
 import org.junit.jupiter.api.Timeout
 
 @Timeout(value = 90, unit = TimeUnit.SECONDS)
+@ExtendWith(AcpHostMountChurnRestartReport::class)
 class AcpDoctorPreflightTest {
     @Test
     fun `provisioning failure context keeps the original failure and only closed coordinates`() {

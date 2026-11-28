@@ -64,11 +64,17 @@ these hold:
 - Cleanup of the refused attempt has been proven. The scope is closed. A refused snapshot container
   must be deleted with proof before the restart; otherwise `AcpCleanupProofFailure` is raised and is
   final.
-- The attempt's owner still holds its restart permit.
+- The attempt's owner grants a hold that keeps its first untrusted execution from beginning. The
+  hold spans the complete restarted attempt.
 - Fewer than three attempts have run, and the caller's cancellation and deadline checkpoint passes.
 
 Each new attempt opens a new mountinfo descriptor, baseline, table snapshot and set of retained control
 identities. It reuses nothing that the refused attempt computed.
+
+A scope's final poll and its detachment from other threads' control admission happen in one registry
+transaction. Another thread's admission polls every published scope. If it latches an event before
+that transaction, the attempt fails at its final poll. After the transaction, no thread can latch the
+scope, so an accepted result never coexists with an event latched on its own scope.
 
 | Caller | Restart |
 | --- | --- |
@@ -78,34 +84,72 @@ identities. It reuses nothing that the refused attempt computed.
 | Later launches on that boundary, including terminal launches | No |
 | Internal `calculateAcpRuntimeManifestSha256(source, limits, check)`, Full-tree Ninja re-verification, sealed snapshot checks | No |
 
-The boundary revokes its permit after it reserves launch evidence, before the broker's write-ahead
-authorization callback and the start byte. The permit never returns, even after cleanup is proven.
+Each boundary orders its restarts against its first authorization with a read-write barrier. A
+restarted attempt holds the shared side from its restart decision until it finishes. The first
+authorization takes the exclusive side after it reserves launch evidence. It waits, while honoring
+cancellation, for restarted attempts already in flight, then revokes the permit before the broker's
+write-ahead authorization callback and the start byte. A restart decision after revocation is refused.
+The permit never returns, even after cleanup is proven.
 
 Each discarded refusal keeps its closed witness. If the unit still fails, those witnesses are
 attached as suppressed throwables to the final failure. If a restart succeeds, the 16 most recent
 witnesses and a total count are kept in `AcpHostMountChurnRestarts` for display only.
 
+## Trust assumption and scope of the guarantee
+
+The restart does not defend against a privileged host process that changes mounts on purpose. Such
+a process can change the table before a fresh attempt takes its baseline, and the fresh attempt then
+validates the changed table as its starting state. The original design has the same exposure for
+any change made between two scopes. The guarantee is narrower: the restart accepts no result from a
+window that contained an event, and it keeps every check that the fresh attempt makes.
+
+Sandboxed processes cannot cause these events. Their mounts live in less-privileged user and mount
+namespaces and cannot propagate into the JVM's namespace.
+
 ## Why isolation is not weakened
 
-- Every accepted result still comes from an attempt with no mount event anywhere in its window.
+- Every accepted result still comes from an attempt with no mount event anywhere in its window,
+  including events that another thread's admission latched on its scope.
 - A restart produces the same state as churn that happened just before the scope opened. The
   original design already accepts that case, because no scope watches the gaps between scopes.
-- The fresh attempt applies its full checks to the current table. A persistent mount that reaches
-  the closure or a private control is refused, for example
-  `sandbox runtime closure crosses a mount boundary`.
-- After a boundary's first authorization commit, every refusal in that boundary is final.
+- The fresh attempt applies its full checks to the current table. A persistent mount below the
+  source root is refused, for example `sandbox runtime closure crosses a mount boundary`. This
+  applies to descendant mounts only. The mount that contains the source root itself can be part of a
+  valid baseline.
+- No restarted attempt overlaps or follows a boundary's first authorization. After that commit,
+  every refusal in that boundary is final.
 
 ## Verification
 
 - `pre-execution scopes restart after unrelated mount churn and refuse churn that reaches the
   closure` runs a child JVM in a private user and mount namespace. It issues real `mount(2)` calls
-  during scope admission and during hashing. Unrelated churn restarts once and returns the original
-  digest. A strict or revoked permit fails on the first event. Persistent churn stops after three
-  attempts and keeps three witnesses. A tmpfs mounted over a closure directory is refused by the
-  fresh attempt. A refused snapshot copy deletes its container before the copy that succeeds.
+  during scope admission, hashing and `finish`. It checks the following:
+  - Unrelated churn restarts once and returns the original digest.
+  - A strict or revoked permit fails on the first event.
+  - Persistent churn stops after three attempts and keeps three witnesses.
+  - A tmpfs mounted below the source root is refused by the fresh attempt.
+  - A transient tmpfs that substitutes decoy names during the walk is discarded. The fresh walk
+    returns the original digest.
+  - A concurrent control admission that latches the scope before its final poll discards that
+    attempt. One that runs after detachment cannot latch the scope.
+  - A refused snapshot copy deletes its container before the copy that succeeds. When that
+    deletion cannot be proven, no second copy begins.
 - `setup restart permission ends before the first authorization decision and never returns` checks
   the permit on a live boundary. The permit survives a launch that is refused before start. It is
   revoked inside the authorization callback, and it stays revoked after cleanup.
+- `restarted setup attempts complete before a concurrent first authorization` runs in a separate JVM
+  on a live boundary. A restarted attempt pauses after its restart decision while another launch
+  reaches authorization. The launch waits at the barrier, and authorization follows the restarted
+  attempt. A refusal after authorization is final.
+
+## Restart evidence in CI
+
+Each test JVM writes `build/acp-host-mount-churn-restarts/test-jvm-<pid>.json` when its ACP test
+classes finish. The file records the number of successful restarts after natural host churn, which
+can be zero, and up to 16 closed witnesses. The required ACP contract job uploads the directory as
+`required-acp-host-mount-churn-restarts`. A run with a zero count was quiet. A run with a positive
+count recovered from churn. A missing file is incomplete evidence. Tests that inject restarts
+deliberately run in child JVMs, so their restarts are not counted.
 
 ## Remaining work
 
