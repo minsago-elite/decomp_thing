@@ -120,5 +120,97 @@ class ContainerSandboxTest(unittest.TestCase):
             self.assertEqual(toolchain["runtimeClosure"][identity["path"]]["elf"]["sha256"], identity["sha256"])
 
 
+def completed(returncode: int, stderr: bytes = b"") -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess([], returncode, stdout=b"", stderr=stderr)
+
+
+PLAN = f" {CC1} -quiet source.c -o /tmp/ccAAAAAA.s\n".encode()
+PHASE_TOOLS = {"compile": {"path": CC1}}
+
+
+class OrchestrationOutcomeTest(unittest.TestCase):
+    def cases(self):
+        return {spec["id"]: spec for spec in CAPTURE["ORCHESTRATION_CASES"]}
+
+    def run_case(self, case_id, modes):
+        """Run orchestrate() with `gcc -###`, `-v` and plain results taken from `modes`."""
+        spec = self.cases()[case_id]
+
+        def run_gcc(runtime, scratch, spec, label, extra):
+            return Path("/unused"), modes[tuple(extra)]
+
+        with mock.patch.dict(CAPTURE["orchestrate"].__globals__,
+                             {"run_gcc": run_gcc, "collect": lambda workspace, inputs: []}):
+            return CAPTURE["orchestrate"]("docker", Path("/unused"), spec, 1, PHASE_TOOLS)
+
+    def test_declared_outcomes_match_the_checked_in_record(self):
+        record = json.loads(ORCHESTRATION_RECORD.read_text())
+        cases = self.cases()
+        self.assertEqual([case["id"] for case in record["cases"]], list(cases))
+        for case in record["cases"]:
+            observed = case["observed"]
+            self.assertEqual(observed["plan"]["exitCode"], 0, case["id"])
+            self.assertTrue(observed["plan"]["phases"], case["id"])
+            for mode in ("executedPhases", "execution"):
+                self.assertEqual(bool(observed[mode]["exitCode"]), cases[case["id"]]["fails"], (case["id"], mode))
+
+    def test_failed_or_empty_plan_is_refused(self):
+        for plan in (completed(1, PLAN), completed(0, b"")):
+            with self.assertRaisesRegex(SystemExit, "driver plan did not succeed"):
+                self.run_case("compile-to-assembly", {("-###",): plan, ("-v",): completed(0), (): completed(0)})
+
+    def test_repeatable_failure_of_a_success_case_is_refused(self):
+        failure = completed(1, b"cc1: fatal error\n")
+        for modes, mode in (
+            ({("-v",): failure, (): failure}, "verbose trace"),
+            ({("-v",): completed(0), (): failure}, "plain command"),
+        ):
+            with self.assertRaisesRegex(SystemExit, f"compile-save-temps: {mode} exited 1; .* to succeed"):
+                self.run_case("compile-save-temps", {("-###",): completed(0, PLAN), **modes})
+
+    def test_success_of_a_failure_case_is_refused(self):
+        for modes, mode in (
+            ({("-v",): completed(0), (): completed(1)}, "verbose trace"),
+            ({("-v",): completed(1), (): completed(0)}, "plain command"),
+        ):
+            with self.assertRaisesRegex(SystemExit, f"failure-compile: {mode} exited 0; .* to fail"):
+                self.run_case("failure-compile", {("-###",): completed(0, PLAN), **modes})
+
+    def test_expected_outcomes_are_recorded(self):
+        observed = self.run_case("failure-compile", {("-###",): completed(0, PLAN), ("-v",): completed(1),
+                                                     (): completed(1)})
+        self.assertEqual([observed[key]["exitCode"] for key in ("plan", "executedPhases", "execution")], [0, 1, 1])
+
+    def test_container_launch_failure_is_refused(self):
+        for status in (125, 126, 127):
+            def run(command, **kwargs):
+                if command[1:3] == ["image", "inspect"]:
+                    return subprocess.CompletedProcess(command, 0, stdout=CAPTURE["IMAGE_CONFIG"], stderr="")
+                return completed(status, b"engine error\n")
+
+            with mock.patch("subprocess.run", side_effect=run):
+                with self.assertRaisesRegex(SystemExit, f"container launch failed with status {status}"):
+                    run_container("docker", Path("/workspace"), ["gcc", "-c", "failure.c"], b"")
+
+    def test_refused_capture_writes_no_record(self):
+        def records(runtime, scratch):
+            spec = self.cases()["compile-save-temps"]
+            failure = completed(1)
+            modes = {("-###",): completed(0, PLAN), ("-v",): failure, (): failure}
+
+            def run_gcc(runtime, scratch, spec, label, extra):
+                return Path("/unused"), modes[tuple(extra)]
+
+            with mock.patch.dict(CAPTURE["orchestrate"].__globals__, {"run_gcc": run_gcc}):
+                CAPTURE["capture_orchestration_case"](runtime, scratch, spec, PHASE_TOOLS)
+
+        with mock.patch.dict(CAPTURE["main"].__globals__, {"records": records}), \
+                mock.patch.object(Path, "write_text") as write, \
+                mock.patch("sys.argv", ["capture-gcc-preprocessing-reference.py"]):
+            with self.assertRaisesRegex(SystemExit, "compile-save-temps: verbose trace exited 1"):
+                CAPTURE["main"]()
+        write.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
