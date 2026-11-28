@@ -95,7 +95,11 @@ the existing API response and per-file read limits. SPA startup selects the same
 10,512-entry/10,000-job library capacity, while retaining its separate 64 MiB read
 and 64 MiB encoded recovery-plan limits. The legacy startup profile remains 4096
 root entries. This preserves libraries seeded before SPA startup as well as those
-uploaded after initialization; the profile is retained for lazy storage creation.
+uploaded after initialization; the profile is retained for lazy storage creation. Upload admission
+enforces the same capacity: a new upload that would exceed 10,000 jobs or 10,512 root
+entries (counting other in-flight uploads) is refused with `409 JOB_LIBRARY_FULL` before
+any bytes are staged, while a keyed retry of an already-published upload still replays.
+Delete jobs to make room.
 
 Streaming upload admission and the retained-storage quota are described in the
 upload documents; uploads refuse before consuming a body when the quota cannot hold

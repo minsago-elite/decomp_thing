@@ -67,6 +67,40 @@ class WebJobServiceTest {
         } finally { service.close() }
     }
 
+    @Test fun `cold start without an audit directory reuses the startup seed after the first audited sign-in`() = withStore { store, root ->
+        val jobs = (1..3).map { store.createFromUpload("fixture-$it.elf", elfFixture()) }
+        val auditDirectory = root.resolve(WebAuditLog.DIRECTORY)
+        assertFalse(Files.exists(auditDirectory, java.nio.file.LinkOption.NOFOLLOW_LINKS), "The cold root starts without audit storage")
+        val service = WebJobService(store, JobAnalyzer { _, _ -> }, inertReconstructor)
+        try {
+            service.dashboardFreshnessClock = { Long.MAX_VALUE }
+            service.initializeExistingStorage()
+            val scans = AtomicInteger()
+            val pages = WebJobPages({ scans.incrementAndGet(); service.collectionRecords() },
+                checkpointedSource = { checkpoint -> scans.incrementAndGet(); service.collectionRecordsWithProgress(checkpoint) },
+                collectionVersion = service::dashboardCollectionVersion,
+                collectionStamp = { _, checkpoint -> service.dashboardStorageStamp(Long.MAX_VALUE, checkpoint) },
+                collectionSeed = service::takeDashboardCollectionSeed)
+            fun ids(page: JsonObject) = page.getValue("items").jsonArray.map { it.jsonObject.getValue("jobId").jsonPrimitive.content }.toSet()
+
+            // The first audited sign-in lazily creates `.web-audit`, changing the root after the seed was stamped.
+            assertNotNull(WebAuditLog(root).record(WebAuditActor.browserSession("a".repeat(64)), WebAuditAction.SESSION_START,
+                WebAuditTarget(), WebAuditOutcome.ACCEPTED, 200, null, null))
+            assertTrue(Files.isDirectory(auditDirectory, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+            val started = System.nanoTime()
+            val first = pages.page("owner", WebJobQuery(), null)
+            val firstPageMicros = (System.nanoTime() - started) / 1_000
+            assertEquals(jobs.map { it.id }.toSet(), ids(first))
+            assertEquals(0, scans.get(), "The first page after the first audited sign-in must reuse the startup seed")
+            println("cold-first-audited-sign-in firstPageMicros=$firstPageMicros collectionScans=${scans.get()}")
+
+            // Job changes remain visible after audit storage exists.
+            val external = JobStore(root).createFromUpload("external.elf", elfFixture())
+            assertEquals(jobs.map { it.id }.toSet() + external.id, ids(pages.page("owner", WebJobQuery(), null)))
+            assertEquals(1, scans.get(), "An external job addition must invalidate the reused image")
+        } finally { service.close() }
+    }
+
     @Test fun `startup seed preserves the workflow and organization presentation`() = withStore { store, root ->
         val job = store.createFromUpload("fixture.elf", elfFixture())
         val completed = WorkflowAttemptStore.open(root).use { attempts ->
@@ -1587,6 +1621,44 @@ class WebJobServiceTest {
                 assertTrue(callers.awaitTermination(10, TimeUnit.SECONDS))
             }
         }
+    }
+
+    @Test fun `upload admission refuses the job beyond library capacity but replays an admitted key`() = withStore { store, root ->
+        val service = WebJobService(store, JobAnalyzer { _, _ -> }, inertReconstructor)
+        val type = "multipart/form-data; boundary=capacity_fixture"
+        fun body(name: String = "fixture.elf") = ("--capacity_fixture\r\nContent-Disposition: form-data; name=\"binary\"; filename=\"$name\"\r\n\r\n").toByteArray() +
+            elfFixture() + "\r\n--capacity_fixture--\r\n".toByteArray()
+        fun jobEntries() = Files.list(root).use { entries -> entries.filter { it.fileName.toString().matches(Regex("[0-9a-f]{32}")) }.count() }
+        try {
+            service.initializeExistingStorage()
+            val limit = WebJobLibraryEntryLimits().maximumJobs
+            // Admission counts root identities only, so placeholder identities model a full library cheaply.
+            repeat(limit - 1) { index -> Files.createDirectory(root.resolve("%032x".format(index + 1))) }
+            assertEquals(limit - 1L, jobEntries())
+
+            val admitted = service.uploadMultipartReceipt(body().inputStream(), type, "capacity-key-admitted-0001")
+            assertFalse(admitted.replayed)
+            assertEquals(limit.toLong(), jobEntries(), "The upload reaching exactly the capacity is admitted")
+
+            val refused = assertFailsWith<WebJobServiceException> {
+                service.uploadMultipartReceipt(body("other.elf").inputStream(), type, "capacity-key-refused-00002")
+            }
+            assertEquals("JOB_LIBRARY_FULL", refused.code)
+            assertEquals(JOB_LIBRARY_FULL_MESSAGE, refused.message)
+            assertTrue(refused.message!!.contains("Delete jobs"), "The refusal names the recovery action")
+            assertEquals("JOB_LIBRARY_FULL", assertFailsWith<WebJobServiceException> { service.upload("legacy.elf", elfFixture()) }.code)
+            assertEquals("JOB_LIBRARY_FULL", assertFailsWith<WebJobServiceException> { service.uploadMultipart(body().inputStream(), type) }.code)
+            assertEquals(limit.toLong(), jobEntries(), "Capacity plus one never publishes a job")
+            assertFalse(Files.list(root).use { it.anyMatch { path -> path.fileName.toString().startsWith(".upload-") } })
+            assertEquals("JOB_LIBRARY_FULL", publicWebDiagnosticCode("JOB_LIBRARY_FULL"))
+            assertEquals(JOB_LIBRARY_FULL_MESSAGE, publicWebDiagnosticMessage("JOB_LIBRARY_FULL"))
+            assertEquals("JOB_LIBRARY_FULL", publicWebFailureCode("JOB_LIBRARY_FULL"))
+
+            val replay = service.uploadMultipartReceipt(body().inputStream(), type, "capacity-key-admitted-0001")
+            assertTrue(replay.replayed, "An idempotent retry of an admitted upload replays at capacity")
+            assertEquals(admitted.job.id, replay.job.id)
+            assertEquals(limit.toLong(), jobEntries())
+        } finally { service.close() }
     }
 
     private fun await(condition: () -> Boolean) {

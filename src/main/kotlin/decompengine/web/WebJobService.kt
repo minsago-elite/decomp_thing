@@ -187,6 +187,10 @@ internal data class WebJobLibraryEntryLimits(val maximumEntries: Int = 10_512, v
     }
 }
 
+/** Upload refusal at library capacity; deleting jobs is the only recovery, so it is not retryable as-is. */
+internal const val JOB_LIBRARY_FULL_MESSAGE =
+    "The job library is at its 10,000-job capacity. Delete jobs you no longer need, then upload again."
+
 /** The API retains its ten-thousand-job profile while counting every root entry before metadata reads. */
 internal fun collectWebJobLibraryIds(
     rootEntries: Sequence<String>, checkpoint: () -> Unit,
@@ -715,10 +719,16 @@ class WebJobService(
      * through another JobStore instance or by a cooperating external process. This is metadata
      * only: no job JSON or organization JSON is opened or parsed on a cache hit. A recent ctime/mtime disables reuse
      * briefly to avoid caching across filesystems with coarse timestamp resolution.
+     *
+     * The storage root contributes only its identity and its job-id entry names. Service-owned
+     * siblings such as the lazily created `.web-audit` directory or `.web-owner.lock` change the
+     * root's timestamps and link count without changing any job, so they must not invalidate the
+     * image. Job additions and removals still change the hashed job-id names, and replacements or
+     * edits still change the per-job directory and file stamps.
      */
     internal fun dashboardStorageStamp(freshSinceMillis: Long, checkpoint: () -> Unit): WebJobCollectionStamp {
         val digest = MessageDigest.getInstance("SHA-256")
-        digest.update("web-job-library-stamp-v3".toByteArray(StandardCharsets.US_ASCII))
+        digest.update("web-job-library-stamp-v4".toByteArray(StandardCharsets.US_ASCII))
         var cacheable = true
         var inventoryComplete = true
         val knownOrganizations = dashboardOrganizationIds
@@ -759,7 +769,7 @@ class WebJobService(
             val thresholdNanoseconds = Math.floorMod(epochMillis, 1_000L) * 1_000_000
             return seconds > thresholdSeconds || seconds == thresholdSeconds && nanoseconds >= thresholdNanoseconds
         }
-        fun stampFile(path: Path, tag: Int, expectedKind: Int, missingAllowed: Boolean): EntryStamp? {
+        fun stampFile(path: Path, tag: Int, expectedKind: Int, missingAllowed: Boolean, identityOnly: Boolean = false): EntryStamp? {
             checkpoint()
             var entry: LinuxPathEntryMetadata? = null
             if (probe != null) try {
@@ -809,17 +819,19 @@ class WebJobService(
                 stamp = EntryStamp(entry.device, entry.inode, entry.mode, entry.linkCount, entry.size,
                     entry.modifiedSeconds, entry.modifiedNanoseconds, entry.changedSeconds, entry.changedNanoseconds, entry.complete)
             }
-            val current = checkNotNull(stamp)
+            val observed = checkNotNull(stamp)
+            val current = if (identityOnly) EntryStamp(observed.device, observed.inode, observed.mode, 0, 0L, 0L, 0, 0L, 0, observed.complete)
+                else observed
             addRecord(tag, 2, current)
             if (!current.complete || current.mode and 0xf000 != expectedKind) cacheable = false
-            if (atOrAfter(current.modifiedSeconds, current.modifiedNanoseconds, freshSinceMillis - 2_000L) ||
-                atOrAfter(current.changedSeconds, current.changedNanoseconds, freshSinceMillis - 2_000L)) cacheable = false
+            if (!identityOnly && (atOrAfter(current.modifiedSeconds, current.modifiedNanoseconds, freshSinceMillis - 2_000L) ||
+                atOrAfter(current.changedSeconds, current.changedNanoseconds, freshSinceMillis - 2_000L))) cacheable = false
             return current
         }
 
         try {
         val root = store.storageRoot
-        val rootBefore = stampFile(root, 1, 0x4000, missingAllowed = true)
+        val rootBefore = stampFile(root, 1, 0x4000, missingAllowed = true, identityOnly = true)
         if (rootBefore == null) {
             if (inventoryComplete) dashboardOrganizationIds = emptySet()
             val emptyIds = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest())
@@ -843,9 +855,9 @@ class WebJobService(
             inventoryComplete = false
             emptyList()
         }
-        for (name in allNames) addName(2, name)
         val ids = try { collectWebJobLibraryIds(allNames.asSequence(), checkpoint) }
         catch (_: Exception) { cacheable = false; inventoryComplete = false; emptyList() }
+        for (id in ids) addName(2, id)
         val jobIdsDigest = MessageDigest.getInstance("SHA-256").also { hash ->
             ids.forEach { id -> hash.update(id.toByteArray(StandardCharsets.UTF_8)); hash.update(0.toByte()) }
         }.digest().let { HexFormat.of().formatHex(it) }
@@ -869,7 +881,7 @@ class WebJobService(
                 addRecord(7, 1)
             }
         }
-        val rootAfter = stampFile(root, 8, 0x4000, missingAllowed = false)
+        val rootAfter = stampFile(root, 8, 0x4000, missingAllowed = false, identityOnly = true)
         if (rootAfter == null || rootBefore != rootAfter) { cacheable = false; inventoryComplete = false }
         if (knownOrganizations == null && inventoryComplete) dashboardOrganizationIds = observedOrganizations.toSet()
         return WebJobCollectionStamp(HexFormat.of().formatHex(digest.digest()), jobIdsDigest, cacheable)
@@ -1428,7 +1440,35 @@ class WebJobService(
     fun upload(filename: String, content: ByteArray): Job {
         writableStore()
         if (uploads.isNotEmpty()) throw WebJobServiceException("UPLOAD_CAPACITY", "Upload storage is reserved by another transfer.")
+        requireJobAdmissionCapacity(reservedUploads = 0)
         return publishUpload { store.createFromUpload(filename, content) }.also { invalidateDashboardCollection() }
+    }
+
+    /**
+     * Listing and startup recovery refuse a library beyond [WebJobLibraryEntryLimits]; never admit
+     * the upload that would cross it. Other registered uploads may each publish one more job and
+     * one more root entry, so they are counted as already admitted. Caller holds the monitor.
+     */
+    private fun requireJobAdmissionCapacity(reservedUploads: Int) {
+        val limits = WebJobLibraryEntryLimits()
+        val jobName = Regex("[0-9a-f]{32}")
+        var entries = 0
+        var jobs = 0
+        try {
+            Files.newDirectoryStream(store.storageRoot).use { stream ->
+                for (entry in stream) {
+                    entries++
+                    if (jobName.matches(entry.fileName.toString())) jobs++
+                    if (entries >= limits.maximumEntries) break
+                }
+            }
+        } catch (_: NoSuchFileException) {
+        } catch (failure: Exception) {
+            throw WebJobServiceException("JOB_STORAGE_UNAVAILABLE", "The job library could not be counted before upload. Inspect storage before retrying.", failure)
+        }
+        if (jobs + reservedUploads >= limits.maximumJobs || entries + reservedUploads >= limits.maximumEntries) {
+            throw WebJobServiceException("JOB_LIBRARY_FULL", JOB_LIBRARY_FULL_MESSAGE)
+        }
     }
 
     private fun <T> publishUpload(publish: () -> T): T = withWebUploadPublicationOutcome(
@@ -1452,6 +1492,11 @@ class WebJobService(
             // Deletion is refused while this upload is registered, so the check holds through publication.
             if (idempotencyKey != null && deletedJob(decompengine.jobs.StagedJobUpload.keyedJobId(idempotencyKey)) != null) {
                 throw WebJobServiceException("UPLOAD_KEY_RETIRED", "The job created with this upload key was deleted. Upload again with a new key.")
+            }
+            // A keyed retry of an already-published job replays its receipt and adds no job.
+            val replayJobId = idempotencyKey?.let(decompengine.jobs.StagedJobUpload::keyedJobId)
+            if (replayJobId == null || !Files.exists(store.storageRoot.resolve(replayJobId), NOFOLLOW_LINKS)) {
+                requireJobAdmissionCapacity(reservedUploads = uploads.size)
             }
             CountDownLatch(1).also { uploads[worker] = it }
         }

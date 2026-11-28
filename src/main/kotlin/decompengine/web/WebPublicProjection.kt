@@ -198,7 +198,7 @@ internal fun publicWebDiagnosticCode(code: String): String = when (code) {
     "JOB_RECORD_UNAVAILABLE", "STORE_LIMIT", "STORE_DURABILITY_UNAVAILABLE", "LISTING_UNAVAILABLE", "PERSISTENCE_FAILED",
     "SERVICE_NOT_INITIALIZED", "SERVICE_STOPPED", "PROGRESS_UNAVAILABLE",
     "PROGRESS_RETENTION_FAILED", "VERSION_CONFLICT", "IDEMPOTENCY_CONFLICT",
-    "PIN_RECEIPT_CAPACITY", "UPLOAD_CAPACITY", "UPLOAD_STORAGE",
+    "PIN_RECEIPT_CAPACITY", "UPLOAD_CAPACITY", "UPLOAD_STORAGE", "JOB_LIBRARY_FULL",
     "STORAGE_ACCOUNTING_UNAVAILABLE", "INPUT_REVISION_UNAVAILABLE", "SHUTDOWN_INCOMPLETE",
     "REPORT_CHANGED", "ARTIFACT_CHANGED", "JOB_STORAGE_UNAVAILABLE" -> code
     else -> "JOB_STORAGE_UNAVAILABLE"
@@ -229,6 +229,7 @@ internal fun publicWebDiagnosticMessage(code: String): String = when (publicWebD
     "IDEMPOTENCY_CONFLICT" -> "The request key was already used for different input."
     "PIN_RECEIPT_CAPACITY" -> "Pin request history is at capacity. Reconcile the current policy before retrying."
     "UPLOAD_CAPACITY" -> "Upload capacity is temporarily unavailable. Retry shortly."
+    "JOB_LIBRARY_FULL" -> JOB_LIBRARY_FULL_MESSAGE
     "UPLOAD_STORAGE", "STORAGE_ACCOUNTING_UNAVAILABLE" ->
         "Upload storage cannot be measured or reserved safely. Inspect storage before retrying."
     "INPUT_REVISION_UNAVAILABLE" -> "The selected input revision is unavailable for this job."

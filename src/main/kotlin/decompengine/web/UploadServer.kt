@@ -890,12 +890,12 @@ class UploadServer(
                 renderErrorPage(exception.status, "Invalid request", "${exception.code}: ${exception.message ?: "The request was invalid."}")
             }
         } catch (exception: WebJobServiceException) {
-            val status = if (exception.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else 503
-            val code = if (status == 404 || exception.code in setOf("PROGRESS_UNAVAILABLE", "UPLOAD_CAPACITY", "UPLOAD_STORAGE", "JOB_RECORD_UNAVAILABLE", "RECOVERY_INSPECTION_BUSY")) exception.code else "JOB_STORAGE_UNAVAILABLE"
+            val status = if (exception.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else if (exception.code == "JOB_LIBRARY_FULL") 409 else 503
+            val code = if (status == 404 || exception.code in setOf("PROGRESS_UNAVAILABLE", "UPLOAD_CAPACITY", "UPLOAD_STORAGE", "JOB_LIBRARY_FULL", "JOB_RECORD_UNAVAILABLE", "RECOVERY_INSPECTION_BUSY")) exception.code else "JOB_STORAGE_UNAVAILABLE"
             legacyError(exchange, status, code, when (code) {
                 "PROGRESS_UNAVAILABLE" -> "The retained progress journal is unavailable. Missing data does not establish an empty history."
                 "UPLOAD_CAPACITY" -> "Upload capacity is temporarily unavailable. Retry shortly."
-                "UPLOAD_STORAGE" -> publicWebDiagnosticMessage(code)
+                "UPLOAD_STORAGE", "JOB_LIBRARY_FULL" -> publicWebDiagnosticMessage(code)
                 "JOB_RECORD_UNAVAILABLE", "RECOVERY_INSPECTION_BUSY" -> publicWebDiagnosticMessage(code)
                 "JOB_STORAGE_UNAVAILABLE" -> "Job storage is unavailable. Inspect storage before retrying."
                 else -> "The requested job or attempt is unavailable."
