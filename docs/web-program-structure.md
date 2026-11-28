@@ -140,33 +140,96 @@ browser lists these families explicitly rather than omitting them.
 
 ## Scale
 
-Two checks qualify the 100,000-function budget (#536):
+The packaged qualification separates cold first-page samples from the full interaction
+journey. `scripts/packaged-browser-structure-cold.mjs --run loopback|constrained --`
+starts 20 sequential instances of `check-packaged-web-browser.mjs --mode
+structure-cold`. Each instance seeds the 100,000-function revision before launching
+the packaged JVM, creates a fresh Chrome process and profile, exchanges a new local
+session handoff, then measures the existing click-to-first-100-rendered-rows boundary.
+Bootstrap, JVM startup, fixture seeding and navigation to the attempt page are outside
+that interval. The 20 child reports retain every timing and failure; no failed sample
+is replaced. The aggregate gates nearest-rank p95 and requires 20 complete samples,
+zero raw inventory loading failures, matching source/archive/JAR identities, unique
+run directories and observed JVM/Chrome process identities.
+Before a cold sample or a profiled structure run launches the package, the driver verifies that every
+qualification script it imports or invokes, plus the packaged CI workflow that
+defines its invocation, has the same Git blob identity as the declared source commit.
+Each report retains the per-file Git blob ID and SHA-256;
+the cold aggregate requires the verified source digest to match across all 20 runs.
+If the checkout is detached from the declared commit, or any qualification source
+is modified, source verification fails and the sample cannot pass. Packaged CI
+records the checked-out `driverCommit` separately from the pull-request head and
+base SHAs; each cold sample must match those declared PR revisions so a merge
+candidate is not reported as if it were the standalone PR head.
+
+The browser profile starts with empty cache and storage. Private requests use the
+normal HttpOnly session cookie after the bootstrap fragment is scrubbed. The JVM and
+browser are fresh for each sample, so server-side structure caches cannot warm later
+samples. The protocol does not clear the operating-system page cache; results are cold
+application-process/browser-profile measurements, not cold-storage measurements.
+The lifecycle control also launches real Linux process groups: it waits for an
+ordinary descendant to exit, escalates to a group kill when a surviving child
+ignores cleanup, and refuses to treat forced cleanup as a passing sample. On a
+sample timeout, it sends `SIGTERM`, waits for the bounded grace period, then uses
+`SIGKILL` if the launcher or any descendant remains; that sample is recorded as
+timed out and failed even when cleanup is confirmed.
+Loopback first-page p95 is limited to 500 ms. The constrained profile applies 4× CPU
+slowdown, 100 ms round-trip latency, 10 Mbit/s download and 2 Mbit/s upload and limits
+first-page p95 to 1 s. Both profiles also gate the browser heap and JVM RSS budgets.
 
 - `WebProgramStructureTest` builds a 100,000-function synthetic revision (4,167
   modules) through the real capture path and requires pages of at most 200 rows and
-  under 1 MiB, a median warm page read under 500 ms and a retained projection inside
-  the 256 MiB incremental JVM budget. The projection cache keeps the entry it charged
-  (at most 96 MiB for this fixture), and the 20 warm pages reuse it without reading
-  the model again. It prints the measured values.
-- `node scripts/check-packaged-web-browser.mjs --mode structure` seeds a persisted
+  under 1 MiB, a p95 across 20 fresh-cache first-page reads below 500 ms, a median
+  warm page read below 500 ms and a retained projection below its 96 MiB test
+  bound. The 20 reads use fresh cache instances in one already-running test JVM;
+  they are not 20 fresh-process cold loads. It prints each sample plus the median,
+  p95 and max.
+- `node scripts/check-packaged-web-browser.mjs --mode structure` without a profile runs the ordinary
+  journey: 20 keyboard pages, reload, search, pinned cross-links, the module source link
+  and reflow, with the #1879 module-body observations recorded on failure. It applies
+  none of the budgets below and does not verify source or browser identity. CI runs it
+  before the Vite proxy step, and runs the cold samples and both profiled journeys after
+  that step, so a budget failure cannot skip the ordinary journey or the proxy.
+- `node scripts/check-packaged-web-browser.mjs --mode structure --structure-profile <loopback-or-constrained>` seeds a persisted
   100,000-function revision (`scripts/packaged-browser-structure.mjs`) into the
   packaged application and drives pinned Chrome: it opens the inventory from the
-  attempt page, pages 20 times by keyboard (focus returns to the results heading),
+  attempt page, traverses 50 pages by keyboard (focus returns to the results heading),
   reloads a cursor page, searches across all records, follows pinned caller and
   module links to the module source link, checks 390/320 px reflow, refuses any
-  inventory read without the 100-row limit, and asserts a peak JS heap of at most
-  128 MiB and at most 500 mounted table rows. CI runs it in the `web-packaged` job.
+  inventory read without the 100-row limit, and asserts a sampled JS heap peak of at
+  most 128 MiB and at most 500 mounted table rows. It samples `JSHeapUsedSize` every
+  50 ms throughout the measured journey and fails if a sample fails or the largest
+  observed gap exceeds 500 ms; the reported peak is sampled, not a continuous heap
+  trace. CI runs it in the `web-packaged` job for both profiles.
   Its seed writes manifests directly, so `WebProgramStructureTest` keeps
   `scripts/packaged-browser-structure-profile.json` equal to the current profile.
-  Structure mode starts the packaged JVM with `-Ddecompengine.web.structureTiming=true`
-  and the report keeps at most 512 server phase timings. These are stderr diagnostics;
-  they do not change any response or check.
+  During that journey the driver samples the packaged JVM's Linux `VmRSS` every
+  25 ms, using the median of five idle samples before structure navigation as its
+  warm baseline. It fails on missing samples or incremental RSS above 256 MiB.
+  This is sampled process RSS for this synthetic journey; it does not establish a
+  maximum over every request pattern or long-running session.
 
-A local run on a heavily loaded host (load average about 40) measured: 100 rows per
-page, peak browser heap 12 MB, keypress-to-rendered next page p50 81 ms and p95 84 ms,
-full-population search 161 ms, and 23 bounded inventory reads; on the server, warm
-page reads p50 2 ms, entity detail 22 ms and a retained projection of about 47 MB.
-The first read of a revision builds its projection and took 0.84–1.07 s there, above
-the 500 ms first-data-page budget; later reads reuse it. That first-read latency is
-the remaining gap for this budget and is not hidden by the checks. Fresh-process cold
-first-page qualification and its numeric gates are tracked by #536.
+Five historical local 20-sample runs measured cold projection p50/p95/max of 323/438/569 ms,
+392/487/595 ms, 398/588/751 ms, 270/362/521 ms, and 333/493/502 ms; retained
+projection had an estimated post-GC heap delta of about 47 MB under the then-current
+test. This heap delta is distinct from the separately charged cache-entry size, which
+is about 87 MB for the current 100,000-function fixture. Four runs met the 500 ms p95
+budget and one did not, so local timing is variable and does not establish stable qualification. These are synthetic
+projection measurements, not hosted production qualification. The packaged browser
+measurements above remain separate evidence for response paging, heap, keyboard
+interaction and reflow.
+
+The packaged driver retains failed same-origin request duration and header timing so a
+canceled first response remains visible in the latency diagnosis. A `loadingFailed`
+terminal is accepted as consumed only for Chromium's exact `net::ERR_ABORTED` canceled
+signature and only when the complete streamed body matches the fixture oracle and
+Content-Length, the response is an uncached HTTP 200, Resource Timing reports matching
+encoded/decoded sizes and HTTP 200, and the expected ready DOM follows the failure.
+The driver may classify a narrowly proven cancellation for diagnosis using request-ID
+and URL hashes after all 52 consumption actions are proven. This classification is
+diagnostic only: the qualification gate still requires zero raw `loadingFailed`
+inventory requests. A consumed-body proof does not establish why Chromium reported
+failure or turn that request into a successful terminal. Structure-mode server
+phase timings can be enabled for the packaged diagnostic with
+`-Ddecompengine.web.structureTiming=true`; they are stderr diagnostics and do not alter
+the response or any budget.
