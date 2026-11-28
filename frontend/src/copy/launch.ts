@@ -11,7 +11,7 @@ export const launchCopy = {
   "modeEvidenceOnly": "evidence only",
   "optionState": "Reported state: {state}",
   "optionUnavailable": "This option cannot be selected: {reason}",
-  "checkedAtStart": "The server checks the sandbox helpers when you start this option. If they are unavailable, nothing starts and the reason is shown here.",
+  "checkedAtStart": "The server checks the sandbox helpers when you start this option. If they are unavailable, nothing starts and this page says the option is not available now.",
   "optionUnavailableWithoutReason": "This option cannot be selected because the server did not report it as supported.",
   "executesBinary": "Runs the uploaded binary inside the sandbox.",
   "doesNotExecuteBinary": "Does not run the uploaded binary.",
@@ -52,6 +52,7 @@ export const launchCopy = {
   "summaryIntroduction": "This exact configuration is recorded with the attempt and cannot be changed after it starts.",
   "summaryWorkflow": "Workflow",
   "summaryOption": "Option",
+  "summaryMode": "Mode",
   "summaryHarness": "Harness capability",
   "summaryNoHarness": "None",
   "summaryInput": "Input revision",
@@ -70,7 +71,9 @@ export const launchCopy = {
   "capabilityUnavailable": "The selected option is not available now; a prerequisite may have changed. Check the runtime page, then refresh this job.",
   "invalidConfiguration": "The server rejected this configuration. Refresh the job and review the settings.",
   "revisionUnavailable": "The selected revision is unavailable for this job. Refresh the job and choose another.",
-  "uncertain": "The server did not confirm whether the attempt was recorded. Start again to resend the same request; it cannot create a second attempt.",
+  "uncertain": "The server did not confirm whether the attempt was recorded. Start again to resend the same request instead of starting another.",
+  "jobUnavailable": "The server no longer starts attempts for this job; it may have been removed. Nothing was started. Refresh the job.",
+  "recordedMismatch": "The server did not confirm the submitted configuration: the attempt it reports differs from this request, so it was not opened. Check this job's attempts before starting again.",
   "sessionLost": "The local session expired or was denied. Reconnect, then start again.",
   "refreshJob": "Refresh job"
 } as const;

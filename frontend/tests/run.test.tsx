@@ -748,7 +748,7 @@ it.each([['absent', undefined], ['null', null]] as const)('labels a legacy %s la
     render(<App basePath="/nested" session={auth} />);
     expect(await screen.findByText('Recorded launch option')).toBeTruthy();
     for (const label of ['Recorded launch option', 'Recorded launch mode']) {
-      expect(screen.getByText(label).nextElementSibling?.textContent).toBe('Unrecorded: this attempt predates launch option recording');
+      expect(screen.getByText(label).nextElementSibling?.textContent).toBe('Launch option was not recorded for this attempt.');
     }
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.queryByText(/explicitly started in evidence-only mode/)).toBeNull();

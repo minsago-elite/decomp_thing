@@ -32,16 +32,22 @@ function supported(id: string): Capability[] {
 function run(overrides: Partial<Run> = {}): { data: Run } {
   return { data: { ...fixture<Run>('run-queued'), jobId: job.jobId, workflow: 'reconstruct', ...overrides } };
 }
-function mount(options: { capabilities?: Capability[]; selected?: Job } = {}) {
+/** An answer recording exactly the submitted configuration. */
+function recorded(overrides: Partial<Run> = {}) {
+  return (...[, , , body]: Parameters<Post>) => Promise.resolve(run({ workflow: body.workflow, inputRevisionId: body.inputRevisionId,
+    harnessCapabilityId: body.harnessCapabilityId, launchSelection: body.launchSelection ?? null, limits: body.limits, ...overrides }));
+}
+function mount(options: { capabilities?: Capability[]; selected?: Job; onDeleted?: (failure: unknown) => void } = {}) {
   const onStarted = vi.fn<(path: string) => void>(); const onRefresh = vi.fn();
-  const view = render(<WorkflowLaunch job={options.selected ?? job} runtime={runtime(options.capabilities)} basePath="/nested/"
-    session={session} onRefresh={onRefresh} onStarted={onStarted} />);
-  return { view, onStarted, onRefresh };
+  const element = (selected: Job) => <WorkflowLaunch key={selected.jobId} job={selected} runtime={runtime(options.capabilities)} basePath="/nested/"
+    session={session} onRefresh={onRefresh} onStarted={onStarted} {...(options.onDeleted ? { onDeleted: options.onDeleted } : {})} />;
+  const view = render(element(options.selected ?? job));
+  return { view, onStarted, onRefresh, observe: (next: Job) => { view.rerender(element(next)); } };
 }
 const start = (name: RegExp = /^Start/) => screen.getByRole('button', { name });
 
 beforeEach(() => { transport.get.mockReset(); transport.post.mockReset(); });
-afterEach(cleanup);
+afterEach(() => { cleanup(); Reflect.deleteProperty(document, 'activeElement'); });
 
 it('describes every server option and allows an explicit choice only among supported ones', () => {
   mount();
@@ -71,8 +77,8 @@ it('starts from server defaults with one guarded keyed request and opens the rec
   fireEvent.click(screen.getByLabelText('Reconstruction: evidence only'));
   expect(screen.getByLabelText<HTMLInputElement>('Wall-clock limit (ms)').value).toBe('7200000');
   const summary = within(screen.getByRole('region', { name: 'Configuration to submit' }));
-  expect(summary.getByText('evidence-only')).toBeTruthy();
-  expect(summary.getByText('workflow-reconstruct-evidence-only')).toBeTruthy();
+  const fact = (term: string) => summary.getByText(term, { selector: 'dt' }).nextElementSibling?.textContent;
+  expect([fact('Option'), fact('Mode'), fact('Harness capability')]).toEqual(['workflow-reconstruct-evidence-only', 'evidence-only', 'evidence-only']);
   fireEvent.click(start(/Start Reconstruction/)); fireEvent.click(start(/Start Reconstruction/));
   fireEvent.submit(start(/Start Reconstruction/).closest('form')!);
   expect(transport.post).toHaveBeenCalledOnce();
@@ -85,7 +91,8 @@ it('starts from server defaults with one guarded keyed request and opens the rec
   expect(settings.idempotencyKey).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
   expect(start(/Start Reconstruction/)).toHaveProperty('disabled', true);
   answer(run({ runId: 'run_started', harnessCapabilityId: 'evidence-only',
-    launchSelection: { capabilityId: 'workflow-reconstruct-evidence-only', mode: 'evidence-only' } }));
+    launchSelection: { capabilityId: 'workflow-reconstruct-evidence-only', mode: 'evidence-only' },
+    limits: { wallClockMs: '7200000', idleMs: '1200000', maxOutputBytes: '4294967296', maxToolCalls: '0' } }));
   await waitFor(() => expect(onStarted).toHaveBeenCalledWith('/nested/jobs/' + job.jobId + '/runs/run_started'));
   expect(screen.getByRole('link', { name: 'Open the started attempt' }).getAttribute('href')).toBe('/nested/jobs/' + job.jobId + '/runs/run_started');
 });
@@ -116,8 +123,7 @@ it('requires a revision recorded by this job for repair and keeps its fixed limi
     { ...run().data, runId: 'run_new', state: 'completed', resultRevisionId: 'source_candidate' },
     { ...run().data, runId: 'run_failed', state: 'failed', resultRevisionId: 'source_failed' },
   ], page: { nextCursor: null, limit: 50, snapshotVersion: 'snapshot_1' } } });
-  transport.post.mockResolvedValue(run({ runId: 'run_repair', workflow: 'repair',
-    launchSelection: { capabilityId: 'workflow-repair-agent', mode: 'agent' } }));
+  transport.post.mockImplementation(recorded({ runId: 'run_repair' }));
   mount({ capabilities: supported('workflow-repair-agent'), selected: { ...job, acceptedRevisionId: 'source_accepted' } });
   fireEvent.click(screen.getByLabelText('Repair: configured agent'));
   expect(screen.queryByLabelText('Wall-clock limit (ms)')).toBeNull();
@@ -232,13 +238,15 @@ it.each([
   [409, 'IDEMPOTENCY_CONFLICT', /already used for a different configuration/, false, true],
   [429, 'QUOTA_EXCEEDED', /workflow capacity/, false, false],
   [503, 'CAPABILITY_UNAVAILABLE', /not available now/, true, true],
+  [404, 'NOT_FOUND', /no longer starts attempts for this job/, true, true],
+  [405, 'METHOD_NOT_ALLOWED', /no longer starts attempts for this job/, true, true],
+  [410, 'RESOURCE_GONE', /no longer starts attempts for this job/, true, true],
   [503, 'RECOVERY_REQUIRED', /did not confirm/, false, false],
   [undefined, undefined, /did not confirm/, false, false],
 ] as const)('reports HTTP %s %s once and decides whether a resend reuses its key', async (status, serverCode, text, refresh, renewed) => {
   transport.post.mockRejectedValueOnce(status === undefined ? new ApiClientError('network_error')
     : new ApiClientError('http_error', { status, ...(serverCode ? { serverCode } : {}) }));
-  transport.post.mockResolvedValueOnce(run({ runId: 'run_retry', workflow: 'explore',
-    launchSelection: { capabilityId: 'workflow-explore-tools', mode: 'tools' } }));
+  transport.post.mockImplementationOnce(recorded({ runId: 'run_retry' }));
   const { onRefresh, onStarted } = mount();
   fireEvent.click(screen.getByLabelText('Exploration: local tools'));
   fireEvent.click(start());
@@ -255,7 +263,7 @@ it.each([
 });
 
 it('changing the configuration after an uncertain answer sends a fresh key', async () => {
-  transport.post.mockRejectedValueOnce(new ApiClientError('timeout')).mockResolvedValueOnce(run({ workflow: 'explore' }));
+  transport.post.mockRejectedValueOnce(new ApiClientError('timeout')).mockImplementationOnce(recorded());
   mount();
   fireEvent.click(screen.getByLabelText('Exploration: local tools'));
   fireEvent.click(start());
@@ -269,7 +277,7 @@ it('changing the configuration after an uncertain answer sends a fresh key', asy
 });
 
 it('refuses a response for another job instead of opening it', async () => {
-  transport.post.mockResolvedValue(run({ jobId: 'f'.repeat(32), workflow: 'explore' }));
+  transport.post.mockImplementation(recorded({ jobId: 'f'.repeat(32) }));
   const { onStarted } = mount();
   fireEvent.click(screen.getByLabelText('Exploration: local tools'));
   fireEvent.click(start());
@@ -278,7 +286,7 @@ it('refuses a response for another job instead of opening it', async () => {
 });
 
 it('lets an option whose sandbox check runs at start be chosen, but no other unknown option', () => {
-  transport.post.mockResolvedValue(run({ runId: 'run_explore', workflow: 'explore' }));
+  transport.post.mockImplementation(recorded({ runId: 'run_explore' }));
   const unchecked = launchBootstrap.capabilities.map(capability => capability.id === 'workflow-explore-tools'
     ? { ...capability, state: 'unknown' as const, reasonCode: 'SANDBOX_HELPER_UNCHECKED', message: 'Sandbox helpers are checked when this workflow starts.' }
     : capability.id === 'workflow-reconstruct-evidence-only'
@@ -335,4 +343,153 @@ it('never selects an option or submits a selection on its own', () => {
   expect(start()).toHaveProperty('disabled', true);
   fireEvent.submit(start().closest('form')!);
   expect(transport.post).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['wall-clock limit', { limits: { wallClockMs: '60000', idleMs: '1200000', maxOutputBytes: '4294967296', maxToolCalls: '0' } }],
+  ['idle limit', { limits: { wallClockMs: '7200000', idleMs: '15000', maxOutputBytes: '4294967296', maxToolCalls: '0' } }],
+  ['output limit', { limits: { wallClockMs: '7200000', idleMs: '1200000', maxOutputBytes: '1048576', maxToolCalls: '0' } }],
+  ['tool-call limit', { limits: { wallClockMs: '7200000', idleMs: '1200000', maxOutputBytes: '4294967296', maxToolCalls: '16' } }],
+  ['harness', { harnessCapabilityId: 'harness_acp' }],
+  ['input revision', { inputRevisionId: 'source_other' }],
+] as const)('refuses a started attempt that records another %s and keeps the original key', async (_label, mismatch) => {
+  transport.post.mockImplementation(recorded({ runId: 'run_mismatch', ...mismatch }));
+  const { onStarted } = mount();
+  fireEvent.click(screen.getByLabelText('Reconstruction: evidence only'));
+  fireEvent.click(start(/Start Reconstruction/));
+  expect((await screen.findByRole('alert')).textContent).toBe(
+    'The server did not confirm the submitted configuration: the attempt it reports differs from this request, so it was not opened. Check this job\'s attempts before starting again.');
+  expect(onStarted).not.toHaveBeenCalled();
+  expect(screen.queryByRole('link', { name: 'Open the started attempt' })).toBeNull();
+  fireEvent.click(start(/Start Reconstruction/));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledTimes(2));
+  const [first, second] = transport.post.mock.calls.map(call => call[4].idempotencyKey);
+  expect(second).toBe(first);
+});
+
+// Packaged Chrome blurs a focused control the page disables under it, leaving focus on BODY; jsdom keeps it focused
+// (and refuses to blur a disabled control), so the document reports BODY until something focuses the control again.
+const chromeBlurIfDisabled = (control: HTMLElement) => {
+  if (!control.matches(':disabled') || document.activeElement !== control) return;
+  const actual = Object.getOwnPropertyDescriptor(Document.prototype, 'activeElement')!;
+  let blurred = true;
+  Object.defineProperty(document, 'activeElement', { configurable: true,
+    get(this: Document) { const focused = actual.get!.call(this) as Element | null; return blurred && focused === control ? this.body : focused; } });
+  const focus = control.focus.bind(control);
+  control.focus = (options?: FocusOptions) => { blurred = false; focus(options); };
+  control.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+  control.dispatchEvent(new FocusEvent('blur'));
+};
+
+it.each([[412, 'VERSION_CONFLICT'], [429, 'QUOTA_EXCEEDED']] as const)(
+  'returns keyboard focus to Start when a keyboard submission is refused with HTTP %s', async (status, serverCode) => {
+    let refuse!: () => void;
+    transport.post.mockImplementation(() => new Promise((_resolve, reject) => {
+      refuse = () => { reject(new ApiClientError('http_error', { status, serverCode })); };
+    }));
+    mount();
+    fireEvent.click(screen.getByLabelText('Exploration: local tools'));
+    const button = start(); button.focus();
+    fireEvent.keyDown(button, { key: 'Enter' }); fireEvent.click(button);
+    chromeBlurIfDisabled(button);
+    expect(document.activeElement).toBe(document.body);
+    refuse();
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(document.activeElement).toBe(button);
+  });
+
+it('leaves focus the user moved elsewhere while the start was outstanding', async () => {
+  let refuse!: () => void;
+  transport.post.mockImplementation(() => new Promise((_resolve, reject) => {
+    refuse = () => { reject(new ApiClientError('http_error', { status: 429, serverCode: 'QUOTA_EXCEEDED' })); };
+  }));
+  const elsewhere = document.body.appendChild(document.createElement('button'));
+  try {
+    mount();
+    fireEvent.click(screen.getByLabelText('Exploration: local tools'));
+    const button = start(); button.focus(); fireEvent.click(button); chromeBlurIfDisabled(button);
+    elsewhere.focus();
+    refuse();
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(document.activeElement).toBe(elsewhere);
+  } finally { elsewhere.remove(); }
+});
+
+it('lands on the form heading when a refresh after a refusal replaces the focused Refresh control', async () => {
+  transport.post.mockRejectedValueOnce(new ApiClientError('http_error', { status: 412, serverCode: 'VERSION_CONFLICT' }));
+  const { observe, onRefresh } = mount();
+  fireEvent.click(screen.getByLabelText('Exploration: local tools'));
+  const button = start(); button.focus(); fireEvent.click(button); chromeBlurIfDisabled(button);
+  const refresh = await screen.findByRole('button', { name: 'Refresh job' });
+  refresh.focus(); fireEvent.click(refresh);
+  expect(onRefresh).toHaveBeenCalledOnce();
+  observe({ ...job, version: 'job_version_2' });
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Refresh job' })).toBeNull());
+  expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Start a workflow' }));
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.getAllByRole<HTMLInputElement>('radio').every(option => !option.checked)).toBe(true);
+});
+
+it('keeps an outstanding start alive across a newer observation of the same job and opens its attempt', async () => {
+  let answer!: (value: unknown) => void;
+  transport.post.mockImplementation((...call) => new Promise(resolve => { answer = () => { resolve(recorded({ runId: 'run_held' })(...call)); }; }));
+  const { observe, onStarted } = mount();
+  fireEvent.click(screen.getByLabelText('Exploration: local tools'));
+  fireEvent.click(start());
+  const signal = transport.post.mock.calls[0]![4].signal;
+  observe({ ...job, version: 'job_version_2', status: 'queued', latestRunId: 'run_held' });
+  expect(screen.getByRole('status').textContent).toMatch(/^Starting/);
+  answer(undefined);
+  await waitFor(() => expect(onStarted).toHaveBeenCalledWith('/nested/jobs/' + job.jobId + '/runs/run_held'));
+  expect(signal.aborted).toBe(false);
+  expect(transport.post).toHaveBeenCalledOnce();
+});
+
+it('hands a deletion tombstone from the start request to the job view instead of offering a resend', async () => {
+  const gone = new ApiClientError('http_error', { status: 410, serverCode: 'RESOURCE_GONE' });
+  transport.post.mockRejectedValueOnce(gone);
+  const onDeleted = vi.fn();
+  mount({ onDeleted });
+  fireEvent.click(screen.getByLabelText('Exploration: local tools'));
+  fireEvent.click(start());
+  await waitFor(() => expect(onDeleted).toHaveBeenCalledWith(gone));
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(document.body.textContent).not.toMatch(/did not confirm/);
+});
+
+it('hands a deletion tombstone from a revision read to the job view', async () => {
+  const gone = new ApiClientError('http_error', { status: 410, serverCode: 'RESOURCE_GONE' });
+  transport.get.mockRejectedValueOnce(gone);
+  const onDeleted = vi.fn();
+  mount({ capabilities: supported('workflow-repair-agent'), onDeleted });
+  fireEvent.click(screen.getByLabelText('Repair: configured agent'));
+  await waitFor(() => expect(onDeleted).toHaveBeenCalledWith(gone));
+});
+
+it('lands on the input revision heading when Load revisions again removes itself', async () => {
+  let release!: () => void;
+  transport.get.mockRejectedValueOnce(new ApiClientError('network_error'))
+    .mockImplementationOnce(() => new Promise(resolve => { release = () => { resolve({ data: { jobId: job.jobId, items: [],
+      page: { nextCursor: null, limit: 200, snapshotVersion: 'snapshot_1' } } }); }; }));
+  mount({ capabilities: supported('workflow-repair-agent') });
+  fireEvent.click(screen.getByLabelText('Repair: configured agent'));
+  const retry = await screen.findByRole('button', { name: 'Load revisions again' });
+  retry.focus(); fireEvent.click(retry);
+  expect(retry.isConnected).toBe(false);
+  expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Input revision' }));
+  release();
+  expect(await screen.findByText(/no completed attempt|no recorded/i)).toBeTruthy();
+});
+
+it('lands on the form heading when a newer job observation disables the focused Start control', () => {
+  const { observe } = mount();
+  fireEvent.click(screen.getByLabelText('Exploration: local tools'));
+  const button = start(); button.focus();
+  // Blur the way Chrome does, at the moment the page disables the focused control during the reset render.
+  const own = Object.getOwnPropertyDescriptor(HTMLButtonElement.prototype, 'disabled')!;
+  Object.defineProperty(button, 'disabled', { configurable: true, get() { return own.get!.call(button) as boolean; },
+    set(value: boolean) { own.set!.call(button, value); chromeBlurIfDisabled(button); } });
+  observe({ ...job, version: 'job_version_2' });
+  expect(button).toHaveProperty('disabled', true);
+  expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Start a workflow' }));
 });

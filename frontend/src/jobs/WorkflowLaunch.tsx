@@ -1,5 +1,5 @@
 import { Fragment } from 'preact';
-import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { Capability, ExecutionLimits, Job, Run, Workflow, WorkflowLaunch as Launch, WorkflowStart } from '../api/generated';
 import { runPath } from '../app/paths';
@@ -7,6 +7,8 @@ import { launchCopy as copy } from '../copy/launch';
 import { jobCopy } from '../copy/job';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import type { BrowserSession, RuntimeSnapshot } from '../session/session';
+import { restoreSettledFocus, useDepartingFocus } from '../shared/departingFocus';
+import { isDeletedJob } from '../shared/retainMetadata';
 import { message, textMessage } from '../shared/messages';
 import { launchStartable } from './capabilityFacts';
 
@@ -55,6 +57,8 @@ function failureMessage(failure: unknown): { text: string; refresh: boolean; ren
   if (status === 409 && code === 'IDEMPOTENCY_CONFLICT') return result(copy.keyConflict, false, true);
   if (status === 409) return result(copy.activeConflict, true, true);
   if (status === 429) return result(copy.atCapacity);
+  // A definite refusal for a job this server no longer starts: nothing was recorded, so a later start is a new request.
+  if (status === 404 || status === 405 || status === 410) return result(copy.jobUnavailable, true, true);
   if (status === 422 && (code === 'INPUT_REVISION_UNAVAILABLE' || code === 'INPUT_REVISION_REQUIRED')) return result(copy.revisionUnavailable, true, true);
   if (status === 422 || status === 400) return result(copy.invalidConfiguration, true, true);
   if (status === 503 && code === 'CAPABILITY_UNAVAILABLE') return result(copy.capabilityUnavailable, true, true);
@@ -68,17 +72,25 @@ function sameSelection(recorded: Run['launchSelection'], submitted: WorkflowStar
     && recorded.capabilityId === submitted.capabilityId && recorded.mode === submitted.mode;
 }
 
+/** The answer opens only an attempt that records the whole submitted configuration. */
+function recordsRequest(run: Run, jobId: string, body: WorkflowStart): boolean {
+  return run.jobId === jobId && run.workflow === body.workflow && sameSelection(run.launchSelection, body.launchSelection)
+    && run.inputRevisionId === body.inputRevisionId && run.harnessCapabilityId === body.harnessCapabilityId
+    && limitKeys.every(key => run.limits[key] === body.limits[key]);
+}
+
 interface Revision { id: string; label: string }
 
 /** The store retains at most 1024 attempts, so six 200-row pages always reach the oldest one. */
 const MAXIMUM_REVISION_PAGES = 6;
 
-function useRevisions(basePath: string, job: Job, needed: boolean): {
+function useRevisions(basePath: string, job: Job, needed: boolean, onDeleted: ((failure: unknown) => void) | undefined): {
   revisions: Revision[] | null; failed: boolean; retry: () => void;
 } {
   const { client } = usePrivateTransport(basePath);
   const [state, setState] = useState<{ key: string; revisions: Revision[] | null; failed: boolean } | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const deleted = useRef(onDeleted); deleted.current = onDeleted;
   const key = `${job.jobId}/${job.version}/${attempt}`;
   useEffect(() => {
     if (!needed) return;
@@ -105,7 +117,12 @@ function useRevisions(basePath: string, job: Job, needed: boolean): {
         if (!cursor) { setState({ key, revisions, failed: false }); return; }
       }
       throw new ApiClientError('invalid_response'); // More pages than the store can retain.
-    })().catch(() => { if (!controller.signal.aborted) setState({ key, revisions: null, failed: true }); });
+    })().catch((failure: unknown) => {
+      if (controller.signal.aborted) return;
+      setState({ key, revisions: null, failed: true });
+      // A deletion tombstone ends the job view rather than offering a retry here.
+      if (isDeletedJob(failure)) deleted.current?.(failure);
+    });
     return () => { controller.abort(); };
   }, [client, job.jobId, job.acceptedRevisionId, key, needed]);
   const current = state?.key === key ? state : { revisions: null, failed: false };
@@ -129,9 +146,11 @@ function OptionFacts({ option }: { option: LaunchOption }) {
  * report; the server revalidates all of them. One intent keeps one idempotency key, so a resend
  * after a lost answer replays rather than starting twice.
  */
-export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onStarted }: {
+export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onStarted, onDeleted }: {
   job: Job; runtime: RuntimeSnapshot; basePath: string; session: Pick<BrowserSession, 'csrf'>;
   onRefresh: () => void; onStarted: (path: string) => void;
+  /** A confirmed RESOURCE_GONE tombstone ends the job view (#512); any other failure stays with this form. */
+  onDeleted?: (failure: unknown) => void;
 }) {
   const { client } = usePrivateTransport(basePath);
   const options = useMemo(() => launchOptions(runtime), [runtime]);
@@ -146,8 +165,39 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
   const active = useRef<AbortController | null>(null);
   const jobBusy = job.status === 'queued' || job.status === 'running';
   const { revisions, failed: revisionsFailed, retry: retryRevisions } = useRevisions(basePath, job, selected?.launch.input === 'recorded-required'
-    || selected?.launch.input === 'accepted-optional');
+    || selected?.launch.input === 'accepted-optional', onDeleted);
   useEffect(() => () => { active.current?.abort(); active.current = null; }, []);
+  const section = useRef<HTMLElement>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const noticeLine = useRef<HTMLParagraphElement>(null);
+  const departingFocus = useDepartingFocus(section);
+  /**
+   * The control focus departed from when a request settled or the job changed, with the persistent destination that
+   * takes focus if that control is gone or stays disabled. Focus the user moved anywhere is left alone.
+   */
+  const settledFrom = useRef<{ from: Element; fallback: 'notice' | 'heading' | 'input' } | null>(null);
+  const inputHeading = useRef<HTMLHeadingElement>(null);
+  const settle = (fallback: 'notice' | 'heading' | 'input') => {
+    const from = departingFocus();
+    settledFrom.current = from && section.current?.contains(from) ? { from, fallback } : null;
+  };
+  useLayoutEffect(() => {
+    const settled = settledFrom.current; settledFrom.current = null;
+    if (!settled) return;
+    const fallback = { heading: heading.current, input: inputHeading.current, notice: noticeLine.current }[settled.fallback];
+    restoreSettledFocus(settled.from, fallback);
+    if (!document.activeElement || document.activeElement === document.body) fallback?.focus();
+  });
+  // A newer observation of the same job resets the form, except while a request is outstanding: that command, its key
+  // and the navigation to the attempt it records stay alive, and the next start is bound to the newer version.
+  const formVersion = useRef(job.version);
+  useLayoutEffect(() => {
+    if (formVersion.current === job.version) return;
+    formVersion.current = job.version;
+    if (active.current) return;
+    settle('heading');
+    setSelectedId(null); setLimits(null); setInputRevisionId(''); setNotice(null); setIntent(null); setStartedPath(null);
+  }, [job.version]);
 
   function choose(option: LaunchOption) {
     if (pending) return;
@@ -181,17 +231,18 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
       });
       if (controller.signal.aborted) return;
       const run: Run = response.data;
-      if (run.jobId !== job.jobId || run.workflow !== body.workflow || !sameSelection(run.launchSelection, body.launchSelection)) {
-        throw new ApiClientError('invalid_response');
-      }
+      // The key is kept: a resend replays this same answer instead of starting another attempt.
+      if (!recordsRequest(run, job.jobId, body)) { settle('notice'); setNotice({ text: copy.recordedMismatch, refresh: false, alert: true }); return; }
       const path = runPath(basePath, job.jobId, run.runId);
       setNotice({ text: textMessage(copy.startedOpening, { run: run.runId }), refresh: false, alert: false });
       setStartedPath(path);
       onStarted(path);
     } catch (failure: unknown) {
       if (controller.signal.aborted) return;
+      if (onDeleted && isDeletedJob(failure)) { setIntent(null); onDeleted(failure); return; }
       const result = failureMessage(failure);
       if (result.renew) setIntent(null);
+      settle('notice');
       setNotice({ text: result.text, refresh: result.refresh, alert: true });
     } finally {
       if (active.current === controller) { active.current = null; setPending(false); }
@@ -202,8 +253,8 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
     <h3 id="workflow-launch-title">{copy.startAWorkflow}</h3>
     <p>{copy.noLaunchOptions}</p>
   </section>;
-  return <section aria-labelledby="workflow-launch-title">
-    <h3 id="workflow-launch-title">{copy.startAWorkflow}</h3>
+  return <section aria-labelledby="workflow-launch-title" ref={section}>
+    <h3 id="workflow-launch-title" ref={heading} tabIndex={-1}>{copy.startAWorkflow}</h3>
     <p>{copy.launchIntroduction}</p>
     {jobBusy && <p role="note">{copy.activeAttempt} {job.latestRunId && <a href={runPath(basePath, job.jobId, job.latestRunId)}>{copy.openActiveAttempt}</a>}</p>}
     <form class="workflow-launch" onSubmit={event => { void submit(event); }} aria-busy={pending}>
@@ -228,13 +279,14 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
       </fieldset>
       {!selected ? <p>{copy.selectAnOption}</p> : values && problems && <fieldset disabled={pending}>
         <legend>{copy.settings}</legend>
-        <h4>{copy.inputRevision}</h4>
+        <h4 ref={inputHeading} tabIndex={-1}>{copy.inputRevision}</h4>
         {selected.launch.input === 'none' ? <p>{copy.inputNone}</p> : <>
           {selected.launch.input === 'recorded-required' && <p id="launch-input-help">{copy.inputRequired}</p>}
           {revisions === null && !revisionsFailed && <p role="status">{copy.loadingRevisions}</p>}
           {revisionsFailed && <>
             <p role="alert">{copy.revisionsUnavailable}</p>
-            <button type="button" onClick={retryRevisions}>{copy.retryRevisions}</button>
+            {/* Retrying removes this button; focus lands on the section heading rather than the document. */}
+            <button type="button" onClick={() => { settle('input'); retryRevisions(); }}>{copy.retryRevisions}</button>
           </>}
           {revisions !== null && selected.launch.input === 'recorded-required' && revisions.length === 0 && <p>{copy.noRecordedRevisions}</p>}
           {revisions !== null && (revisions.length > 0 || selected.launch.input === 'accepted-optional') && <>
@@ -267,6 +319,7 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
         <dl class="job-facts">
           <dt>{copy.summaryWorkflow}</dt><dd><code>{body.workflow}</code></dd>
           <dt>{copy.summaryOption}</dt><dd><code>{selected?.id}</code></dd>
+          <dt>{copy.summaryMode}</dt><dd><code>{body.launchSelection?.mode}</code></dd>
           <dt>{copy.summaryHarness}</dt><dd>{body.harnessCapabilityId ? <code>{body.harnessCapabilityId}</code> : copy.summaryNoHarness}</dd>
           <dt>{copy.summaryInput}</dt><dd>{body.inputRevisionId ? <code>{body.inputRevisionId}</code> : copy.inputUploaded}</dd>
           <dt>{copy.summaryLimits}</dt><dd>{textMessage(copy.summaryLimitValues, { wall: body.limits.wallClockMs, idle: body.limits.idleMs,
@@ -276,8 +329,9 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
       <button type="submit" disabled={!body || pending || jobBusy}>
         {textMessage(copy.start, { workflow: selected ? workflowLabels[selected.workflows[0]!] : copy.workflowOption })}</button>
     </form>
-    <div aria-live="polite">
-      {notice && <p role={notice.alert ? 'alert' : 'status'}>{notice.text}</p>}
+    <div>
+      {/* Keyed by role so a refusal inserts a fresh alert instead of retagging the status line. */}
+      {notice && <p key={notice.alert ? 'alert' : 'status'} role={notice.alert ? 'alert' : 'status'} ref={noticeLine} tabIndex={-1}>{notice.text}</p>}
       {notice?.refresh && <button type="button" onClick={onRefresh}>{copy.refreshJob}</button>}
       {startedPath && <a href={startedPath}>{copy.openStartedAttempt}</a>}
     </div>

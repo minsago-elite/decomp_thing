@@ -357,7 +357,7 @@ export const runCopy = {
   "harnessCapabilityNotRecorded": "Not recorded for this attempt",
   "recordedLaunchOption": "Recorded launch option",
   "recordedLaunchMode": "Recorded launch mode",
-  "launchSelectionNotRecorded": "Unrecorded: this attempt predates launch option recording",
+  "launchSelectionNotRecorded": "Launch option was not recorded for this attempt.",
   "launchModeTools": "local tools ({mode})",
   "launchModeAgent": "configured agent ({mode})",
   "launchModeEvidenceOnly": "evidence only ({mode})",

@@ -238,9 +238,9 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session, generat
       <PanelBoundary name={panelBoundaryCopy.names.workflowAvailability}>
         <WorkflowAvailability runtime={runtime} {...(runtimeReceipt ? { receipt: runtimeReceipt } : {})} />
       </PanelBoundary>
-      <WorkflowLaunch key={`${job.jobId}/${job.version}`} job={job} runtime={runtime} basePath={basePath} session={session}
+      <WorkflowLaunch key={job.jobId} job={job} runtime={runtime} basePath={basePath} session={session}
         onRefresh={() => { setRefresh(value => value + 1); }}
-        onStarted={path => { if (location.url) location.route(path); else window.location.assign(path); }} />
+        onStarted={path => { if (location.url) location.route(path); else window.location.assign(path); }} onDeleted={markDeleted} />
       <GitRepositoryPanel job={job} capabilities={runtime.capabilities} basePath={basePath} session={session} onDeleted={markDeleted} />
       <a href={appPath(basePath, '/runtime')}>{copy.viewReportedWorkflowAvailability}</a>
       <JobOrganization job={job} client={client} basePath={basePath} session={session}
