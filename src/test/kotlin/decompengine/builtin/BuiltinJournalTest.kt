@@ -60,6 +60,36 @@ class BuiltinJournalTest {
         assertFalse(Files.readString(configuration.path).contains("abc"))
     }
 
+    @Test fun `redaction covers numeric and boolean literals and nested json escaping layers`() {
+        val configuration = configuration()
+        val secret = "9182736455"
+        val quoted = "q\"t-secret"
+        val journal = BuiltinJournal.open(configuration, request(), listOf(secret, quoted, "true"))
+        var nested = quoted
+        repeat(3) { nested = JsonPrimitive(nested).toString() }
+        journal.use {
+            it.append(BuiltinJournalKind.CHECKPOINT, buildJsonObject {
+                put("pin", 9182736455L); put("prefixed", 109182736455L); put("flag", true)
+                put("safe", 42); put("absent", JsonNull); put("nested", nested)
+            })
+        }
+        val payload = inspect(configuration, journal.evidence.commitment).records.last().getValue("payload").jsonObject
+        assertEquals(JsonPrimitive("[REDACTED]"), payload["pin"])
+        assertEquals(JsonPrimitive("[REDACTED]"), payload["prefixed"])
+        assertEquals(JsonPrimitive("[REDACTED]"), payload["flag"])
+        assertEquals(JsonPrimitive(42), payload["safe"])
+        assertEquals(JsonNull, payload["absent"])
+        val raw = Files.readString(configuration.path)
+        assertFalse(raw.contains(secret))
+        val persistedNested = payload.getValue("nested").jsonPrimitive.content
+        assertTrue(persistedNested.contains("[REDACTED]"))
+        var spelling = quoted
+        repeat(4) {
+            assertFalse(persistedNested.contains(spelling), "escaped spelling leaked")
+            spelling = JsonPrimitive(spelling).toString().drop(1).dropLast(1)
+        }
+    }
+
     @Test fun `tampered truncated appended and substituted request journals are rejected`() {
         val configuration = configuration()
         val journal = BuiltinJournal.open(configuration, request(), emptyList())

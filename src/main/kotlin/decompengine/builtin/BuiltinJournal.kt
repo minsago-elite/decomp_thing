@@ -107,7 +107,13 @@ internal class BuiltinJournal private constructor(
             JsonObject(pairs.toMap())
         }
         is JsonArray -> JsonArray(value.map(::redact))
-        is JsonPrimitive -> if (value.isString) JsonPrimitive(redactString(value.content)) else value
+        is JsonPrimitive -> when {
+            value.isString -> JsonPrimitive(redactString(value.content))
+            value is JsonNull -> value
+            // A numeric or boolean literal cannot hold a placeholder, so the whole value is replaced.
+            redactString(value.content) != value.content -> JsonPrimitive("[REDACTED]")
+            else -> value
+        }
     }
 
     private fun redactString(value: String): String {

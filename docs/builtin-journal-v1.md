@@ -32,12 +32,16 @@ The loop records:
 - Completion-validation intent and its result with candidate change hashes and an explicit lack of
   publication authority, then the terminal stop, usage and cleanup outcome.
 
-Declared secrets are redacted in strings and object keys, including the JSON-escaped spelling used
-inside structured text. Overlapping matches are covered; colliding redacted keys fail closed. A full
+Declared secrets are redacted in strings and object keys, including up to three nested layers of
+the JSON string-escaped spelling used inside structured text (for example provider prose that embeds
+JSON which itself embeds JSON). Numeric and boolean literals whose spelling contains a declared
+secret are replaced by the string `[REDACTED]`; `null` is never rewritten. Fresh and resumed journals
+use the same bounded pattern set. Overlapping matches are covered; colliding redacted keys fail closed. A full
 assembled model response is redacted as one payload, so a secret split across streamed deltas cannot
 leak through separate journal records. An interrupted response leaves a pending request without raw
 partial text. Exceptions, credentials, runtime endpoints and environment maps are never recorded.
-Callers must declare their sensitive inputs; arbitrary encodings of secrets are not classified.
+Callers must declare their sensitive inputs; arbitrary encodings of secrets (deeper escaping, other
+JSON escape choices such as `\/` or `\uXXXX`, base64 or other transformations) are not classified.
 
 Receipts contain only record count, byte count, head digest, terminal-record completeness and an
 indeterminate-operation flag. Completeness means that a terminal record was persisted; it does not
