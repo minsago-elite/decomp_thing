@@ -7,16 +7,11 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import java.io.IOException
 import java.nio.ByteBuffer
-import java.nio.channels.SeekableByteChannel
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
-import java.nio.file.LinkOption
 import java.nio.file.NoSuchFileException
 import java.nio.file.Path
-import java.nio.file.StandardOpenOption
-import java.nio.file.attribute.PosixFileAttributes
-import java.nio.file.attribute.PosixFilePermission
 import java.time.Instant
 import java.util.Base64
 
@@ -30,26 +25,37 @@ internal class AcpProviderCredentialUnavailable(val failure: AcpProviderCredenti
 /**
  * Host-only credential material for one broker. It never leaves the broker: it is not serializable, it has
  * no public accessor, and it is never put in a process environment, argument, file, archive or diagnostic.
+ *
+ * [sourceIdentities] are the device and inode keys of the credential file, its directory and every ancestor
+ * of that directory, pinned while the credential was read. They are not secret. A sandbox launch that makes
+ * any of these objects visible, under any path, would expose the credential.
  */
 internal class AcpProviderCredential private constructor(
     val reference: AcpProviderCredentialReference,
     private val accessToken: String,
     private val accountId: String?,
+    sourceIdentities: Set<LinuxFileKey>,
 ) {
+    internal val sourceIdentities: Set<LinuxFileKey> = sourceIdentities.toSet()
+
     /** Broker-owned upstream authorization headers. Validated syntax prevents header injection. */
     internal fun authorizationHeaders(): List<Pair<String, String>> = buildList {
         add("Authorization" to "Bearer $accessToken")
         accountId?.let { add("ChatGPT-Account-ID" to it) }
     }
 
-    /** Values that must never appear in a forwarded response, a sandbox launch or a diagnostic. */
-    internal fun secretValues(): List<String> = listOf(accessToken)
+    /**
+     * Values that must never appear in a forwarded response, a sandbox launch or a diagnostic. The account ID
+     * is not key material, but it identifies the operator's account and is sent only upstream, so it is
+     * treated as secret for echo and launch detection.
+     */
+    internal fun secretValues(): List<String> = listOfNotNull(accessToken, accountId)
 
     override fun toString(): String = "AcpProviderCredential(reference=${reference.name}, <redacted>)"
 
     internal companion object {
-        fun chatGptCachedAccessToken(accessToken: String, accountId: String?): AcpProviderCredential =
-            AcpProviderCredential(AcpProviderCredentialReference.LOCAL_CODEX_CACHED_AUTH, accessToken, accountId)
+        fun chatGptCachedAccessToken(accessToken: String, accountId: String?, sourceIdentities: Set<LinuxFileKey>): AcpProviderCredential =
+            AcpProviderCredential(AcpProviderCredentialReference.LOCAL_CODEX_CACHED_AUTH, accessToken, accountId, sourceIdentities)
     }
 }
 
@@ -68,15 +74,25 @@ internal sealed class AcpProviderCredentialSource {
     /**
      * `LOCAL_CODEX_CACHED_AUTH`: the ChatGPT login that the operator's own Codex CLI keeps in `auth.json`
      * under its Codex home. Only the cached access token and the optional account ID are used. The broker never
-     * refreshes the token, writes the file or follows a symbolic link to it, and an expired token is refused.
+     * refreshes the token or writes the file, and an expired token is refused.
+     *
+     * The Codex home is pinned as a directory descriptor, and `auth.json` is opened below it without following
+     * a link, as an `O_PATH` descriptor. Type, owner, mode and link count are checked on that pinned inode,
+     * which is then reopened (non-blocking) and read within a fixed bound, so a name swapped after the checks
+     * cannot supply other bytes or block the read.
      */
-    class LocalCodexCachedAuth(codexHome: Path) : AcpProviderCredentialSource() {
+    class LocalCodexCachedAuth internal constructor(
+        codexHome: Path,
+        private val afterPin: () -> Unit,
+    ) : AcpProviderCredentialSource() {
+        constructor(codexHome: Path) : this(codexHome, {})
+
         private val home: Path = codexHome.toAbsolutePath().normalize()
         override val reference: AcpProviderCredentialReference get() = AcpProviderCredentialReference.LOCAL_CODEX_CACHED_AUTH
         override val hostPaths: List<Path> get() = listOfNotNull(home, runCatching { home.toRealPath() }.getOrNull()).distinct()
 
         override fun resolve(now: Instant): AcpProviderCredential {
-            val document = readAuthDocument(home.resolve("auth.json"))
+            val (document, identities) = readPinnedAuthDocument(home, afterPin)
             document["auth_mode"]?.let { mode ->
                 if (mode !is JsonPrimitive || !mode.isString || !mode.content.equals("chatgpt", ignoreCase = true)) {
                     unavailable(AcpProviderCredentialFailure.MECHANISM_UNSUPPORTED)
@@ -98,7 +114,7 @@ internal sealed class AcpProviderCredentialSource {
             }
             val expiry = accessTokenExpiry(accessToken) ?: unavailable(AcpProviderCredentialFailure.MALFORMED)
             if (!expiry.isAfter(now)) unavailable(AcpProviderCredentialFailure.EXPIRED)
-            return AcpProviderCredential.chatGptCachedAccessToken(accessToken, accountId)
+            return AcpProviderCredential.chatGptCachedAccessToken(accessToken, accountId, identities)
         }
 
         override fun toString(): String = "AcpProviderCredentialSource.LocalCodexCachedAuth(<host>)"
@@ -107,49 +123,77 @@ internal sealed class AcpProviderCredentialSource {
 
 private const val MAXIMUM_AUTH_DOCUMENT_BYTES = 64 * 1024
 private const val MAXIMUM_ACCESS_TOKEN_CHARACTERS = 16 * 1024
+private const val GROUP_OR_OTHER_ACCESS = 0b000_111_111
+private const val GROUP_OR_OTHER_WRITE = 0b000_010_010
+private const val LINUX_ENOENT = 2
 private val ACCOUNT_ID_SYNTAX = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,255}")
-private val GROUP_OR_OTHER_ACCESS = setOf(
-    PosixFilePermission.GROUP_READ, PosixFilePermission.GROUP_WRITE, PosixFilePermission.GROUP_EXECUTE,
-    PosixFilePermission.OTHERS_READ, PosixFilePermission.OTHERS_WRITE, PosixFilePermission.OTHERS_EXECUTE,
-)
 
 private fun unavailable(failure: AcpProviderCredentialFailure): Nothing = throw AcpProviderCredentialUnavailable(failure)
 
-/** Reads one private regular file without following a link, within a fixed bound. */
-private fun readAuthDocument(file: Path): JsonObject {
-    val attributes = try {
-        Files.readAttributes(file, PosixFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+/**
+ * Pins the Codex home and its `auth.json`, checks the pinned inodes, and reads the pinned file within the
+ * bound. Returns the parsed document and the identities of the file, its directory and the directory's
+ * ancestors. [afterPin] runs between the checks and the read, for race controls only.
+ */
+private fun readPinnedAuthDocument(home: Path, afterPin: () -> Unit): Pair<JsonObject, Set<LinuxFileKey>> {
+    val directoryPath = try {
+        home.toRealPath()
     } catch (_: NoSuchFileException) {
         unavailable(AcpProviderCredentialFailure.MISSING)
     } catch (_: Exception) {
         unavailable(AcpProviderCredentialFailure.UNREADABLE)
     }
-    if (!attributes.isRegularFile || attributes.size() > MAXIMUM_AUTH_DOCUMENT_BYTES ||
-        attributes.permissions().any { it in GROUP_OR_OTHER_ACCESS }
-    ) unavailable(AcpProviderCredentialFailure.UNREADABLE)
-    val bytes = try {
-        Files.newByteChannel(file, setOf(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)).use(::readBounded)
+    val uid = try {
+        (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt()
     } catch (_: Exception) {
         unavailable(AcpProviderCredentialFailure.UNREADABLE)
-    } ?: unavailable(AcpProviderCredentialFailure.UNREADABLE)
+    }
+    val bytes = try {
+        LinuxFilesystemSyscalls.openRoot(directoryPath).use { directory ->
+            val directoryIdentity = directory.identity
+            // Another user who can write the directory could replace the file between invocations.
+            if (!directoryIdentity.isDirectory || directoryIdentity.uid != uid ||
+                directoryIdentity.mode.permissions and GROUP_OR_OTHER_WRITE != 0
+            ) unavailable(AcpProviderCredentialFailure.UNREADABLE)
+            val file = directory.whileOpen { fd -> LinuxFilesystemSyscalls.openRegularFileAtOrNull(fd, AUTH_DOCUMENT_NAME) }
+                ?: unavailable(AcpProviderCredentialFailure.MISSING)
+            file.use {
+                val identity = file.identity
+                // One name only: no hard link elsewhere can expose the same inode through another path.
+                if (!identity.isRegularFile || identity.uid != uid || identity.linkCount != 1 ||
+                    identity.mode.permissions and GROUP_OR_OTHER_ACCESS != 0
+                ) unavailable(AcpProviderCredentialFailure.UNREADABLE)
+                afterPin()
+                val content = LinuxFilesystemSyscalls.openReadableFrom(file).use { readable ->
+                    LinuxFilesystemSyscalls.read(readable, MAXIMUM_AUTH_DOCUMENT_BYTES) {}
+                }
+                content to (setOf(identity.key, directoryIdentity.key) + ancestorIdentities(directoryPath))
+            }
+        }
+    } catch (failure: AcpProviderCredentialUnavailable) {
+        throw failure
+    } catch (failure: LinuxSyscallException) {
+        unavailable(if (failure.errno == LINUX_ENOENT) AcpProviderCredentialFailure.MISSING else AcpProviderCredentialFailure.UNREADABLE)
+    } catch (_: Exception) {
+        unavailable(AcpProviderCredentialFailure.UNREADABLE)
+    }
+    val (content, identities) = bytes
     return try {
-        parseProviderObject(strictUtf8(bytes), MAXIMUM_AUTH_DOCUMENT_BYTES)
+        parseProviderObject(strictUtf8(content), MAXIMUM_AUTH_DOCUMENT_BYTES) to identities
     } catch (_: Exception) {
         unavailable(AcpProviderCredentialFailure.MALFORMED)
     } finally {
-        bytes.fill(0)
+        content.fill(0)
     }
 }
 
-private fun readBounded(channel: SeekableByteChannel): ByteArray? {
-    val buffer = ByteBuffer.allocate(MAXIMUM_AUTH_DOCUMENT_BYTES + 1)
-    while (buffer.hasRemaining() && channel.read(buffer) >= 0) Unit
-    if (buffer.position() > MAXIMUM_AUTH_DOCUMENT_BYTES) {
-        buffer.array().fill(0)
-        return null
-    }
-    return buffer.array().copyOf(buffer.position()).also { buffer.array().fill(0) }
-}
+/** Identities of every ancestor of the real credential directory, up to and including the root. */
+private fun ancestorIdentities(directory: Path): Set<LinuxFileKey> =
+    generateSequence(directory.parent) { it.parent }.mapNotNull { ancestor ->
+        LinuxFilesystemSyscalls.openAbsolutePathOrNull(ancestor)?.use { it.identity.key }
+    }.toSet()
+
+private const val AUTH_DOCUMENT_NAME = "auth.json"
 
 private fun strictUtf8(bytes: ByteArray): String = StandardCharsets.UTF_8.newDecoder()
     .onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)

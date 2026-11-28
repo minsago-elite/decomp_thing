@@ -39,8 +39,17 @@ refuses with `DESTINATION_REFUSED`.
 host broker. The policy never carries it, and neither the agent nor its request can select it. The source is
 read again for each broker, so nothing is cached across invocations.
 
-The file must be a regular file, not a symbolic link, at most 64 KiB, and not accessible to its group or to
-others. It must be strict UTF-8 JSON with no duplicate keys. Only `tokens.access_token` and the optional
+The read is bound to pinned inodes, not to names. The broker opens the Codex home's real path as a directory
+descriptor, and `auth.json` below it as an `O_PATH` descriptor without following a link. Every check runs on
+those pinned inodes:
+
+- The directory is owned by the broker's user and not writable by its group or others.
+- The file is a regular file, owned by the broker's user, not accessible to its group or others, and has
+  exactly one link, so no other name exposes the same inode.
+
+The pinned file is then reopened non-blocking through its descriptor, its identity is checked again, and it is
+read within 64 KiB. A name swapped after the checks, including for a FIFO, cannot supply other bytes or block
+the read. The file must be strict UTF-8 JSON with no duplicate keys. Only `tokens.access_token` and the optional
 `tokens.account_id` are used. The access token must be a JWT whose `exp` claim is later than the current time.
 The signature is not checked: this is a local availability check, and the provider still authenticates the
 token. The broker never refreshes the token and never writes the file.
@@ -48,7 +57,7 @@ token. The broker never refreshes the token and never writes the file.
 | Failure | Meaning |
 | --- | --- |
 | `MISSING` | No `auth.json` in the Codex home. |
-| `UNREADABLE` | A symbolic link, a non-regular or oversized file, group or other access, or a read error. |
+| `UNREADABLE` | A symbolic link, FIFO or other non-regular file, an oversized file, another owner, group or other access, a second link, a directory others can write, or a read error. |
 | `MALFORMED` | Not strict JSON, duplicate keys, or a token or account ID with the wrong syntax or no `exp`. |
 | `MECHANISM_UNSUPPORTED` | An API-key login, a logged-out cache, or an `auth_mode` other than `chatgpt`. |
 | `EXPIRED` | The access token's `exp` is not later than now. |
@@ -56,21 +65,34 @@ token. The broker never refreshes the token and never writes the file.
 Failures carry fixed text built from enum names. They never include a credential value or a host path, and
 they keep no cause.
 
+The access token is key material. The account ID is not, but it identifies the operator's account and is
+sent only upstream, so the broker treats it as secret too: it is matched in request bodies, responses and
+sandbox launch inputs exactly like the token. The resolved credential also records the device and inode keys
+of the file, its directory and every ancestor of that directory, for the launch check below. These keys are
+not secret and outlive the credential.
+
 ## Invocation-bound channel
 
-The broker creates a fresh 32-byte random channel capability. `grantChannel` hands it over exactly once as an
-`AcpProviderChannelGrant`, and the grant can only be written to the host-owned private channel stream. It is
-never an environment variable, argument or file. Analyzed programs, candidate build and validation processes
-and ACP terminal children therefore cannot inherit it through process ancestry or find it through filesystem
-visibility. Even a copied capability authorizes nothing without the private channel.
+The broker creates a fresh 32-byte random channel capability and holds the only copy.
+`deliverChannelCapability` writes it once, from that storage, to the host-owned private stream to the contained
+relay. The broker takes ownership of the stream and closes it on `close`. The stream is bound before the write,
+so a failed delivery cannot be retried on another stream. A second delivery, or one after close, is refused
+with `CHANNEL_REFUSED`, and an undelivered capability is zeroed on close.
+
+The capability is never an environment variable, argument or file. Analyzed programs, candidate build and
+validation processes and ACP terminal children therefore cannot inherit it through process ancestry or find it
+through filesystem visibility. Even a copied capability authorizes nothing without the private channel. Until
+the contained-side relay is wired, the private stream is whatever the caller passes; this checkpoint does not
+yet attach it to a real sandbox descriptor.
 
 `identity.invocationBindingSha256` binds the policy descriptor digest, the admitted request binding and a fresh
 nonce. Two brokers for the same request have different bindings.
 
 Each `AcpProviderChannelRequest` carries the capability in the frame's reserved field, a sequence number, the
-exact request-head bytes the contained relay received (ending with the empty line) and the body bytes. `exchange` refuses with `CHANNEL_REFUSED` when the broker is
-closed, no grant was made, the capability differs (compared in constant time) or the sequence is not the next
-one. One request may be outstanding. A sequence is consumed when the frame is admitted, whether or not the
+exact request-head bytes the contained relay received (ending with the empty line) and the body bytes. A
+capability field that is not exactly 32 bytes is refused with `CHANNEL_REFUSED` when the frame is decoded.
+`exchange` refuses with `CHANNEL_REFUSED` when the broker is closed, no capability was delivered, the capability
+differs (compared in constant time) or the sequence is not the next one. One request may be outstanding. A sequence is consumed when the frame is admitted, whether or not the
 request is then forwarded, so a refused frame cannot be replayed with a corrected head.
 
 ## Forwarding
@@ -83,8 +105,8 @@ upstream.
    other unsupported framing fields, as well as a declared length above the request bound.
 2. The body must be exactly the routed `contentLength`, nonempty, and one strict UTF-8 JSON object with no
    duplicate keys. Otherwise the request is refused with `REQUEST_REFUSED`.
-3. A body whose decoded names or strings contain the capability or the access token is refused with
-   `SECRET_EXPOSURE`.
+3. A body whose decoded names or strings contain the capability, the access token or the account ID is refused
+   with `SECRET_EXPOSURE`.
 
 The upstream request line is the policy method and endpoint path. Its headers are
 `Routed.upstreamHeaders()` (the policy host, the operation's request and response media types, and the
@@ -101,28 +123,51 @@ with `TLS_REFUSED` before any request byte is sent. Other connection failures ar
 ## Responses
 
 The response head must be strict HTTP/1.1, with CRLF line endings, no folded lines, and fields and bytes
-within the policy bounds.
+within the policy bounds. Every byte of the head, including the final LF, counts against the head bound.
 
-- A 3xx status is refused with `REDIRECT_REFUSED` before its headers are read, so no `Location` is parsed or
-  followed.
+- A 3xx status is refused with `REDIRECT_REFUSED` before any header is parsed, including `Location`, so none
+  is followed.
 - A 1xx status, including `101 Switching Protocols`, is refused with `MALFORMED_RESPONSE`.
 - Any other non-200 status returns only the status. The error body is never read, because it can echo
   request material.
-- A 200 response must have exactly one `text/event-stream` content type. Its body may be close-delimited,
-  `Content-Length` or chunked without trailers. Anything ambiguous is `MALFORMED_RESPONSE`, and a body larger
-  than the response bound is `RESPONSE_TOO_LARGE`.
-- A body that contains the capability or the access token is refused with `SECRET_EXPOSURE` and is not
-  returned.
+- A 200 response must have exactly one `text/event-stream` content type and identity content coding: any
+  `Content-Encoding` other than `identity` is `MALFORMED_RESPONSE`, so the bytes checked are the bytes the agent
+  decodes. Its body may be close-delimited, `Content-Length` or chunked without trailers. Anything ambiguous is
+  `MALFORMED_RESPONSE`, and a body larger than the response bound is `RESPONSE_TOO_LARGE`.
+- Before release, the body is parsed as the event stream the agent will consume. It must be strict UTF-8 with
+  LF or CRLF line ends and no byte-order mark, contain only `data`, `event`, `id` and `retry` fields or
+  comments, end every event with an empty line, and carry one strict JSON object as each event's data.
+  Anything else is `MALFORMED_RESPONSE`.
+- The capability, the access token and the account ID are matched in the raw text, every field value and
+  comment, every decoded JSON name and string, and the concatenation of the `delta` strings of each event stream
+  (keyed by `type`, `item_id`, `output_index`, `content_index` and `summary_index`) and of all deltas in order.
+  JSON escapes such as `\u0074` and values split across deltas are therefore caught. A match is
+  `SECRET_EXPOSURE`, and the body is zeroed and not returned.
 
 The whole body is read before it is returned. Streaming buffers and backpressure belong to #960.
 
 ## Sandbox launches
 
 `requireNoProviderAuthority` checks an `AcpSandboxLaunch` for any purpose: agent, terminal, candidate or
-analysis. It refuses with `SECRET_EXPOSURE` when the capability or a credential value appears in an argument,
-an environment name or value, or the working directory. It refuses with `CREDENTIAL_SOURCE_VISIBLE` when a
-read-only mount source, a staging root or the working directory is the credential source, lies inside it or
-contains it, including through a symbolic link. The source paths stay protected after the broker closes.
+analysis. It checks every input that becomes the sandbox argv, environment or mount set: the command,
+environment names and values, the working directory, both sides of every read-only mount, the staging roots and
+the empty directories.
+
+- If the capability, the access token or the account ID appears in any of them, the launch is refused with
+  `SECRET_EXPOSURE`.
+- If a read-only mount source, a staging root or the working directory is the credential source, lies inside
+  it or contains it, the launch is refused with `CREDENTIAL_SOURCE_VISIBLE`. This is checked by lexical and real
+  path, and also by device and inode against the keys pinned when the credential was read. So another path, a
+  symbolic link, an alternate bind of the file, its directory or an ancestor, or a hard link made after the read
+  is refused as well.
+
+`requireEffectiveLaunchCarriesNoProviderAuthority` applies the same checks to the final effective argv (for
+example a boundary's bubblewrap command with its bind paths), environment and visible host paths. A boundary
+calls it before those inputs reach a command observer or launch evidence. The path and identity checks stay in
+force after the broker closes. The secret checks stop then, because the broker no longer holds the values.
+
+Nothing calls either check yet. Descriptor isolation and host `/proc` isolation through the real boundary are
+qualified later, once the contained-side relay is wired.
 
 The credential and capability live only in host JVM memory, and upstream sockets are host-owned descriptors
 that child processes do not inherit. The integration control starts a child process while an upstream TLS
@@ -131,7 +176,8 @@ path or socket.
 
 ## Closing
 
-`close` drops the credential, zeroes the capability and closes any in-flight upstream connection. A request on
+`close` drops the credential, zeroes the capability, closes the private channel stream and closes any in-flight
+upstream connection. A request on
 a closed broker is refused with `CHANNEL_REFUSED`. An in-flight exchange also fails with `CHANNEL_REFUSED`,
 whatever I/O error or early EOF the close caused. A close during the TLS handshake takes effect when the
 handshake returns or reaches its timeout; prompt revocation is #961.
@@ -147,9 +193,11 @@ result `toString` values are redacted.
 The tests use no real credentials and make no external connection. Hosted CI stays credential-free.
 
 - `AcpProviderCredentialSourceTest` covers each credential failure against synthetic `auth.json` files under
-  `build/test-tmp/acp-provider-broker/`.
-- `AcpProviderBrokerTest` is the integration control. Each scenario runs in a fresh JVM whose only trust
-  customization is the standard `javax.net.ssl.trustStore` properties. They name a test CA generated at run
+  `build/test-tmp/acp-provider-broker/`. Its race controls swap the name after the pinned checks, for a
+  world-readable replacement file and for a FIFO, and show that the pinned bytes are read without blocking.
+- `AcpProviderBrokerTest` is the integration control. Each scenario runs in a fresh JVM with an empty
+  environment apart from a fixed `PATH`, its temporary directory under `build/`, and one trust customization:
+  the standard `javax.net.ssl.trustStore` properties. They name a test CA generated at run
   time under `build/test-tmp/acp-provider-broker/`, so the broker uses the module TLS client's production
   platform-trust code, and the test JVM's own trust is never changed. Each scenario uses a synthetic Codex
   login and a synthetic resolver that returns a public numeric address. A recording connector connects to a
@@ -163,9 +211,11 @@ The tests use no real credentials and make no external connection. Hosted CI sta
   - redirects are refused without a second connection;
   - the upstream head is exactly the policy-owned headers and the credential headers, and the body is the
     validated body;
+  - the capability is delivered once to a broker-owned stream, never again, and is erased on close;
   - capability and sequence binding hold;
   - routing, framing and disclosure refusals send nothing upstream;
-  - responses are redacted;
+  - responses are redacted, including escaped and split echoes, and the event stream and content coding are
+    strict;
   - sandbox launches are checked;
   - a child process inherits nothing;
   - closing aborts an in-flight exchange.

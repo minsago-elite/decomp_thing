@@ -1,12 +1,20 @@
 package decompengine.acp
 
 import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.StandardCopyOption
+import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.attribute.PosixFilePermissions
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class AcpProviderCredentialSourceTest {
     private val now = Instant.parse("2026-11-28T00:00:00Z")
@@ -19,7 +27,8 @@ class AcpProviderCredentialSourceTest {
 
         assertEquals(AcpProviderCredentialReference.LOCAL_CODEX_CACHED_AUTH, credential.reference)
         assertEquals(listOf("Authorization" to "Bearer $token", "ChatGPT-Account-ID" to "acct_fixture-1"), credential.authorizationHeaders())
-        assertEquals(listOf(token), credential.secretValues())
+        // The account ID is sent upstream only, so it is treated as secret for echo and launch detection.
+        assertEquals(listOf(token, "acct_fixture-1"), credential.secretValues())
         assertFalse(credential.toString().contains(token))
         val noAccount = AcpProviderCredentialSource.LocalCodexCachedAuth(syntheticCodexHome(syntheticChatGptAuth(token, accountId = null)))
         assertEquals(listOf("Authorization" to "Bearer $token"), noAccount.resolve(now).authorizationHeaders())
@@ -39,7 +48,48 @@ class AcpProviderCredentialSourceTest {
         Files.createSymbolicLink(linked.resolve("auth.json"), target.resolve("auth.json"))
         assertUnavailable(AcpProviderCredentialFailure.UNREADABLE, linked)
         val directory = Files.createDirectories(providerFixtureDirectory("directory").resolve("codex").resolve("auth.json")).parent
+        Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"))
         assertUnavailable(AcpProviderCredentialFailure.UNREADABLE, directory)
+
+        // A second name for the same inode, or a directory others can write, could expose or replace the file.
+        val linkedTwice = syntheticCodexHome(syntheticChatGptAuth(token))
+        Files.createLink(providerFixtureDirectory("second-name").resolve("auth.json"), linkedTwice.resolve("auth.json"))
+        assertUnavailable(AcpProviderCredentialFailure.UNREADABLE, linkedTwice)
+        val writableDirectory = syntheticCodexHome(syntheticChatGptAuth(token))
+        Files.setPosixFilePermissions(writableDirectory, PosixFilePermissions.fromString("rwxrwx---"))
+        assertUnavailable(AcpProviderCredentialFailure.UNREADABLE, writableDirectory)
+        // A FIFO in place of the file is refused without blocking on it.
+        val fifoHome = syntheticCodexHome(syntheticChatGptAuth(token))
+        Files.delete(fifoHome.resolve("auth.json"))
+        mkfifo(fifoHome.resolve("auth.json"))
+        withinDeadline { assertUnavailable(AcpProviderCredentialFailure.UNREADABLE, fifoHome) }
+    }
+
+    @Test
+    fun `a name swapped after the pinned checks cannot supply other bytes or block the read`() {
+        val pinnedToken = syntheticAccessToken(now.plusSeconds(3600))
+        val replacementToken = syntheticAccessToken(now.plusSeconds(3600))
+        // A world-readable replacement file renamed over the checked name.
+        val swappedHome = syntheticCodexHome(syntheticChatGptAuth(pinnedToken))
+        val replacement = Files.writeString(swappedHome.parent.resolve("replacement.json"), syntheticChatGptAuth(replacementToken))
+        Files.setPosixFilePermissions(replacement, PosixFilePermissions.fromString("rw-r--r--"))
+        val swapped = AcpProviderCredentialSource.LocalCodexCachedAuth(swappedHome) {
+            Files.move(replacement, swappedHome.resolve("auth.json"), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+        }.resolve(now)
+        assertEquals("Bearer $pinnedToken", swapped.authorizationHeaders().first().second)
+        assertEquals(syntheticChatGptAuth(replacementToken), Files.readString(swappedHome.resolve("auth.json")), "the swap happened")
+
+        // A FIFO swapped in after the checks: the read stays on the pinned inode and never blocks.
+        val fifoHome = syntheticCodexHome(syntheticChatGptAuth(pinnedToken))
+        val raced = withinDeadline {
+            AcpProviderCredentialSource.LocalCodexCachedAuth(fifoHome) {
+                Files.delete(fifoHome.resolve("auth.json"))
+                mkfifo(fifoHome.resolve("auth.json"))
+            }.resolve(now)
+        }
+        assertEquals("Bearer $pinnedToken", raced.authorizationHeaders().first().second)
+        val swappedIn = Files.readAttributes(fifoHome.resolve("auth.json"), BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        assertTrue(swappedIn.isOther, "the FIFO is in place")
     }
 
     @Test
@@ -87,6 +137,23 @@ class AcpProviderCredentialSourceTest {
         assertNull(failure.cause, label)
         assertEquals("provider credential is unavailable: ${expected.name}", failure.message, label)
         assertFalse(failure.stackTraceToString().contains(home.toString()), label)
+    }
+
+    private fun mkfifo(path: java.nio.file.Path) {
+        val process = ProcessBuilder("mkfifo", "-m", "600", path.toString()).also { it.environment().clear() }.start()
+        assertTrue(process.waitFor(10, TimeUnit.SECONDS) && process.exitValue() == 0, "mkfifo failed")
+    }
+
+    /** Runs [action] on another thread and fails, rather than hanging, if it blocks. */
+    private fun <T> withinDeadline(action: () -> T): T {
+        val executor = Executors.newSingleThreadExecutor { Thread(it).apply { isDaemon = true } }
+        try {
+            return executor.submit<T> { action() }.get(10, TimeUnit.SECONDS)
+        } catch (failure: ExecutionException) {
+            throw failure.cause ?: failure
+        } finally {
+            executor.shutdownNow()
+        }
     }
 
     private fun syntheticAccessTokenWithClaims(claims: String): String {

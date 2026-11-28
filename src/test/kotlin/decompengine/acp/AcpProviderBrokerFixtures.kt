@@ -92,6 +92,8 @@ internal fun syntheticCodexHome(
     permissions: String = "rw-------",
 ): Path {
     val home = Files.createDirectories(providerFixtureDirectory("codex-home").resolve("codex"))
+    // Explicit, so the host umask cannot make the directory group-writable.
+    Files.setPosixFilePermissions(home, PosixFilePermissions.fromString("rwx------"))
     val file = home.resolve("auth.json")
     Files.writeString(file, document)
     Files.setPosixFilePermissions(file, PosixFilePermissions.fromString(permissions))

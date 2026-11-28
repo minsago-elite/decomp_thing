@@ -18,6 +18,7 @@ import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
+import java.nio.file.Path
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.time.Clock
@@ -78,21 +79,6 @@ internal fun interface AcpProviderUpstreamConnector {
 }
 
 /**
- * The only provider authority a contained agent receives: a fresh random capability bound to one broker, and so
- * to one admitted invocation, one policy and one channel. It is handed over once and written only to the
- * host-owned private channel stream. It is never an environment variable, argument or file, so processes cannot
- * inherit it through ancestry or find it through filesystem visibility.
- */
-internal class AcpProviderChannelGrant internal constructor(capability: ByteArray, val invocationBindingSha256: String) {
-    private val content = capability.copyOf()
-
-    /** Writes the capability to the private channel stream. Never pass a log, archive or process stream here. */
-    fun writeTo(output: OutputStream) = output.write(content)
-
-    override fun toString(): String = "AcpProviderChannelGrant(<redacted>)"
-}
-
-/**
  * One request frame received on the private channel. The capability occupies the frame's reserved field, apart
  * from the agent's HTTP request, and the sequence reserves the frame: each value authorizes at most one upstream
  * request. [head] is the exact request-head bytes, ending with the empty line, and [body] the bytes after it.
@@ -106,6 +92,11 @@ internal class AcpProviderChannelRequest(
 ) {
     private val capabilityContent = capability.copyOf()
     private val headContent = head.copyOf()
+
+    init {
+        // The reserved field has a fixed width; any other length is a malformed frame, refused at decode.
+        if (capabilityContent.size != PROVIDER_CHANNEL_CAPABILITY_BYTES) refuse(AcpProviderBrokerFailureKind.CHANNEL_REFUSED)
+    }
     private val bodyContent = body.copyOf()
     internal fun capability(): ByteArray = capabilityContent.copyOf()
     internal fun head(): ByteArray = headContent.copyOf()
@@ -152,7 +143,10 @@ internal class AcpProviderBroker private constructor(
     private val lock = Any()
     private val capability = ByteArray(PROVIDER_CHANNEL_CAPABILITY_BYTES).also(SecureRandom()::nextBytes)
     private var credential: AcpProviderCredential? = credential
-    private var granted = false
+    // Not secret: the device and inode keys that no sandbox launch may make visible. Kept after close.
+    private val credentialSourceIdentities: Set<LinuxFileKey> = credential.sourceIdentities
+    private var privateChannel: OutputStream? = null
+    private var delivered = false
     private var closed = false
     private var nextSequence = 1L
     private var exchangeActive = false
@@ -169,17 +163,31 @@ internal class AcpProviderBroker private constructor(
         credentialReference = policy.credentialReference,
     )
 
-    /** Transfers the channel capability once, for the private channel setup. */
-    fun grantChannel(): AcpProviderChannelGrant = synchronized(lock) {
-        if (closed || granted) refuse(AcpProviderBrokerFailureKind.CHANNEL_REFUSED)
-        granted = true
-        AcpProviderChannelGrant(capability, identity.invocationBindingSha256)
+    /**
+     * The only provider authority a contained agent receives: the broker's fresh random capability, bound to this
+     * broker and so to one admitted invocation, one policy and one channel. It is written once, from the broker's
+     * own storage, to [channel], the host-owned private stream to the contained relay. The broker takes ownership
+     * of that stream and closes it on [close]. No copy of the capability exists outside the broker, it is never
+     * an environment variable, argument or file, and a second delivery, or one after close, is refused.
+     */
+    fun deliverChannelCapability(channel: OutputStream) = synchronized(lock) {
+        if (closed || privateChannel != null) refuse(AcpProviderBrokerFailureKind.CHANNEL_REFUSED)
+        // Bound before the write: a failed delivery cannot be retried on another stream.
+        privateChannel = channel
+        try {
+            channel.write(capability)
+            channel.flush()
+        } catch (_: Exception) {
+            runCatching { channel.close() }
+            refuse(AcpProviderBrokerFailureKind.CHANNEL_REFUSED)
+        }
+        delivered = true
     }
 
     /** Forwards one channel request. Nothing is sent upstream unless every check before it passes. */
     fun exchange(request: AcpProviderChannelRequest): AcpProviderExchangeResult {
         val credential = synchronized(lock) {
-            if (closed || !granted || !MessageDigest.isEqual(request.capability(), capability)) {
+            if (closed || !delivered || !MessageDigest.isEqual(request.capability(), capability)) {
                 refuse(AcpProviderBrokerFailureKind.CHANNEL_REFUSED)
             }
             // One outstanding request. The sequence is consumed here, whether or not the request is forwarded.
@@ -206,33 +214,58 @@ internal class AcpProviderBroker private constructor(
 
     /**
      * Refuses a sandbox launch that would carry provider authority into an agent, terminal, candidate or analyzed
-     * process: the channel capability or a credential value in its arguments, environment or working directory,
-     * or a mount, staging root or working directory that exposes the credential source or a parent of it.
+     * process. Every launch input that becomes the sandbox argv, environment or mount set is checked: the
+     * command, environment names and values, the working directory, both sides of every read-only mount, the
+     * staging roots and the empty directories. None may contain the capability or a credential value. No mount
+     * source, staging root or working directory may be, contain or lie inside the credential source, by path or
+     * by device and inode, so another path, a symbolic link, an alternate bind or a later hard link to the
+     * pinned file, its directory or an ancestor of that directory is refused as well.
      */
     fun requireNoProviderAuthority(launch: AcpSandboxLaunch) {
+        // A Path is itself Iterable<Path>, so each path is listed explicitly rather than added with `+`.
+        val visible = launch.readOnlyMounts.map { it.source } + launch.stagingRoots.map { it.stagingRoot.path } + listOf(launch.workingDirectory)
+        val texts = launch.command + listOf(launch.workingDirectory.toString()) +
+            launch.readOnlyMounts.flatMap { listOf(it.source.toString(), it.destination.toString()) } +
+            launch.stagingRoots.map { it.stagingRoot.path.toString() } + launch.emptyDirectories.map(Path::toString)
+        requireEffectiveLaunchCarriesNoProviderAuthority(texts, launch.environment, visible)
+    }
+
+    /**
+     * The same check on the final effective launch inputs: the exact argv a boundary will execute (for example
+     * its bubblewrap command, including every bind path), the exact environment, and every host path it makes
+     * visible. A boundary calls this before the inputs reach a command observer or launch evidence.
+     */
+    fun requireEffectiveLaunchCarriesNoProviderAuthority(argv: List<String>, environment: Map<String, String>, visible: List<Path>) {
         val secrets = synchronized(lock) { if (closed) emptyList() else liveSecrets(credential) }
-        val texts = launch.command + launch.environment.keys + launch.environment.values + launch.workingDirectory.toString()
+        val texts = argv + environment.keys + environment.values
         if (texts.any { text -> secrets.any { text.contains(it, ignoreCase = true) } }) {
             refuse(AcpProviderBrokerFailureKind.SECRET_EXPOSURE)
         }
         val protectedPaths = credentialSource.hostPaths
-        // A Path is itself Iterable<Path>, so each visible path is listed explicitly rather than added with `+`.
-        val visible = (launch.readOnlyMounts.map { it.source } + launch.stagingRoots.map { it.stagingRoot.path } + listOf(launch.workingDirectory))
-            .flatMap { path -> listOfNotNull(path.toAbsolutePath().normalize(), runCatching { path.toRealPath() }.getOrNull()) }
-        if (visible.any { path -> protectedPaths.any { path.startsWith(it) || it.startsWith(path) } }) {
-            refuse(AcpProviderBrokerFailureKind.CREDENTIAL_SOURCE_VISIBLE)
+        visible.forEach { path ->
+            val absolute = path.toAbsolutePath().normalize()
+            val real = runCatching { path.toRealPath() }.getOrNull()
+            if (listOfNotNull(absolute, real).any { candidate -> protectedPaths.any { candidate.startsWith(it) || it.startsWith(candidate) } }) {
+                refuse(AcpProviderBrokerFailureKind.CREDENTIAL_SOURCE_VISIBLE)
+            }
+            val key = real?.let { runCatching { LinuxFilesystemSyscalls.openAbsolutePathOrNull(it)?.use { pinned -> pinned.identity.key } }.getOrNull() }
+            if (key != null && key in credentialSourceIdentities) refuse(AcpProviderBrokerFailureKind.CREDENTIAL_SOURCE_VISIBLE)
         }
     }
 
-    /** Drops the credential, invalidates the capability and aborts an in-flight upstream connection. */
+    /**
+     * Drops the credential, zeroes the capability (the only copy), closes the private channel stream and aborts an
+     * in-flight upstream connection.
+     */
     override fun close() {
-        val inflight = synchronized(lock) {
+        val (inflight, channel) = synchronized(lock) {
             if (closed) return
             closed = true
             credential = null
             capability.fill(0)
-            upstream.also { upstream = null }
+            (upstream to privateChannel).also { upstream = null }
         }
+        runCatching { channel?.close() }
         runCatching { inflight?.close() }
     }
 
@@ -319,7 +352,7 @@ internal class AcpProviderBroker private constructor(
     ): AcpProviderExchangeResult {
         val head = ResponseHeadReader(input, policy.bounds)
         val status = head.statusLine()
-        // A 3xx is refused before its headers are read, so no Location value is ever parsed or followed.
+        // A 3xx is refused before any header, including Location, is parsed, so none is ever followed.
         AcpProviderRouting.responseStatusRefusal(policy, status)?.let { reason ->
             val kind = if (reason == AcpProviderRouteRefusal.REDIRECT_UNDECLARED) {
                 AcpProviderBrokerFailureKind.REDIRECT_REFUSED
@@ -331,17 +364,22 @@ internal class AcpProviderBroker private constructor(
         val headers = head.fields()
         // Error bodies can echo request material. They are never read or forwarded; only the status is.
         if (status != 200) return AcpProviderExchangeResult(sequence, status, null, ByteArray(0))
+        // Identity coding only, so the bytes checked below are the bytes the agent decodes.
+        if (headers.any { (name, value) -> name == "content-encoding" && !value.equals("identity", ignoreCase = true) }) {
+            refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE)
+        }
         val mediaType = routed.operation.responseMediaType
         val contentTypes = headers.filter { (name, _) -> name == "content-type" }
         if (contentTypes.size != 1 || contentTypes.single().second.substringBefore(';').trim().lowercase(Locale.ROOT) != mediaType) {
             refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE)
         }
         val body = readResponseBody(input, headers, policy.bounds)
-        val text = String(body, StandardCharsets.ISO_8859_1)
         val secrets = synchronized(lock) { liveSecrets(credential) }
-        if (secrets.any { text.contains(it, ignoreCase = true) }) {
+        try {
+            requireSafeEventStream(body, secrets, policy.bounds)
+        } catch (failure: AcpProviderBrokerFailure) {
             body.fill(0)
-            refuse(AcpProviderBrokerFailureKind.SECRET_EXPOSURE)
+            throw failure
         }
         return AcpProviderExchangeResult(sequence, status, mediaType, body)
     }
@@ -430,6 +468,66 @@ private fun containsSecret(value: JsonElement, secrets: List<String>): Boolean =
     is JsonPrimitive -> secrets.any { value.content.contains(it, ignoreCase = true) }
 }
 
+/**
+ * Validates the bounded event stream the agent will consume before any of it is released. The stream must be
+ * strict UTF-8 with LF or CRLF line ends, contain only `data`, `event`, `id` and `retry` fields or comments, end
+ * every event with an empty line, and carry one strict JSON object as each event's data. Secrets are matched in
+ * the raw text, every decoded field value and comment, every decoded JSON name and string, and the concatenation
+ * of each event stream's `delta` strings in order, so JSON escapes and values split across deltas are caught.
+ */
+private fun requireSafeEventStream(body: ByteArray, secrets: List<String>, bounds: AcpProviderTransportBounds) {
+    fun exposes(value: CharSequence) = secrets.any { value.contains(it, ignoreCase = true) }
+    val text = try { brokerStrictUtf8(body) } catch (_: Exception) { refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE) }
+    if (exposes(text)) refuse(AcpProviderBrokerFailureKind.SECRET_EXPOSURE)
+    if (text.isEmpty()) return
+    val normalized = text.replace("\r\n", "\n")
+    if ('\r' in normalized || normalized.startsWith('\uFEFF') || !normalized.endsWith("\n\n")) {
+        refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE)
+    }
+    val streams = LinkedHashMap<String, StringBuilder>()
+    val allDeltas = StringBuilder()
+    val data = StringBuilder()
+    var hasData = false
+    for (line in normalized.removeSuffix("\n").split('\n')) {
+        if (line.isEmpty()) {
+            if (hasData) {
+                val event = try {
+                    parseProviderObject(data.toString(), bounds.maximumResponseBytes)
+                } catch (_: Exception) {
+                    refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE)
+                }
+                if (containsSecret(event, secrets)) refuse(AcpProviderBrokerFailureKind.SECRET_EXPOSURE)
+                (event["delta"] as? JsonPrimitive)?.takeIf { it.isString }?.let { delta ->
+                    val stream = DELTA_STREAM_FIELDS.joinToString("\u0000") { (event[it] as? JsonPrimitive)?.content.orEmpty() }
+                    streams.getOrPut(stream) { StringBuilder() }.append(delta.content)
+                    allDeltas.append(delta.content)
+                }
+            }
+            data.setLength(0)
+            hasData = false
+            continue
+        }
+        if (exposes(line)) refuse(AcpProviderBrokerFailureKind.SECRET_EXPOSURE)
+        if (line.startsWith(':')) continue
+        val colon = line.indexOf(':')
+        val name = if (colon < 0) line else line.substring(0, colon)
+        val value = if (colon < 0) "" else line.substring(colon + 1).removePrefix(" ")
+        when (name) {
+            "data" -> {
+                if (hasData) data.append('\n')
+                data.append(value)
+                hasData = true
+            }
+            "event", "id", "retry" -> Unit
+            else -> refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE)
+        }
+    }
+    if (exposes(allDeltas) || streams.values.any(::exposes)) refuse(AcpProviderBrokerFailureKind.SECRET_EXPOSURE)
+}
+
+/** The fields that identify one delta stream in a Responses event, so its deltas concatenate in order. */
+private val DELTA_STREAM_FIELDS = listOf("type", "item_id", "output_index", "content_index", "summary_index")
+
 /** Strict HTTP/1.1 response head: CRLF line endings, no folding, bounded fields and bytes. */
 private class ResponseHeadReader(private val input: InputStream, private val bounds: AcpProviderTransportBounds) {
     private var bytes = 0L
@@ -464,7 +562,7 @@ private class ResponseHeadReader(private val input: InputStream, private val bou
             when {
                 next == '\r'.code -> {
                     if (input.read() != '\n'.code) refuse(AcpProviderBrokerFailureKind.MALFORMED_RESPONSE)
-                    bytes++
+                    if (++bytes > bounds.maximumHeaderBytes) refuse(AcpProviderBrokerFailureKind.RESPONSE_TOO_LARGE)
                     return line.toString()
                 }
                 next == '\t'.code || next in 0x20..0x7e -> line.append(next.toChar())

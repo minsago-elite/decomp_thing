@@ -38,6 +38,11 @@ class AcpProviderBrokerTest {
     @Test fun `a process started while the channel is live inherits no credential capability or upstream descriptor`() =
         run("childProcessInheritsNoAuthority")
     @Test fun `closing the broker aborts an in-flight upstream exchange as a closed channel`() = run("closeAbortsInFlightExchange")
+    @Test fun `the channel capability is delivered once to a broker-owned stream and erased on close`() =
+        run("channelCapabilityDeliveredOnceToOwnedStream")
+    @Test fun `event stream echoes are detected after JSON decoding and across split deltas`() =
+        run("eventStreamEchoesAreDetectedAfterDecoding")
+    @Test fun `event stream framing and content coding are strict`() = run("eventStreamFramingAndEncodingAreStrict")
 
     @Test
     fun `every scenario has a test`() {
@@ -54,11 +59,18 @@ class AcpProviderBrokerTest {
                 "-Djavax.net.ssl.trustStorePassword=$PROVIDER_FIXTURE_STORE_PASSWORD",
             )
         } else emptyList()
+        val temporary = Files.createDirectories(trustedTls.directory.resolve("tmp"))
         val process = ProcessBuilder(
-            listOf(Path.of(System.getProperty("java.home"), "bin", "java").toString(), "-Xmx512m") + trustProperties +
+            listOf(
+                Path.of(System.getProperty("java.home"), "bin", "java").toString(), "-Xmx512m", "-XX:-UsePerfData",
+                "-Djava.io.tmpdir=$temporary",
+            ) + trustProperties +
                 listOf("-cp", System.getProperty("java.class.path"), AcpProviderBrokerScenarios::class.java.name, scenario) +
                 stores.map(Path::toString),
-        ).directory(File(System.getProperty("user.dir"))).redirectErrorStream(true).redirectOutput(log.toFile()).start()
+        ).directory(File(System.getProperty("user.dir"))).redirectErrorStream(true).redirectOutput(log.toFile())
+            // No ambient operator variables reach the scenario; its own child shell needs only a fixed PATH.
+            .also { it.environment().clear(); it.environment()["PATH"] = "/usr/bin:/bin" }
+            .start()
         assertTrue(process.waitFor(120, TimeUnit.SECONDS), "scenario JVM did not finish: $scenario")
         val output = Files.readAllLines(log)
         assertEquals(0, process.exitValue(), output.joinToString("\n"))
