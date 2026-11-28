@@ -41,6 +41,8 @@ internal enum class WebAuditAction(val wireName: String) {
     OPERATOR_INSPECTION_CANCEL("operator.auth-inspection-cancel"),
     SUPPORT_EXPORT("support.export"),
     GIT_REPOSITORY_MUTATION("git.repository-mutate"),
+    /** Starts a verification bound to one retained candidate revision and its displayed archive digest. */
+    ARCHIVE_VERIFY("revision.archive-verify"),
     ;
 
     companion object {
@@ -92,19 +94,23 @@ internal data class WebAuditActor(val kind: String, val sessionDigest: String?) 
 }
 
 /**
- * Target identities are closed-syntax public IDs (or commitments to unrecognized requested runs).
+ * Target identities are closed-syntax public IDs (or commitments to unrecognized requested runs and revisions).
  * The HTTP recorder commits client preconditions in `expectedVersion`; `resultVersion` is server-owned.
+ * [revisionId] is set only for revision-bound actions and is serialized only when present, so entries for
+ * other actions keep their original shape.
  */
 internal data class WebAuditTarget(
     val jobId: String? = null,
     val runId: String? = null,
     val expectedVersion: String? = null,
     val resultVersion: String? = null,
+    val revisionId: String? = null,
 ) {
     /** Values outside their closed syntax are dropped rather than stored. */
     fun sanitized() = WebAuditTarget(
         jobId?.takeIf(JOB_ID::matches), runId?.takeIf(OPAQUE_ID::matches),
         expectedVersion?.takeIf(OPAQUE_ID::matches), resultVersion?.takeIf(OPAQUE_ID::matches),
+        revisionId?.takeIf(OPAQUE_ID::matches),
     )
 }
 
@@ -133,6 +139,7 @@ internal data class WebAuditEntry(
             put("runId", target.runId?.let(::JsonPrimitive) ?: JsonNull)
             put("expectedVersion", target.expectedVersion?.let(::JsonPrimitive) ?: JsonNull)
             put("resultVersion", target.resultVersion?.let(::JsonPrimitive) ?: JsonNull)
+            target.revisionId?.let { put("revisionId", it) }
         })
         put("outcome", outcome.wireName)
         put("status", status)
@@ -149,8 +156,10 @@ internal data class WebAuditEntry(
             val actor = entry.getValue("actor").jsonObject
             val target = entry.getValue("target").jsonObject
             val sequence = checkNotNull(text(entry, "sequence")).toLong().also { require(it > 0) }
+            // `revisionId` is additive: entries written before it existed, and non-revision actions, omit it.
             val parsedTarget = WebAuditTarget(text(target, "jobId"), text(target, "runId"),
-                text(target, "expectedVersion"), text(target, "resultVersion"))
+                text(target, "expectedVersion"), text(target, "resultVersion"),
+                if ("revisionId" in target) text(target, "revisionId") else null)
             require(parsedTarget.sanitized() == parsedTarget)
             val reason = text(entry, "reasonCode")
             require(reason == null || reason.matches(REASON_CODE))

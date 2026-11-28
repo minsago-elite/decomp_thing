@@ -34,8 +34,32 @@ from becoming that trusted markup.
 Legacy artifact and verified source-archive responses are attachments. Their
 fallback filenames contain only bounded ASCII letters, digits, dot, underscore
 and hyphen; the original filename is carried only as percent-encoded RFC 5987
-metadata. Every response applies `nosniff`, `no-referrer`, and an attachment CSP
-of `sandbox; default-src 'none'; base-uri 'none'; form-action 'none'`.
+metadata. Every response applies `nosniff`, `no-referrer`, `X-Frame-Options: DENY`
+and the shared inert CSP (`WEB_INERT_CONTENT_SECURITY_POLICY`):
+`sandbox; default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`.
+
+Versioned (SPA) responses follow one policy per trust level (#491). Browsers reach
+job content only through server-issued identities (`artifactId`, `fileId`) taken
+from catalog or listing DTOs; the SPA listener has no route that accepts a
+filesystem path, and identities resolve inside the authorized job and attempt
+through the shared job-store containment boundary.
+
+| Trust level | Routes | `Content-Type` | `Content-Disposition` | Cache |
+|---|---|---|---|---|
+| Trusted application document | SPA shell | `text/html` with the application CSP | none | `no-store` |
+| Fingerprinted static assets | `assets/ui/assets/*` | declared asset type | none | `public, max-age=31536000, immutable` |
+| Verbatim job content (archive, manifest, build contract) | `J/artifacts/{artifactId}/content` | `application/octet-stream` whatever the listed media type | `attachment; filename="…"; filename*=UTF-8''…` | `no-store` |
+| Redacted server report (exploration, progress) | same route, `X-Decomp-Content-Projection: redacted` | `application/octet-stream` | attachment | `no-store` |
+| Committed source bytes and patches | `…/source-files/{fileId}/content`, `…/source-diff/patch` | `application/octet-stream` | `attachment; filename="source.bin"; filename*=…` | `no-store` |
+| Redacted build log | `…/logs/build/content` | `text/plain; charset=utf-8` | `attachment; filename="build-<runId>.log"` | `no-store` |
+| Bounded text previews and metadata | catalog, detail, source chunk, log range | `application/json; charset=utf-8` | none | `no-store` |
+| Refusals (401, 404, 406, 409, 412, 416, 429) | any of the above | `application/json; charset=utf-8` | none, with no `ETag` or artifact identity headers | `no-store` |
+
+Every private response, including the 304, 206 and HEAD forms of artifact content,
+carries the inert CSP, `nosniff`, `no-referrer` and frame denial. No private
+response is cacheable by a shared or browser cache; revalidation uses the strong
+digest `ETag` of the served representation only. `WebArtifactDeliveryHeadersTest`
+checks this matrix for artifact content and its refusals over the actual listener.
 
 Known JSON and plain-text extensions keep useful declared media types, while HTML,
 SVG, JavaScript, XML and unknown extensions are served as
