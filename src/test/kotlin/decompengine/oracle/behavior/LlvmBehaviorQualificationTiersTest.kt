@@ -9,6 +9,7 @@ import java.nio.file.attribute.PosixFilePermissions
 import kotlin.io.path.readBytes
 import kotlin.io.path.readText
 import kotlin.io.path.writeBytes
+import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -290,18 +291,34 @@ class LlvmBehaviorQualificationTiersTest {
 
     private fun writePolicy(name: String, root: JsonObject): Path = writeRaw(name, OracleJson.canonicalBytes(root))
 
+    /** Fixtures stay under the repository's build directory, never the JVM default temporary directory. */
     private fun writeRaw(name: String, bytes: ByteArray): Path {
+        Files.createDirectories(FIXTURE_PARENT)
         val directory = Files.createTempDirectory(
+            FIXTURE_PARENT,
             "qualification-tiers-",
             PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")),
         )
+        fixtureDirectories.add(directory)
         return directory.resolve("$name.json").also { it.writeBytes(bytes) }
+    }
+
+    private val fixtureDirectories = mutableListOf<Path>()
+
+    @AfterTest
+    fun deleteFixtures() {
+        fixtureDirectories.forEach { directory ->
+            check(directory.startsWith(FIXTURE_PARENT)) { "refusing to delete $directory" }
+            Files.walk(directory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::delete) }
+        }
+        fixtureDirectories.clear()
     }
 
     private fun corpusCaseIds(): List<String> = reference.caseIds
 
     private companion object {
         val PROFILE: Path = Path.of("oracle/llvm/22.1.6").toAbsolutePath().normalize()
+        val FIXTURE_PARENT: Path = Path.of("build/tmp/llvm-qualification-tiers").toAbsolutePath().normalize()
         val reference: LlvmBehaviorReferenceEvidence by lazy {
             LlvmBehaviorReferenceEvidenceVerifier.verify(
                 corpusPath = PROFILE.resolve("behavior-corpus.json"),
