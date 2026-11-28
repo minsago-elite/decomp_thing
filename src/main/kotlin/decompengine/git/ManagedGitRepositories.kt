@@ -471,6 +471,7 @@ class ManagedGitRepositories(
             val format = located.record.objectFormat
             val origin = start ?: GitRepositoryInspector.head(runner, located.gitDir, format).objectId
                 ?: return@reading null to GitHistoryPage(emptyList(), false)
+            requireFormatObjectId(format, origin)
             if (!commitExists(runner, located.gitDir, origin)) throw ManagedGitException("NOT_FOUND", "The commit is not in this repository.")
             origin to GitReads.history(runner, located.gitDir, format, origin, skip, limit)
         }
@@ -484,6 +485,7 @@ class ManagedGitRepositories(
             GitConfigurationAudit.requireManaged(runner, located.gitDir)
             val format = located.record.objectFormat
             val parent = commit?.let {
+                requireFormatObjectId(format, it)
                 if (!commitExists(runner, located.gitDir, it)) throw ManagedGitException("NOT_FOUND", "The commit is not in this repository.")
                 GitReads.firstParent(runner, located.gitDir, format, it)
             }
@@ -503,6 +505,16 @@ class ManagedGitRepositories(
         return reading {
             GitConfigurationAudit.requireManaged(runner, located.gitDir)
             located.record to GitReads.refsPage(runner, located.gitDir, located.record.objectFormat, skip, limit)
+        }
+    }
+
+    /**
+     * The HTTP layer admits either full width; only the repository's own format is an identity here. `cat-file -e`
+     * resolves a 40-hex prefix in a SHA-256 repository, so the width must be checked before the existence lookup.
+     */
+    private fun requireFormatObjectId(format: GitObjectFormat, objectId: String) {
+        if (format.objectIdOrNull(objectId) == null) {
+            throw ManagedGitException("VALIDATION_FAILED", "Object IDs must be full lowercase hexadecimal in this repository's object format; abbreviations are not accepted.")
         }
     }
 

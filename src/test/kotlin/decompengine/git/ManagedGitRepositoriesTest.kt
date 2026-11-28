@@ -1277,6 +1277,51 @@ class ManagedGitRepositoriesTest {
         assertTrue(validations.all { it.endsWith("\t524288\t524288") }, validations.toString())
         assertEquals(40, first.length)
     }
+    @Test fun `history and commit diff refuse object IDs outside the repository object format`() {
+        val (f, importRoot) = importFixture()
+        f.use {
+            val g = f.repositories
+            val wide = Files.createDirectories(importRoot.resolve("wide"))
+            g.git("init", "-q", "--initial-branch=wide", "--object-format=sha256", wide.toString())
+            Files.writeString(wide.resolve("file.c"), "int first;\n")
+            g.git("add", "-A", cwd = wide); g.git("commit", "-q", "-m", "first", cwd = wide)
+            val first = g.git("rev-parse", "HEAD", cwd = wide).trim()
+            Files.writeString(wide.resolve("file.c"), "int second;\n")
+            g.git("add", "-A", cwd = wide); g.git("commit", "-q", "-m", "second", cwd = wide)
+            val second = g.git("rev-parse", "HEAD", cwd = wide).trim()
+            assertEquals(64, second.length)
+            val service = f.open()
+            val imported = service.settle(service.request(jobId, GitRepositoryRequest.Attach("wide"), "format_wide_key_000001"))
+            assertEquals(GitOperationState.COMPLETED, imported.state, imported.message)
+            val prefix = second.take(40)
+            // The prefix names an existing commit to `cat-file -e`, so only the format width can refuse it.
+            assertEquals("commit", g.git("cat-file", "-t", prefix, cwd = wide).trim())
+            assertEquals("VALIDATION_FAILED", assertFailsWith<ManagedGitException> {
+                service.history(jobId, imported.repositoryId, prefix, 0, 1) }.code)
+            assertEquals("VALIDATION_FAILED", assertFailsWith<ManagedGitException> {
+                service.diff(jobId, imported.repositoryId, GitDiffScope.COMMIT, prefix, null) }.code)
+            val (origin, page) = service.history(jobId, imported.repositoryId, second, 0, 1)
+            assertEquals(second, origin); assertEquals(listOf(second), page.entries.map { it.objectId })
+            val diff = service.diff(jobId, imported.repositoryId, GitDiffScope.COMMIT, second, null)
+            assertEquals(second, diff.commit); assertEquals(first, diff.parent)
+            service.close()
+        }
+        Fixture().use { sha1 ->
+            val service = sha1.open()
+            val completed = service.settle(service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "format_sha1_key_000001"))
+            assertEquals(GitOperationState.COMPLETED, completed.state, completed.message)
+            val directory = sha1.repositoryDirectory(completed.repositoryId)
+            Files.writeString(directory.resolve("worktree/narrow.c"), "int narrow;\n")
+            val head = sha1.repositories.commitAll(directory.resolve("repository.git"), directory.resolve("worktree"), "narrow")
+            assertEquals(40, head.length)
+            val wide = head + "0".repeat(24)
+            assertEquals("VALIDATION_FAILED", assertFailsWith<ManagedGitException> {
+                service.history(jobId, completed.repositoryId, wide, 0, 1) }.code)
+            assertEquals("VALIDATION_FAILED", assertFailsWith<ManagedGitException> {
+                service.diff(jobId, completed.repositoryId, GitDiffScope.COMMIT, wide, null) }.code)
+            assertEquals(head, service.history(jobId, completed.repositoryId, head, 0, 1).first)
+        }
+    }
     @Test fun `commit diff resolves a bounded parent without materializing history subjects`(): Unit = Fixture().use { f ->
         val service = f.open()
         val admission = service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "diff_parent_request_0001")
