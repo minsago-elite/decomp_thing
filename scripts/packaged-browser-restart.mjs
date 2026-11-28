@@ -220,6 +220,7 @@ export const MAX_REPORT_PARTS = 16;
 const FAILURE_PREVIEW_BYTES = 16 * 1024;
 const FAILURE_RECORD_BYTES = 64 * 1024;
 const prettyJSON = value => JSON.stringify(value, null, 2) + '\n';
+const REQUIRED_REPORT_FACTS = new Set(['mode', 'exitCode', 'auditVerdict', 'gates', 'failures', 'budgetFailures', 'requestFailures']);
 
 /** Longest UTF-8 prefix of text within maxBytes, never splitting a character. */
 function utf8Prefix(text, maxBytes) {
@@ -249,14 +250,22 @@ function primaryReport(full, evidence, maxBytes) {
   const sizes = Object.entries(full).filter(([key, value]) => key !== 'status' && value !== undefined)
     .map(([key, value]) => [key, Buffer.from(JSON.stringify(value) ?? 'null', 'utf8')])
     .sort((a, b) => b[1].length - a[1].length);
+  // A reference is kept only when it shrinks the measured report, referencedKeys entry included (#1992).
   const reference = (keys, limit = maxBytes) => {
     for (const [key, bytes] of sizes) {
-      if (measure() <= limit) break;
+      const before = measure();
+      if (before <= limit) break;
       if (!keys(key)) continue;
+      const value = primary[key];
       primary[key] = { reportEvidence: key, bytes: bytes.length, sha256: sha256(bytes) };
       evidence.referencedKeys.push(key);
+      if (measure() < before) continue;
+      primary[key] = value;
+      evidence.referencedKeys.pop();
     }
   };
+  // Verdict, exit and cleanup facts stay inline; they are referenced only if nothing else can meet the bound.
+  const optional = key => typeof full[key] !== 'boolean' && !REQUIRED_REPORT_FACTS.has(key);
   if (Array.isArray(primary.cleanupErrors)) primary.cleanupErrors = [...primary.cleanupErrors];
   const diagnostics = largeDiagnostics(primary);
   const excerpted = new Set(diagnostics.map(diagnostic => diagnostic.key));
@@ -264,11 +273,12 @@ function primaryReport(full, evidence, maxBytes) {
   // markers barely fit still keeps a useful head and tail of each diagnostic (#1992).
   const reserve = Math.min(Math.floor(maxBytes / 4), diagnostics.reduce((sum, diagnostic) => sum + diagnostic.serializedBytes, 0));
   if (!diagnostics.length || !excerptDiagnostics(primary, diagnostics, maxBytes, measure,
-    () => reference(key => !excerpted.has(key), maxBytes - reserve))) {
+    () => reference(key => optional(key) && !excerpted.has(key), maxBytes - reserve))) {
     // No large diagnostics, or even marker-only excerpts cannot fit: reference the largest facts
     // of the unmodified report, as before excerpts existed. The parts remain lossless either way.
     primary = { ...full, reportEvidence: evidence };
     evidence.referencedKeys.length = 0;
+    reference(optional);
     reference(() => true);
   }
   const text = prettyJSON(primary);

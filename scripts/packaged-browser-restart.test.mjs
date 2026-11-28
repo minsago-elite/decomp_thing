@@ -240,6 +240,27 @@ test('reserves diagnostic excerpts before near-limit request evidence at the pro
   }
 });
 
+test('keeps a small-cap excerpt instead of referencing short facts with larger references', async () => {
+  const buildDirectory = join(process.cwd(), 'build');
+  await mkdir(buildDirectory, { recursive: true });
+  const directory = await mkdtemp(join(buildDirectory, 'small-cap-excerpt-'));
+  try {
+    const report = { status: 'failed', mode: 'audit', exitCode: 1, auditVerdict: 'failed', error: 'E'.repeat(4990) + ' DRIVER-END',
+      shutdownConfirmed: false, forcedShutdown: true, workRetained: true, workCleanupConfirmed: false, installationUnchanged: true };
+    await publishReport(directory, report, [], { maxBytes: 1200 });
+    const bytes = await readFile(join(directory, 'report.json'));
+    assert.ok(bytes.length <= 1200);
+    const parsed = JSON.parse(bytes);
+    assert.deepEqual(parsed.reportEvidence.referencedKeys, []);
+    for (const key of ['status', 'mode', 'exitCode', 'auditVerdict', 'shutdownConfirmed', 'forcedShutdown', 'workRetained',
+      'workCleanupConfirmed', 'installationUnchanged']) assert.equal(parsed[key], report[key], key);
+    assert.ok(parsed.diagnosticTruncation.error.retainedBytes > 0);
+    assert.ok(parsed.error.startsWith('E') && parsed.error.endsWith('DRIVER-END'));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('references large diagnostics when even their excerpt markers cannot fit the primary bound', async () => {
   const buildDirectory = join(process.cwd(), 'build');
   await mkdir(buildDirectory, { recursive: true });
