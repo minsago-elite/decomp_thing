@@ -267,6 +267,35 @@ it('exports the checked selected case page with exact identities comparisons and
   expect(saved.limitations.join(' ')).toContain('not a complete receipt');
 });
 
+it('exports exact stream byte totals above JavaScript safe integers with their retained provenance', () => {
+  for (const exact of ['9007199254740993', '9223372036854775807']) {
+    const report = reportFixture().data;
+    const cases = report.validationCases!;
+    const row = cases.items[0]!;
+    const hexLine = Array(16).fill('78').join(' ');
+    for (const side of ['originalStdout', 'rebuiltStdout', 'originalStderr', 'rebuiltStderr'] as const) {
+      row[`${side}Bytes`] = exact;
+      const preview = row[`${side}Preview`]!;
+      preview.totalBytes = exact;
+      preview.truncated = true;
+      preview.prefixBytes = 128;
+      preview.hex = Array(8).fill(hexLine).join('\n');
+      preview.text = 'x'.repeat(128);
+      preview.textBytes = 128;
+    }
+    const download = validationPageDownload(report, exportSelection());
+    if (!download) throw new Error('Exact byte totals were not exported');
+    const saved = savedValidation(download.href);
+    expect(saved.validationCases).toEqual(cases);
+    expect(saved.binding).toEqual(report.binding);
+    expect(saved.reportId).toBe(report.reportId);
+    for (const side of ['originalStdout', 'rebuiltStdout', 'originalStderr', 'rebuiltStderr'] as const) {
+      expect(saved.validationCases!.items[0]![`${side}Bytes`]).toBe(exact);
+      expect(saved.validationCases!.items[0]![`${side}Preview`]!.totalBytes).toBe(exact);
+    }
+  }
+});
+
 it('exports failed-operation producer reports losslessly without inventing case outcomes', () => {
   const report = failureReportFixture().data, failure = report.validationFailure!;
   const changed = { ...report, validationFailure: { ...failure, phase: 'post-execution' as const,

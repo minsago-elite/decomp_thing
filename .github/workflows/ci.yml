@@ -831,6 +831,22 @@ jobs:
           python3 -B scripts/ci-observe-host-mount-events.py stop
           --workspace "$GITHUB_WORKSPACE"
           --session "${{ github.run_id }}-${{ github.run_attempt }}-kotlin-${{ matrix.shard }}"
+      - name: Summarize host mount churn restart telemetry
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: >-
+          bash scripts/ci-summarize-host-mount-churn-restarts.sh
+          "build/acp-host-mount-churn-restarts/github-${{ github.run_id }}-${{ github.run_attempt }}"
+      - name: Retain per-run host mount churn restart counts
+        uses: actions/upload-artifact@v7
+        if: always()
+        continue-on-error: true
+        with:
+          name: kotlin-${{ matrix.shard }}-host-mount-churn-restarts-${{ github.run_attempt }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: build/acp-host-mount-churn-restarts/github-${{ github.run_id }}-${{ github.run_attempt }}/
       - name: Retain passive host mount diagnostics
         uses: actions/upload-artifact@v7
         if: always()

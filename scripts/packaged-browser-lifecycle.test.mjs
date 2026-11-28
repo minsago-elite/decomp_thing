@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
-import { assertDeletionAlert, createDeletionCapture, createDeletionInterception, interceptedResponse, DELETION_CAPTURE_WINDOW, DELETION_TRACE_LIMIT, INTERCEPTION_RECORD_LIMIT, LISTING_BUSY_RETRY_DELAYS_MS, readDeletionAcknowledgement, readListingMembership, verifyInterceptedDeletion, withResponseInterception } from './packaged-browser-lifecycle.mjs';
+import vm from 'node:vm';
+import { assertDeletionAlert, createDeletionCapture, createDeletionInterception, interceptedResponse, DELETION_CAPTURE_WINDOW, DELETION_TRACE_LIMIT, INTERCEPTION_RECORD_LIMIT, listed, listingBusyWaitsMs, readDeletionAcknowledgement, verifyInterceptedDeletion, withResponseInterception } from './packaged-browser-lifecycle.mjs';
 
 const jobId = 'c'.repeat(32);
 const operationId = 'jobdel_' + 'a'.repeat(32);
@@ -74,88 +75,6 @@ for (const [state, messages] of [
     assert.throws(() => assertDeletionAlert(ack(state), alert(...messages)), /exact state/);
   });
 }
-
-// Listing membership reads: only a bound 503 LISTING_BUSY admission refusal is transient.
-const member = 'e'.repeat(32);
-const listing = (ids, nextCursor = null) => ({ status: 200, requestId: null,
-  body: JSON.stringify({ data: { items: ids.map(jobId => ({ jobId })), page: { limit: 100, nextCursor } } }) });
-const refusal = (code, requestId = 'req-' + code, overrides = {}) => ({ status: 503, requestId,
-  body: JSON.stringify({ apiVersion: 1, kind: 'error', requestId, error: { code, message: code + ' fixture', retryable: false,
-    details: [], retryAfterMs: null }, ...overrides }) });
-function scripted(replies) {
-  const calls = { reads: 0, sleeps: [] };
-  const read = async () => {
-    const reply = replies[calls.reads++];
-    if (!reply) throw new Error('unexpected extra listing read ' + calls.reads);
-    return reply;
-  };
-  return { calls, read, options: { delays: [5, 10, 20], sleep: async ms => { calls.sleeps.push(ms); } } };
-}
-
-test('stable 200 listing reports exact membership with no retry', async () => {
-  for (const [ids, expected] of [[[member, jobId], true], [[jobId], false], [[], false]]) {
-    const { calls, read, options } = scripted([listing(ids)]);
-    const result = await readListingMembership(read, member, options);
-    assert.deepEqual(result, { listed: expected, busy: [] });
-    assert.deepEqual(calls, { reads: 1, sleeps: [] });
-  }
-});
-
-test('membership succeeds after a transient bound LISTING_BUSY refusal', async () => {
-  const { calls, read, options } = scripted([refusal('LISTING_BUSY', 'busy-1'), refusal('LISTING_BUSY', 'busy-2'), listing([member])]);
-  const result = await readListingMembership(read, member, options);
-  assert.equal(result.listed, true);
-  assert.deepEqual(result.busy.map(entry => entry.requestId), ['busy-1', 'busy-2']);
-  assert.deepEqual(calls, { reads: 3, sleeps: [5, 10] });
-});
-
-test('persistent LISTING_BUSY stops at the bound with attempt diagnostics', async () => {
-  const replies = [1, 2, 3, 4].map(index => refusal('LISTING_BUSY', 'busy-' + index));
-  const { calls, read, options } = scripted([...replies, listing([member])]);
-  await assert.rejects(readListingMembership(read, member, options), error => {
-    assert.match(error.message, /LISTING_BUSY persisted for 4 reads/);
-    for (const index of [1, 2, 3, 4]) assert.match(error.message, new RegExp('busy-' + index));
-    assert.equal(error.busy.length, 4);
-    return true;
-  });
-  assert.deepEqual(calls, { reads: 4, sleeps: [5, 10, 20] });
-});
-
-for (const [label, reply] of Object.entries({
-  'another 503 code': refusal('LISTING_LIMIT'),
-  'a 503 JOB_STORAGE_UNAVAILABLE': refusal('JOB_STORAGE_UNAVAILABLE'),
-  'a 503 without a request id header': refusal('LISTING_BUSY', null),
-  'a 503 bound to a different request id': { ...refusal('LISTING_BUSY', 'header-id'), body: refusal('LISTING_BUSY', 'body-id').body },
-  'a 503 that is not an error envelope': refusal('LISTING_BUSY', 'req', { kind: 'data' }),
-  'a 503 with an unknown API version': refusal('LISTING_BUSY', 'req', { apiVersion: 2 }),
-  'a 503 with a non-JSON body': { status: 503, requestId: 'req', body: 'Service Unavailable' },
-  'a 503 with an empty body': { status: 503, requestId: 'req', body: '' },
-  'a 500 LISTING_BUSY body': { ...refusal('LISTING_BUSY'), status: 500 },
-  'a 401 refusal': { ...refusal('SESSION_REQUIRED'), status: 401 },
-  'a malformed 200 body': { status: 200, requestId: null, body: '{"data":' },
-  'a 200 without items': { status: 200, requestId: null, body: JSON.stringify({ data: { page: { nextCursor: null } } }) },
-  'a 200 with an unidentified row': { status: 200, requestId: null, body: JSON.stringify({ data: { items: [{}], page: { nextCursor: null } } }) },
-  'a 200 with a further page': listing([jobId], 'next'),
-})) {
-  test('fails immediately without retry on ' + label, async () => {
-    const { calls, read, options } = scripted([reply, listing([member])]);
-    await assert.rejects(readListingMembership(read, member, options), /job listing/);
-    assert.deepEqual(calls, { reads: 1, sleeps: [] });
-  });
-}
-
-test('a failed read transport is honoured, not retried', async () => {
-  const { calls, options } = scripted([]);
-  const read = async () => { calls.reads++; throw new Error('Browser expression failed: network'); };
-  await assert.rejects(readListingMembership(read, member, options), /network/);
-  assert.deepEqual(calls, { reads: 1, sleeps: [] });
-});
-
-test('the default retry bound is small and finite', () => {
-  assert.ok(LISTING_BUSY_RETRY_DELAYS_MS.length > 0 && LISTING_BUSY_RETRY_DELAYS_MS.length <= 6);
-  assert.ok(LISTING_BUSY_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0) <= 8_000);
-  assert.ok(Object.isFrozen(LISTING_BUSY_RETRY_DELAYS_MS));
-});
 
 // #1891/#512: Network is a bounded event and identity observer only. It never reads a body, in
 // any event order; the single body read belongs to the Fetch response stage.
@@ -354,4 +273,123 @@ for (const [label, options, pattern] of [
 }
 test('the cross-check refuses a missing interception', async () => {
   await assert.rejects(verifyInterceptedDeletion({ intercepted: undefined, observed: {}, requestId: 'n1', jobId, jobApiUrl: url }), /No DELETE was paused/);
+});
+
+// Fake evaluate: run the generated browser function against a scripted fetch, recording every wait.
+function listingBrowser(responses) {
+  const requests = []; const waits = [];
+  const reply = ({ status, body, headers = {} }) => ({
+    status,
+    headers: { get: name => Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1] ?? null },
+    text: async () => typeof body === 'string' ? body : JSON.stringify(body),
+    json: async () => typeof body === 'string' ? JSON.parse(body) : body,
+  });
+  const context = {
+    fetch: async url => {
+      requests.push(url);
+      assert.ok(responses.length, 'unexpected extra listing request');
+      const next = responses.shift();
+      if (next instanceof Error) throw next;
+      return reply(next);
+    },
+    setTimeout: (resolve, ms) => { waits.push(ms); resolve(); },
+  };
+  return { requests, waits, evaluate: async (tab, expression) => { assert.equal(tab, 'tab'); return vm.runInNewContext(expression, context); } };
+}
+const busyRequestId = '9ea205a7-2652-4da6-9a84-47bef7611978';
+const envelope = (code, message = 'fixture', requestId = busyRequestId) => ({ apiVersion: 1, kind: 'error', requestId,
+  error: { code, message, retryable: false, details: [], retryAfterMs: null } });
+// A refusal bound to its own X-Request-ID, as the server sends it.
+const bound = (code, requestId = busyRequestId, extra = {}) => ({ status: 503, body: envelope(code, code + ' fixture', requestId),
+  headers: { 'X-Request-ID': requestId, ...extra } });
+const busy = bound('LISTING_BUSY');
+const page200 = (ids, nextCursor = null) => ({ status: 200, body: { data: { items: ids.map(jobId => ({ jobId })), page: { limit: 100, nextCursor } } } });
+const id = 'a'.repeat(32);
+
+test('job listing retries LISTING_BUSY with increasing waits and returns the listed result', async () => {
+  const browser = listingBrowser([bound('LISTING_BUSY', 'busy-1'), bound('LISTING_BUSY', 'busy-2'), page200(['b'.repeat(32), id])]);
+  const evidence = [];
+  assert.equal(await listed('tab', browser.evaluate, id, 'only', evidence), true);
+  assert.deepEqual(browser.requests, Array(3).fill('/nested/api/v1/jobs?limit=100&archived=only'));
+  assert.deepEqual(browser.waits, [100, 200]);
+  assert.deepEqual(evidence, [{ archived: 'only', attempt: 1, requestId: 'busy-1' }, { archived: 'only', attempt: 2, requestId: 'busy-2' }]);
+  const absent = listingBrowser([busy, page200(['b'.repeat(32)])]);
+  assert.equal(await listed('tab', absent.evaluate, id, ''), false);
+  assert.deepEqual(absent.requests, Array(2).fill('/nested/api/v1/jobs?limit=100'));
+});
+
+test('stable 200 listing reports exact membership with no retry', async () => {
+  for (const [ids, expected] of [[[id, jobId], true], [[jobId], false], [[], false]]) {
+    const browser = listingBrowser([page200(ids)]);
+    const evidence = [];
+    assert.equal(await listed('tab', browser.evaluate, id, 'all', evidence), expected);
+    assert.equal(browser.requests.length, 1);
+    assert.deepEqual(browser.waits, []);
+    assert.deepEqual(evidence, []);
+  }
+});
+
+test('job listing honours Retry-After only up to its own wait', async () => {
+  const browser = listingBrowser([bound('LISTING_BUSY', busyRequestId, { 'Retry-After': '0' }),
+    bound('LISTING_BUSY', busyRequestId, { 'retry-after': '30' }), page200([id])]);
+  assert.equal(await listed('tab', browser.evaluate, id, ''), true);
+  assert.deepEqual(browser.waits, [0, 200]);
+});
+
+test('job listing fails at once for any other status or 503 code', async () => {
+  for (const response of [bound('LISTING_LIMIT'), bound('JOB_RECORD_UNAVAILABLE'), bound('JOB_STORAGE_UNAVAILABLE'),
+    { status: 503, body: 'not json' }, { status: 503, body: '' }, { status: 503, body: { kind: 'other', error: { code: 'LISTING_BUSY' } } },
+    { ...bound('LISTING_BUSY'), status: 429 }, { ...bound('LISTING_BUSY'), status: 500 }, { ...bound('SESSION_REQUIRED'), status: 401 },
+    { status: 500, body: envelope('INTERNAL') }]) {
+    const browser = listingBrowser([response, page200([id])]);
+    const code = response.body?.kind === 'error' ? response.body.error.code : null;
+    await assert.rejects(async () => listed('tab', browser.evaluate, id, ''),
+      { message: `job listing failed after 1 attempt(s): status=${response.status} code=${code}` });
+    assert.equal(browser.requests.length, 1);
+    assert.deepEqual(browser.waits, []);
+  }
+});
+
+test('job listing refuses a LISTING_BUSY that is not bound to its own X-Request-ID', async () => {
+  for (const response of [
+    { status: 503, body: envelope('LISTING_BUSY') },
+    { ...bound('LISTING_BUSY', 'header-id'), body: envelope('LISTING_BUSY', 'fixture', 'body-id') },
+    { ...bound('LISTING_BUSY'), body: { ...envelope('LISTING_BUSY'), apiVersion: 2 } },
+  ]) {
+    const browser = listingBrowser([response, page200([id])]);
+    await assert.rejects(async () => listed('tab', browser.evaluate, id, ''),
+      { message: 'job listing failed after 1 attempt(s): status=503 code=LISTING_BUSY is not bound to its own X-Request-ID' });
+    assert.equal(browser.requests.length, 1);
+    assert.deepEqual(browser.waits, []);
+  }
+});
+
+test('job listing reads membership only from one complete identified page', async () => {
+  for (const [response, reason] of [
+    [{ status: 200, body: '{"data":' }, '200 body has no identified items'],
+    [{ status: 200, body: { data: { page: { nextCursor: null } } } }, '200 body has no identified items'],
+    [{ status: 200, body: { data: { items: [{}], page: { nextCursor: null } } } }, '200 body has no identified items'],
+    [{ status: 200, body: { data: { items: [{ jobId: id }] } } }, '200 body is not one complete page'],
+    [page200([jobId], 'next'), '200 body is not one complete page'],
+  ]) {
+    const browser = listingBrowser([response, page200([id])]);
+    await assert.rejects(async () => listed('tab', browser.evaluate, id, ''), { message: 'job listing failed after 1 attempt(s): ' + reason });
+    assert.equal(browser.requests.length, 1);
+  }
+});
+
+test('a failed listing transport is honoured, not retried', async () => {
+  const browser = listingBrowser([new Error('network'), page200([id])]);
+  await assert.rejects(async () => listed('tab', browser.evaluate, id, ''), /network/);
+  assert.equal(browser.requests.length, 1);
+  assert.deepEqual(browser.waits, []);
+});
+
+test('job listing gives up after five LISTING_BUSY responses in a row', async () => {
+  const browser = listingBrowser([1, 2, 3, 4, 5].map(index => bound('LISTING_BUSY', 'busy-' + index)).concat([page200([id])]));
+  await assert.rejects(async () => listed('tab', browser.evaluate, id, ''),
+    { message: 'job listing failed after 5 attempt(s): status=503 code=LISTING_BUSY; LISTING_BUSY request ids: busy-1, busy-2, busy-3, busy-4' });
+  assert.equal(browser.requests.length, 5);
+  assert.deepEqual(browser.waits, listingBusyWaitsMs);
+  assert.deepEqual(listingBusyWaitsMs, [100, 200, 400, 800]);
 });

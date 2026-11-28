@@ -231,7 +231,8 @@ it('rejects unknown or authority-changing failure projections through the real d
   for (const mismatch of ['future', 'available', 'numeric', 'authority', 'acceptance-artifact'] as const) {
     const value = report(); value.state = 'partial'; value.producerSchemaVersion = 1;
     if (mismatch !== 'numeric') value.summary = null;
-    if (mismatch === 'future') value.producerSchemaVersion = 2;
+    // Version two is a recognized partial producer; an unrecognized future version is still rejected.
+    if (mismatch === 'future') value.producerSchemaVersion = 3;
     else if (mismatch === 'available') value.state = 'available';
     else if (mismatch === 'authority') value.authority = 'canonical-validation';
     else if (mismatch === 'acceptance-artifact') value.acceptanceArtifactId = 'artifact_claim';

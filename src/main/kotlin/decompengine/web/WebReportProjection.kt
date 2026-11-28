@@ -19,20 +19,28 @@ internal object WebReportProjection {
 
     fun limit(progress: Boolean): Long = if (progress) AgentProgressJournal.MAXIMUM_READ_BYTES.toLong() else MAXIMUM_REPORT_BYTES
 
+    /**
+     * Nesting bound of the projection parser. Report classifiers that decide `available` parse with the same bound,
+     * so a structurally checked report never fails projection for depth alone.
+     */
+    const val MAXIMUM_REPORT_DEPTH = 32
+
+    /** Parser bounds of the projection for a report of at most [maximumBytes]. */
+    fun reportLimits(maximumBytes: Int) = decompengine.oracle.core.StrictJsonLimits(
+        maximumInputBytes = maximumBytes,
+        maximumCanonicalBytes = maximumBytes,
+        maximumDepth = MAXIMUM_REPORT_DEPTH,
+        maximumNodes = 100_000,
+        maximumStringBytes = minOf(1024 * 1024, maximumBytes),
+        maximumTotalStringBytes = maximumBytes,
+    )
+
     /** Progress journals are replayed to their display snapshot first; every report then passes the strict, bounded JSON redaction boundary. */
     fun project(progress: Boolean, bytes: ByteArray, policy: WebRedactionPolicy): ByteArray {
         return try {
             val maximumBytes = limit(progress).toInt()
             require(bytes.size <= maximumBytes) { "report exceeds its projection limit" }
-            val limits = decompengine.oracle.core.StrictJsonLimits(
-                maximumInputBytes = maximumBytes,
-                maximumCanonicalBytes = maximumBytes,
-                maximumDepth = 32,
-                maximumNodes = 100_000,
-                maximumStringBytes = minOf(1024 * 1024, maximumBytes),
-                maximumTotalStringBytes = maximumBytes,
-            )
-            policy.reportDocument(if (progress) progressJournalProjection(bytes) else bytes, limits)
+            policy.reportDocument(if (progress) progressJournalProjection(bytes) else bytes, reportLimits(maximumBytes))
         } catch (failure: Exception) {
             if (failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
             webArtifactProjectionUnavailable()
