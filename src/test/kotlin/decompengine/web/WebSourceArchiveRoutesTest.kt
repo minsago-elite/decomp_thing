@@ -74,9 +74,7 @@ class WebSourceArchiveRoutesTest {
         } finally {
             // Audited responses are followed by an fsync'd append on the request thread; let admitted handlers
             // finish before the server's bounded one-second request drain so slow storage cannot fail the stop.
-            val idle = System.nanoTime() + 30_000_000_000
-            while (server.activeRequestCount() != 0 && System.nanoTime() < idle) Thread.sleep(10)
-            server.stop(); root.toFile().deleteRecursively()
+            server.stopWhenIdle(); root.toFile().deleteRecursively()
         }
     }
 

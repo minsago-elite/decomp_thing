@@ -187,7 +187,7 @@ class WebLegacyMigrationTest {
 
     private class Server(val server: UploadServer, val executions: AtomicInteger) : AutoCloseable {
         val origin get() = "http://127.0.0.1:${server.serverPort}"
-        override fun close() = server.stop()
+        override fun close() = server.stopWhenIdle()
     }
 
     private fun start(mode: WebUiMode, data: Path = root): Server {
@@ -269,6 +269,7 @@ class WebLegacyMigrationTest {
             start(mode).use { server ->
                 val upgraded = storageDigest()
                 sweep(server, mode, fixture)
+                server.server.awaitRequestsIdle() // An in-flight session audit append holds the loss marker at "1".
                 assertStorageKept(upgraded, storageDigest(), "opening legacy links changed stored bytes in $mode")
             }
         }

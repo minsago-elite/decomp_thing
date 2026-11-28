@@ -155,7 +155,7 @@ class WebRouteMatrixTest {
         assertTrue(documented.size >= 40, "the documented route table was not found or parsed: ${documented.size}")
         val stale = live.keys - documented.map { it.template }.toSet()
         assertTrue(stale.isEmpty(), "live matrix entries are not documented in docs/web-api.md: $stale")
-        val before = storageDigest()
+        val before = storageDigest(server)
         val session = signIn(server)
 
         for (route in documented) {
@@ -262,7 +262,7 @@ class WebRouteMatrixTest {
         stream.body().close()
         assertEquals(200, stream.statusCode())
         assertEquals("text/event-stream; charset=utf-8", stream.headers().firstValue("Content-Type").orElse(null))
-        assertStorageUnchanged(before, "matrix probes must not change stored job bytes")
+        assertStorageUnchanged(server, before, "matrix probes must not change stored job bytes")
     }
 
     @Test
@@ -343,7 +343,7 @@ class WebRouteMatrixTest {
         )
         val manifest = Json.parseToJsonElement(Files.readString(Path.of("contracts/web/v1/fixtures.json"))).jsonObject
         var exercised = 0
-        val before = storageDigest()
+        val before = storageDigest(server)
         for (entry in manifest.getValue("fixtures").let { it as kotlinx.serialization.json.JsonArray }) {
             val file = entry.jsonObject.getValue("file").jsonPrimitive.content
             val document = Json.parseToJsonElement(Files.readString(Path.of("contracts/web/v1").resolve(file))).jsonObject
@@ -381,7 +381,7 @@ class WebRouteMatrixTest {
                 413, "BODY_TOO_LARGE", "$method $path oversized body")
         }
         // Agent preflight leaves storage untouched; the inert inspector only fails its own snapshot.
-        assertStorageUnchanged(before, "refused contract inputs must not change stored job bytes")
+        assertStorageUnchanged(server, before, "refused contract inputs must not change stored job bytes")
     }
 
     // ---- fixture, transport and contract helpers ----
@@ -437,7 +437,7 @@ class WebRouteMatrixTest {
                 .getValue("sourceArtifact").jsonObject.getValue("contentHref").jsonPrimitive.content
             val artifactId = href.substringAfter("/artifacts/").substringBefore('/')
             block(server, Fixture(job.id, runId, artifactId))
-        } finally { upload.stop() }
+        } finally { upload.stopWhenIdle() }
     }
 
     private fun signIn(server: Server): Session {
@@ -502,12 +502,16 @@ class WebRouteMatrixTest {
     private fun HttpResponse<ByteArray>.header(name: String): String? = headers().firstValue(name).orElse(null)
     private fun HttpResponse<ByteArray>.text(): String = body().decodeToString()
 
-    private fun storageDigest(): Map<String, String> = Files.walk(root).use { paths ->
-        paths.filter(Files::isRegularFile).toList().associate { file ->
-            val relative = root.relativize(file).toString()
-            // The append-only audit segment is kept as text so probes can be checked to only append to it.
-            relative to if (relative == AUDIT_SEGMENT) Files.readString(file)
-                else MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(file)).joinToString("") { "%02x".format(it) }
+    /** Snapshots only after admitted handlers finish, so an in-flight audit append's loss marker is not caught. */
+    private fun storageDigest(server: Server): Map<String, String> {
+        server.upload.awaitRequestsIdle()
+        return Files.walk(root).use { paths ->
+            paths.filter(Files::isRegularFile).toList().associate { file ->
+                val relative = root.relativize(file).toString()
+                // The append-only audit segment is kept as text so probes can be checked to only append to it.
+                relative to if (relative == AUDIT_SEGMENT) Files.readString(file)
+                    else MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(file)).joinToString("") { "%02x".format(it) }
+            }
         }
     }
 
@@ -515,8 +519,8 @@ class WebRouteMatrixTest {
      * Refused and accepted sensitive requests are durably audited (#521), so the audit segment may only gain
      * appended entries. Every other stored byte, including the audit loss marker, must be unchanged.
      */
-    private fun assertStorageUnchanged(before: Map<String, String>, message: String) {
-        val after = storageDigest()
+    private fun assertStorageUnchanged(server: Server, before: Map<String, String>, message: String) {
+        val after = storageDigest(server)
         assertEquals(before - AUDIT_SEGMENT, after - AUDIT_SEGMENT, message)
         before[AUDIT_SEGMENT]?.let { prior ->
             assertTrue(after[AUDIT_SEGMENT]?.startsWith(prior) == true, "$message: audit history was rewritten")
